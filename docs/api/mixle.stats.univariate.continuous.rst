@@ -11,6 +11,8 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   mixle.stats.univariate.continuous._gaussian_contracts
+   mixle.stats.univariate.continuous._observation_contracts
    mixle.stats.univariate.continuous.beta
    mixle.stats.univariate.continuous.exgaussian
    mixle.stats.univariate.continuous.exponential

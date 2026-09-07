@@ -99,15 +99,30 @@ def build_records(n_per_shape: int, seed: int, *, ambiguous_fraction: float = 0.
 # --- structured claims via solve_structured ----------------------------------------------------------
 
 
-def claim_teacher(record: tuple[float, ...]) -> dict[str, Any]:
-    """The rigid rule this demo distills: whichever half is brighter wins blob_left/blob_right, unless
-    the patches are too uniform to localize a blob at all (small spread) -- then it's a stripe. This
-    stands in for "whatever currently produces claims" (a rule, a bigger model, a human annotator) that
-    ``solve_structured`` turns into per-field calibrated local students."""
+# A stripe brightens the four octants of one half equally, a blob concentrates in one (or, when it
+# straddles an octant boundary, two) of them: the spread among the four brightest octants separates
+# the two. A whole blob lifts its octant by 8 / 64 = 0.125, a straddling one by 0.0625 each, a stripe
+# by 0.15 in all four, and the octant-mean noise is 0.05 / 8, so the boundary sits well between.
+_STRIPE_TOP4_SPREAD = 0.04
+
+
+def _shape_features(record: tuple[float, ...]) -> tuple[float, float]:
+    """``(left - right, spread of the four brightest octants)``: the two numbers the shape claim is
+    decided from, shared by the teacher and the candidate scorer so that the scorer's top candidate is
+    the teacher's label and the selective-risk gate has a real margin to certify."""
     left = sum(record[:4]) / 4
     right = sum(record[4:]) / 4
-    spread = max(record) - min(record)
-    shape = "stripe" if spread < 0.15 else ("blob_left" if left > right else "blob_right")
+    top4 = sorted(record)[-4:]
+    return left - right, top4[-1] - top4[0]
+
+
+def claim_teacher(record: tuple[float, ...]) -> dict[str, Any]:
+    """The rigid rule this demo distills: a volume whose four brightest patches are equally bright is a
+    stripe (a plane spans a whole half); otherwise whichever half is brighter wins blob_left/blob_right.
+    This stands in for "whatever currently produces claims" (a rule, a bigger model, a human annotator)
+    that ``solve_structured`` turns into per-field calibrated local students."""
+    lr, top4_spread = _shape_features(record)
+    shape = "stripe" if top4_spread < _STRIPE_TOP4_SPREAD else ("blob_left" if lr > 0 else "blob_right")
     brightness = sum(record) / len(record)
     return {"shape": shape, "brightness": brightness}
 
@@ -135,19 +150,22 @@ def _generate_shape_candidates(record: tuple[float, ...], k: int, rng=None) -> l
 
 
 def _score_shape_candidate(candidate: tuple[tuple[float, ...], str]) -> float:
-    """How well ``label`` matches ``record``'s patch pattern -- a pure function of the candidate, with a
-    little deterministic jitter so ties don't collapse identically (mirrors the calibrated-generator test)."""
+    """How well ``label`` matches ``record``'s patch pattern: the margin by which the teacher's rule
+    decides for ``label`` (positive exactly when the teacher would say it) -- a pure function of the
+    candidate, with a little deterministic jitter so ties don't collapse identically (mirrors the
+    calibrated-generator test). A faint (ambiguous) volume sits near zero on every label, which is
+    what the calibrated gate is there to abstain on."""
     record, label = candidate
-    left = sum(record[:4]) / 4
-    right = sum(record[4:]) / 4
-    spread = max(record) - min(record)
+    lr, top4_spread = _shape_features(record)
     if label == "blob_left":
-        base = left - right
+        base = min(top4_spread - _STRIPE_TOP4_SPREAD, lr)
     elif label == "blob_right":
-        base = right - left
+        base = min(top4_spread - _STRIPE_TOP4_SPREAD, -lr)
     else:
-        base = -spread
-    return base + _stable_unit(candidate) * 0.05
+        base = _STRIPE_TOP4_SPREAD - top4_spread
+    # jitter of the scorer's own size: a clear volume's margin (0.06 and up for a blob, about 0.03
+    # for a stripe) survives it, a faint one's (under 0.01) does not, which is what the gate learns
+    return base + _stable_unit(candidate) * 0.02
 
 
 def build_shape_gate(cal_records: list[tuple[float, ...]], *, alpha: float = 0.1, seed: int = 0) -> CalibratedGenerator:
@@ -265,14 +283,19 @@ def consistency_check(records: list[tuple[float, ...]]) -> str:
 
 def main() -> None:
     train_records = build_records(n_per_shape=120, seed=0)
-    cal_records = build_records(n_per_shape=120, seed=1)
+    # calibrated on the same mix of clear and faint volumes it will serve: the certificate assumes
+    # calibration records and traffic are draws from one distribution (see build_shape_gate)
+    cal_records = build_records(n_per_shape=120, seed=1, ambiguous_fraction=0.5)
 
     print("structured claims: distilling solve_structured over (shape, brightness)")
     structured = solve_structured(claim_teacher, train_records, tol={"brightness": 0.08}, alpha=0.1, seed=0, epochs=200)
     print(f"   schema: {structured.schema}")
 
     print("\nper-claim gate: calibrating CalibratedGenerator for the shape claim")
-    shape_gate = build_shape_gate(cal_records, alpha=0.1, seed=0)
+    # alpha=0.05: at 0.1 the scorer's error rate on this mix (faint volumes flip about one time in
+    # five) already sits under the target and the gate serves everything; at 0.05 it must abstain on
+    # the low-margin (faint) volumes to certify, which is the behaviour this demo is about
+    shape_gate = build_shape_gate(cal_records, alpha=0.05, seed=0)
 
     print("\nserving reports for a mix of clear and ambiguous volumes")
     probe_records = build_records(n_per_shape=40, seed=2, ambiguous_fraction=0.5)

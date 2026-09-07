@@ -1,0 +1,122 @@
+[
+  {
+    "id": "P04-F01",
+    "severity": "blocking",
+    "title": "Constrained derivative-free MAP returns its starting point (constant grand-mean vector) and reports 'constrained optimum reached' whenever the Powell optimum is a hair infeasible on several tied constraints (increasing d>=10 with multiple pooled blocks, convex d>=7, concave d>=6)",
+    "surface": "RandomVariable.fit(data, how='map'|'auto', constraints=[increasing(v)|decreasing(v)|convex(v)|concave(v)]) -> mixle.ppl.inference.map_fit -> _derivative_free_constrained (inference.py 1477-1541) -> _repair_feasibility anchor fallback (inference.py 1470-1473)",
+    "reproduction": "cd /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-04 && /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python repro_F01.py   # self-contained: builds DiagGaussian(d, mean=free(d,name='v'), var=fixed) on 200 rows/column with column means (a) RandomState(101).permutation(10)*0.3 and constraints=[increasing(v)], (b) 0,2,1,3,4,...,9 and constraints=[convex(v)], fits how='map', rng=RandomState(1), prints fit vs hand PAV / SLSQP convex-regression target and the NLL gap. Broader sweep: attackA_isotonic.py (d=1..20) and attackD_sweep.py (d=6..15, random permutations at d=10,20). Mechanism trace: repro_convex10.py (wraps scipy.optimize.minimize to print every Powell/Nelder-Mead call).",
+    "expected": "The constrained MAP = isotonic (PAV) / convex-regression projection of the column means, e.g. increasing d=10 -> [1.032 x3, 1.168, 1.534 x6]; convex d=10 -> [0.456, 1.095, 1.734, 2.787, ..., 9.109]; or an exception if the optimizer cannot get there.",
+    "observed": "increasing d=10: fitted mean [1.347]*10 (= grand mean = start u0), max|err| 0.315, 221 nats worse than PAV. convex d=10: [4.492]*9+[4.497], max|err| 4.61, 34,222 nats worse. Same for increasing d=20 random perms (8,708 / 3,613 nats), convex d=7,8,12,15,20 (incl. d=20 interior case where the constraint is inactive: returns constant 19.01 vs target 0.03..38.0), concave d=6..15. Fit returns normally, explain_fit route='map', no warning. Trace: the Powell ramp converges to within 0.02 of the target, then _repair_feasibility's normals step fails on overlapping tied constraints, its segment-to-anchor fallback returns t=1 (the anchor u0 lies ON the shape-constraint boundary so every t<1 stays infeasible), Nelder-Mead polish from u0 cannot move against the wall, and _derivative_free_constrained returns (u0, ..., True, 'constrained optimum reached').",
+    "notes": "This is the defect class the 0.8.1 CHANGELOG entry 'Constrained derivative-free MAP fits ... no longer ... report convergence at a nearly constant vector far from the constrained optimum' claims fixed; the fix holds for the tutorial's 5-D data (verified: executed tutorial prints [0.01 1.44 1.44 3.06 3.99]) and low d, and fails for the notebooks' own recipe at >=8-10 positions with more than one pooled block. d=1,2,5 all constraints, d=10/20 increasing with one adjacent swap, and lipschitz d=6..15 are correct. A check that the repaired/polished point is no worse than the ramp's final iterate would catch every case."
+  },
+  {
+    "id": "P04-F02",
+    "severity": "real",
+    "title": "Constrained MAP path never checks Powell convergence: max_iter=1 returns a wrong point as a success while the unconstrained path raises",
+    "surface": "mixle.ppl.inference._derivative_free_constrained (inference.py 1503-1516 ignores penalized.success); map_fit derivative-free branch",
+    "reproduction": "python -c \"import numpy as np; from mixle.ppl import DiagGaussian, free, increasing, Normal; r=np.random.RandomState(0); X=np.stack([r.normal(l,0.5,300) for l in [0,2,1,3,4]],axis=1).tolist(); v=free(5,name='v'); f=DiagGaussian(5,mean=v,var=np.full(5,.25)).fit(X,how='map',constraints=[increasing(v)],max_iter=1,rng=np.random.RandomState(0)); print(np.round(f.params['mean'],3)); Normal(Normal(0,10,name='mu'),free).fit(list(r.normal(5,2,400)),how='map',max_iter=1)\"   (see also attackB.log 'max_iter=1 (kw)', attackE 'constrained map max_iter=1')",
+    "expected": "Either a RuntimeError naming max_iter (as the unconstrained L-BFGS and no-torch Nelder-Mead paths raise) or a non-success flag; the PAV answer is [0.014, 1.44, 1.44, 3.059, 3.992].",
+    "observed": "Constrained call returns [0.014, 1.191, 1.191, 3.059, 3.992] with no error or warning; the unconstrained call raises 'RuntimeError: MAP optimization failed: STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT'.",
+    "notes": "Combined with P04-F01, the 'success' flag on the constrained path carries no information; the CHANGELOG's 'Failure messages name max_iter' is moot when budget exhaustion is not detected."
+  },
+  {
+    "id": "P04-F03",
+    "severity": "real",
+    "title": "Constrained MAP whose optimum is a fully-tied corner (all coordinates pooled) stops 0.005-0.03 short of the pooled mean (2-3 standard errors, up to ~3 nats)",
+    "surface": "mixle.ppl.inference._derivative_free_constrained: Nelder-Mead polish against the 1e18 wall from a point where every constraint is active",
+    "reproduction": "cd /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-04 && <venv>/bin/python repro_decreasing5.py   # d=5, decreasing(v) on data with increasing column means 0,2,4,6,8 (sd 0.5, n=200/col, var fixed 0.25); optimum is the constant grand-mean vector. attackA.log rows scenario='interior', constraint='decreasing' for d=5 and d=10.",
+    "expected": "Constant vector at the grand mean to ~1e-6 (tol=1e-8 requested), e.g. 3.9774 / 4.0194 / 3.9761 for seeds 0/1/2; 9.0016 for d=10.",
+    "observed": "3.9829 / 4.0311 / 3.9813 (errors 0.0055-0.0117, 0.06-0.27 nats); d=10: 9.0301 vs 9.0016 (err 0.0285, ~3.3 nats, pooled-mean SE 0.011). Trace: the weight-1e9 Powell iterate is already off by this amount; the polish returns its start because every simplex vertex u+1e-3*e_k (k>=1) breaks a tie and hits the wall.",
+    "notes": "Small in absolute terms but systematic and growing with d, at exactly the configuration the constraint exists for."
+  },
+  {
+    "id": "P04-F04",
+    "severity": "real",
+    "title": "how='hmc' with an active hard constraint returns a degenerate 'posterior' (acceptance 0.0, all draws equal to the projected start, std 0) with no error; vector models raise a non-finite-gradient ValueError",
+    "surface": "mixle.ppl.inference.hmc_fit (inference.py 2123-2181) + mixle.inference.mcmc.samplers.hamiltonian_monte_carlo; RandomVariable.summary()",
+    "reproduction": "python -c \"import numpy as np; from mixle.ppl import Normal, free; dd=list(np.random.RandomState(0).normal(5,2,400)); mu=Normal(0,10,name='mu'); f=Normal(mu,free).fit(dd,how='hmc',draws=2000,burn=500,constraints=[mu>6],rng=np.random.RandomState(0)); print(f.summary()['mu'], f.result.acceptance_rate)\"   Vector case: attackG_hmc.py last block (DiagGaussian(5, mean=free(5,name='v'), var=0.25).fit(X, how='hmc', constraints=[increasing(v)])). Full comparison vs nuts/ensemble/mcmc and the truncated-normal reference: attackF_parallel_hmc.py.",
+    "expected": "Samples from the truncated posterior (reference truncated-normal mean 6.009, std 0.009; nuts gives 6.011/0.011, ensemble 6.012/0.012, mcmc 6.010/0.010) or a raised error.",
+    "observed": "Scalar: {'mean': 6.2353, 'std': 0.0, 'q2.5': 6.2353, 'q97.5': 6.2353, 'ess_bulk': nan, ...}, acceptance_rate 0.0, all 2000 draws identical to the _project_init point; same with chains=2 and with torch absent. Inactive constraints (mu>0, mu<100), penalty= (soft) and potentials sample normally (acc ~0.99). Vector: 'ValueError: grad_log_target returned non-finite values'.",
+    "notes": "posterior_summary(f) does flag diagnostic_status='unusable', so the release's diagnostics gate catches it if used; .summary() and .posterior() do not. The hmc_fit docstring only says ensemble/mcmc 'usually mixes better' for hard constraints."
+  },
+  {
+    "id": "P04-F05",
+    "severity": "real",
+    "title": "Every posterior-bearing PPL fit (conjugate, mcmc, hmc, nuts, ensemble, laplace, vi, vmp) is unpicklable; dump_models rejects RandomVariable outright; explain_fit docstring promises the record 'travels with the model through pickling'",
+    "surface": "pickle.dumps(RandomVariable bound by those fitters); mixle.stats.dump_models; local closures in inference._finalize/_finalize_chains/vi_fit/vmp_fit ('predictive') and _conj_normal_mean (lambda)",
+    "reproduction": "cd /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-04 && <venv>/bin/python repro_pickle.py ; plus: python -c \"import numpy as np; from mixle.ppl import Normal, free; from mixle.stats import dump_models; dd=list(np.random.RandomState(0).normal(5,2,400)); f=Normal(Normal(0,10,name='mu'),free).fit(dd,how='mcmc',draws=50,burn=20,rng=np.random.RandomState(0)); dump_models(f)\"",
+    "expected": "Fitted PPL models round-trip through pickle (per RandomVariable.explain_fit docstring, core.py ~2612) or through a documented mixle serializer, keeping the posterior and the fit record.",
+    "observed": "map/em/hierarchical fits pickle fine; conjugate -> AttributeError: Can't get local object '_conj_normal_mean.<locals>.<lambda>'; mcmc/hmc/nuts/laplace -> '_finalize.<locals>.predictive'; ensemble -> '_finalize_chains.<locals>.predictive'; vi -> 'vi_fit.<locals>.predictive'; vmp -> 'vmp_fit.<locals>.predictive'. dump_models(rv) -> SerializationError: objects of type mixle.ppl.core.RandomVariable are not JSON serializable by mixle (for every fit kind); dump_models(rv.dist) succeeds but keeps only the point distribution (posterior draws, summary, explanation dropped).",
+    "notes": "The same closures are why hmc_fit/mcmc_fit/nuts_fit force parallel=False with constraints ('closures do not survive process pickling')."
+  },
+  {
+    "id": "P04-F06",
+    "severity": "docs",
+    "title": "Shipped notebooks store outputs from the pre-fix collapsed optimizer: tutorial cell 22 shows [2. 2. 2. 2. 2.11] with a stale 'Nelder-Mead is sample-sensitive' comment; constrained_inference cell 13 shows the constrained fit 8.6x WORSE than the MLE under prose claiming it beats the MLE",
+    "surface": "notebooks/tutorials/probabilistic_programming.ipynb (cell 22 source comment + stored output); notebooks/data_science/constrained_inference.ipynb (cell 13 stored output, markdown 'Shape constraints as principled regularization')",
+    "reproduction": "Open the two shipped notebooks in the corpus copy and compare with /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-04/executed-1.ipynb (cell 22) and executed-2.ipynb (cell 13), produced by nbconvert --execute on the candidate.",
+    "expected": "Stored outputs match the candidate: tutorial 'increasing(v) : [0.01 1.44 1.44 3.06 3.99]'; constrained_inference 'unconstrained MLE: 0.100   increasing-constrained: 0.100'.",
+    "observed": "Stored tutorial output 'increasing(v) : [2.   2.   2.   2.   2.11] (monotone: True )' with source comment '# pinned: constrained 5-D Nelder-Mead MAP is sample-sensitive; this sample converges' and max_iter=20000; stored constrained_inference output 'RMSE to the true profile   unconstrained MLE: 0.100   increasing-constrained: 0.860'.",
+    "notes": "Both are exactly the symptom the 0.8.1 CHANGELOG says was fixed; the shipped corpus still documents the bug."
+  },
+  {
+    "id": "P04-F07",
+    "severity": "minor",
+    "title": "penalty=inf/nan and potentials returning nan/inf are accepted and fail with 'Optimization terminated successfully.. Raise max_iter' (wrong cause); the d=9 convex case fails with the same misattributed message",
+    "surface": "mixle.ppl.inference._soft_penalty (w>0 check passes inf/nan), _potential_term, map_fit derivative-free failure message (~inference.py 2513), walled Nelder-Mead fallback",
+    "reproduction": "python -c \"import numpy as np; from mixle.ppl import DiagGaussian, free, increasing; r=np.random.RandomState(0); X=np.stack([r.normal(l,0.5,300) for l in [0,2,1,3,4]],axis=1).tolist(); v=free(5,name='v'); DiagGaussian(5,mean=v,var=np.full(5,.25)).fit(X,how='map',constraints=[increasing(v)],penalty=float('inf'))\"  ; attackC.log 'potential returning nan'/'+inf'; attackD.log d=9 convex.",
+    "expected": "penalty validated finite (like tol/max_iter are); failure message naming the actual cause (non-finite objective / repair could not reach the feasible set).",
+    "observed": "RuntimeError: MAP optimization failed (nelder-mead): Optimization terminated successfully.. Raise max_iter (currently 5000) or loosen tol.",
+    "notes": ""
+  },
+  {
+    "id": "P04-F08",
+    "severity": "docs",
+    "title": "potential() docstring says every referenced RV must be a model parameter ('as with constraints'); a foreign RV is silently accepted and integrated as a new latent with its prior",
+    "surface": "mixle.ppl.core.potential docstring (core.py 887-911) vs mixle.ppl.inference._potential_latents (790) / _build_target extra_latents",
+    "reproduction": "python -c \"import numpy as np; from mixle.ppl import Normal, HalfNormal, potential; dd=list(np.random.RandomState(0).normal(5,2,400)); mu=Normal(0,10,name='mu'); sg=HalfNormal(5,name='sg'); zz=Normal(0,1,name='zz'); print(Normal(mu,sg).fit(dd,how='map',potentials=potential(lambda z: 0.0, zz)).params)\"   (a constraint on zz raises 'a constraint references an RV that is not a parameter of this model')",
+    "expected": "Per docstring: ValueError. Or the docstring documents that a potential may introduce auxiliary latents (which _potential_latents' private docstring says).",
+    "observed": "Returns {'mean': 4.94, 'sd': 1.98} with no error; zz becomes an extra slot.",
+    "notes": "Behaviour is defensible; the public contract contradicts it."
+  },
+  {
+    "id": "P04-F09",
+    "severity": "minor",
+    "title": "explain_fit() on a model fitted with how='auto' reports reason \"explicit how='map'\", losing the pre-fit auto-routing reason",
+    "surface": "RandomVariable.fit _stash_explanation (core.py ~2760-2790); RandomVariable.explain_fit bound branch",
+    "reproduction": "python -c \"import numpy as np; from mixle.ppl import DiagGaussian, free, increasing; r=np.random.RandomState(0); X=np.stack([r.normal(l,0.5,300) for l in [0,2,1,3,4]],axis=1).tolist(); v=free(5,name='v'); m=DiagGaussian(5,mean=v,var=np.full(5,.25)); print(m.explain_fit(constraints=[increasing(v)])); print(m.fit(X,how='auto',constraints=[increasing(v)]).explain_fit())\"",
+    "expected": "Bound record keeps 'constraints/potentials need the numerical joint -> MAP (a point estimate)' as the reason.",
+    "observed": "Pre-fit: {'route': 'map', 'reason': 'constraints/potentials need the numerical joint -> MAP (a point estimate)'}; post-fit: {'route': 'map', 'reason': \"explicit how='map' (requested how='auto'; resolved to 'map' by fit)\", 'route_requested': 'auto'}.",
+    "notes": "route and route_requested are correct; only the reason text is wrong."
+  },
+  {
+    "id": "P04-F10",
+    "severity": "minor",
+    "title": "summary()/params on an unfitted vector-parameter model raises 'ValueError: setting an array element with a sequence.' instead of the 'unresolved free parameters' message",
+    "surface": "RandomVariable.summary / params -> lower(target='dist') on DiagGaussian with a free(d) handle",
+    "reproduction": "python -c \"import numpy as np; from mixle.ppl import DiagGaussian, free; DiagGaussian(5, mean=free(5,name='v'), var=np.full(5,.25)).summary()\"   (compare: Normal(free, free).summary())",
+    "expected": "ValueError: DiagGaussian has unresolved `free` parameters; call .fit(data) first.",
+    "observed": "ValueError: setting an array element with a sequence.",
+    "notes": ""
+  },
+  {
+    "id": "P04-F11",
+    "severity": "minor",
+    "title": "Input-validation gaps: potentials='x' -> AttributeError; single-chain mcmc draws=1 accepted (std 0, acceptance 0.0, NaN diagnostics) while draws=1 chains=2 raises; rng= accepts only RandomState for samplers but predict() accepts ints/Generators",
+    "surface": "mixle.ppl.inference._potential_term / _sampler_controls / mcmc_fit; RandomVariable.predict",
+    "reproduction": "attackB.log entries 'mcmc draws=1', 'mcmc draws=1 chains=2', 'mcmc rng=int seed', 'mcmc rng=np.random.default_rng'; attackC.log \"potentials='notalist'\". E.g. python -c \"import numpy as np; from mixle.ppl import Normal, free; dd=list(np.random.RandomState(0).normal(5,2,400)); print(Normal(Normal(0,10,name='mu'),free).fit(dd,how='mcmc',draws=1,burn=0,rng=np.random.RandomState(0)).summary())\"",
+    "expected": "Consistent floors and type errors with actionable messages.",
+    "observed": "draws=1 returns {'mu': {'mean': 5.012, 'std': 0.0, ..., 'mcse': nan}, '_acceptance_rate': 0.0}; draws=1 chains=2 -> 'ValueError: split_rhat(): at least 4 draws per chain are required'; potentials='x' -> \"AttributeError: 'str' object has no attribute 'vars'\"; rng=0 -> 'TypeError: rng must be a numpy.random.RandomState'.",
+    "notes": ""
+  },
+  {
+    "id": "P04-F12",
+    "severity": "minor",
+    "title": "Grouped (.each()) constrained MAP reports optimizer.iterations = 0 for the derivative-free path",
+    "surface": "mixle.ppl.inference.map_fit grouped branch (grouped_nit = 0 hard-coded, inference.py ~2421); IndexedPosterior.summary()['optimizer']",
+    "reproduction": "python -c \"import numpy as np; from mixle.ppl import Normal, free; groups=[list(np.random.RandomState(k).normal(k-2,1.0,30)) for k in range(6)]; m=Normal(0,100,name='m'); th=Normal(m,3.0,name='th').each(); print(Normal(th,free).fit(groups,how='map',constraints=[m>3],rng=np.random.RandomState(0)).summary()['optimizer'])\"",
+    "expected": "A real iteration/evaluation count, or the key omitted.",
+    "observed": "{'algorithm': 'powell-penalty+nelder-mead', 'success': True, 'iterations': 0, 'message': 'constrained optimum reached', 'objective': 272.35} (the value m=3.000000000000088 itself is correct).",
+    "notes": ""
+  }
+]

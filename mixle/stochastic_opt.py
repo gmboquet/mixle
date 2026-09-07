@@ -284,6 +284,7 @@ def risk_adjusted_plan(
        ``"total"`` key) means zero liability, i.e. identical to :func:`two_stage_stochastic_plan`.
     2. ``constraints`` (typically :func:`mixle.analysis.objective.hard_constraints`'s output) adds hard
        constraints on top of the shared ``x_b in {0, 1}`` bounds:
+
        - ``"no_mine_mask"``: boolean array, ``True`` items are hard-fixed to ``x_b = 0`` (this module's
          mine-planning instantiation uses it for G9 no-mine/buffer zones; the mechanism itself is a
          general hard-exclusion mask) by tightening their variable bounds to ``(0, 0)`` — exact, not

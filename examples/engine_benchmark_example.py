@@ -11,6 +11,9 @@ model run on each engine in the table below, and each workload is parity-checked
 result before its timing is reported -- so the table compares equal work, and a speedup that came from
 silently doing something different would fail the check instead of appearing as a win.
 
+The fits are budgeted (a fixed ``max_its``) so the timings compare equal work; ``optimize`` reports the
+budget stop in a ``UserWarning`` on stderr, which is expected here, not a failure.
+
 The table reports current-run measurements without assuming which engine wins. Sizes scale with
 ``--scale`` so the crossover can be measured on the named hardware. Apple-silicon (MPS) runs float32
 (no float64 on MPS), so precision differs and must be reported with timing.

@@ -32,4 +32,5 @@ Submodules
    mixle.doe.propagate
    mixle.doe.robust
    mixle.doe.sensitivity
+   mixle.doe.sequential
    mixle.doe.trust_region

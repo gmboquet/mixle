@@ -40,7 +40,9 @@ CASES = [
     ("Uniform", UniformDistribution(-2.0, 3.0), UniformEstimator()),
     ("Poisson", PoissonDistribution(4.0), PoissonEstimator()),
     ("Geometric", GeometricDistribution(0.3), GeometricEstimator()),
-    ("Binomial", BinomialDistribution(0.4, 10), BinomialEstimator(min_val=0)),
+    # max_val fixes n: estimated as the sample maximum, n comes out low whenever the rare top count
+    # (P(X=10) = 1e-4 here) is absent from the sample, and p with it.
+    ("Binomial", BinomialDistribution(0.4, 10), BinomialEstimator(min_val=0, max_val=10)),
     ("NegativeBinomial", NegativeBinomialDistribution(4.0, 0.4), NegativeBinomialEstimator(r=4.0)),
     ("Bernoulli", BernoulliDistribution(0.7), BernoulliEstimator()),
     ("Categorical", CategoricalDistribution({"a": 0.5, "b": 0.3, "c": 0.2}), CategoricalEstimator()),

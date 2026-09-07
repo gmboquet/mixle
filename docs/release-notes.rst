@@ -91,10 +91,11 @@ documentation, and applicable security checks. The active release branch also
 runs tests, strict documentation validation, and security auditing on its exact
 tip after integration.
 
-Before publication, the release checklist still requires an immutable candidate
+Before publication, the 0.8.1 checklist still requires an immutable candidate
 artifact, clean-wheel and resolver evidence tied to that candidate, realistic
-backend and performance receipts for retained claims, independent statistical
-and systems review, external clean-install reproduction, final sign-off, and
-post-publication verification. See :doc:`release-readiness`,
+backend and performance receipts for retained claims, ten AI adversarial reviews
+of the notebook corpus and the examples (replacing the external-tester gate,
+D-0212), README and documentation stale-content reviews, the final version row,
+release-owner sign-off, and post-publication verification. See :doc:`release-readiness`,
 :doc:`claim-evidence-ledger`, and the tracked 0.8.1 checklist for the current
 state.

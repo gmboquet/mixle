@@ -11,9 +11,11 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   mixle.stats.latent._attention_contracts
    mixle.stats.latent._hidden_markov_numba_kernels
    mixle.stats.latent.chained_attention
    mixle.stats.latent.dirac_length
+   mixle.stats.latent.effective_sample
    mixle.stats.latent.gated_mixture
    mixle.stats.latent.gaussian_mixture
    mixle.stats.latent.heterogeneous_mixture
@@ -30,6 +32,7 @@ Submodules
    mixle.stats.latent.labeled_lda
    mixle.stats.latent.lda
    mixle.stats.latent.lookback_hidden_markov_model
+   mixle.stats.latent.markov_stopping
    mixle.stats.latent.mixture
    mixle.stats.latent.probabilistic_circuit
    mixle.stats.latent.probabilistic_pca

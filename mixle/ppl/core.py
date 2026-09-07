@@ -525,9 +525,9 @@ class Constraint:
     relation given ``env``, a dict mapping each leaf RV to its value(s).
     """
 
-    __slots__ = ("leaves", "pred", "desc", "residual", "soft", "reduction")
+    __slots__ = ("leaves", "pred", "desc", "residual", "soft", "reduction", "margin")
 
-    def __init__(self, leaves, pred, desc, residual=None, soft=False, reduction="all"):
+    def __init__(self, leaves, pred, desc, residual=None, soft=False, reduction="all", margin=None):
         if reduction not in {"all", "any"}:
             raise ValueError("constraint reduction must be 'all' or 'any'.")
         self.leaves = tuple(leaves)
@@ -538,6 +538,12 @@ class Constraint:
         # ``fit(..., penalty=w)`` so equality / convex / algebraic constraints can be honored by
         # gradient inference. ``None`` means penalty-mode is unavailable (e.g. a negated relation).
         self.residual = residual
+        # Optional signed margin m(env): a 1-D array that is >= 0 exactly where an inequality holds,
+        # positive inside the region and negative outside (the residual is ``max(0, -margin)``).
+        # Unlike the hinge it carries a gradient on both sides of the boundary, which is what a
+        # sequential-quadratic-programming solver needs to walk along active constraints; ``None``
+        # (equalities, negations, disjunctions) sends the constrained MAP fit to the penalty ramp.
+        self.margin = margin
         # ``soft``: a measure-zero relation (equality / ODE residual) that cannot be honored by
         # rejection, so ``fit`` auto-selects the soft-penalty path for it (no ``penalty=`` needed).
         self.soft = soft
@@ -560,7 +566,7 @@ class Constraint:
 
     def with_reduction(self, reduction: str) -> Constraint:
         """Return the same event with vector entries reduced by ``all`` or ``any`` per row."""
-        return Constraint(self.leaves, self.pred, self.desc, self.residual, self.soft, reduction)
+        return Constraint(self.leaves, self.pred, self.desc, self.residual, self.soft, reduction, self.margin)
 
     def contains(self, x):
         """Evaluate a single-variable constraint directly on that variable's value(s)."""
@@ -577,8 +583,10 @@ class Constraint:
         return tuple(out)
 
     def __and__(self, other):
-        # AND must satisfy both, so the residual stacks both violations (all must reach 0).
+        # AND must satisfy both, so the residual stacks both violations (all must reach 0), and
+        # the margins stack likewise (all must be >= 0).
         residual = _combine_residuals(self.residual, other.residual, "and")
+        margin = _combine_residuals(self.margin, other.margin, "and")
         return Constraint(
             self._merge_leaves(other),
             lambda env: self.pred(env) & other.pred(env),
@@ -586,6 +594,7 @@ class Constraint:
             residual,
             self.soft or other.soft,
             "all",
+            margin,
         )
 
     def __or__(self, other):
@@ -804,6 +813,14 @@ _RESIDUAL = {
     "==": lambda a, b: a - b,
 }
 
+# Signed margins for the inequality relations: ``>= 0`` exactly where the relation holds.
+_MARGIN = {
+    ">": lambda a, b: a - b,
+    ">=": lambda a, b: a - b,
+    "<": lambda a, b: b - a,
+    "<=": lambda a, b: b - a,
+}
+
 
 def _combine_residuals(ra, rb, mode):
     """Combine two constraint residual closures for ``&`` (stack) / ``|`` (min magnitude)."""
@@ -836,14 +853,23 @@ def _make_constraint(lhs, op, rhs) -> Constraint:
         return cmp(np.asarray(_eval_expr(lhs, env)), np.asarray(_eval_expr(rhs, env)))
 
     residual = None
+    margin = None
     if op in _RESIDUAL:
         res_fn = _RESIDUAL[op]
 
         def residual(env):
             return np.asarray(res_fn(np.asarray(_eval_expr(lhs, env)), np.asarray(_eval_expr(rhs, env))))
 
+        if op in _MARGIN:
+            margin_fn = _MARGIN[op]
+
+            def margin(env):
+                return np.asarray(margin_fn(np.asarray(_eval_expr(lhs, env)), np.asarray(_eval_expr(rhs, env))))
+
     # equality is measure-zero -> mark soft so fit() auto-uses the penalty path (no rejection)
-    return Constraint(leaves, pred, f"{_expr_desc(lhs)} {op} {_expr_desc(rhs)}", residual, soft=(op == "=="))
+    return Constraint(
+        leaves, pred, f"{_expr_desc(lhs)} {op} {_expr_desc(rhs)}", residual, soft=(op == "=="), margin=margin
+    )
 
 
 def eq(lhs, rhs) -> Constraint:
@@ -887,9 +913,12 @@ class _Potential:
 def potential(fn, *vars, name=None) -> _Potential:
     """Add a custom log-factor ``fn(*values)`` to a model's joint log-density.
 
-    ``vars`` are random-variable parameters of the model (named priors, or ``param(...)`` vector/matrix
-    handles) -- exactly the references a :func:`constrain`/:func:`eq` constraint may use. At each
-    inference evaluation they are resolved to their current values and passed to ``fn`` positionally;
+    ``vars`` are random variables: parameters of the model (named priors, or ``param(...)`` vector/matrix
+    handles, exactly the references a :func:`constrain`/:func:`eq` constraint may use), or named prior
+    RVs that are not parameters of the model, which a potential introduces as auxiliary latents: each
+    one becomes an extra inference slot whose own prior joins the joint target (a constraint on such an
+    RV is rejected; a potential is how a latent that no distribution slot reads enters the model). At
+    each inference evaluation they are resolved to their current values and passed to ``fn`` positionally;
     ``fn`` returns a scalar log-weight that is added to ``log p(data, theta)``. Use it for anything the
     distribution slots can't say directly: a soft coupling between two latents, a bespoke log-prior, a
     penalty/regularizer::
@@ -899,7 +928,7 @@ def potential(fn, *vars, name=None) -> _Potential:
 
     Pass one potential or a list via ``fit(..., potentials=...)``. Potentials route inference through the
     numerical target (``how`` in ``map`` / ``mcmc`` / ``hmc`` / ``nuts`` / ``ensemble``; ``auto`` picks
-    ``map``); like constraints, every referenced variable must be a parameter of the fitted model.
+    ``map``); every referenced variable must be a named prior RV or a ``param(...)`` handle.
     """
     return _Potential(fn, vars, name)
 
@@ -913,12 +942,13 @@ def _diff(a, order: int = 1):
     return np.diff(np.asarray(a, dtype=float), n=order, axis=-1)
 
 
-def _shape_constraint(v, test, violation, desc) -> Constraint:
+def _shape_constraint(v, test, violation, desc, margin=None) -> Constraint:
     return Constraint(
         _expr_leaves(v),
         lambda env: np.all(test(_eval_expr(v, env)), axis=-1),
         desc,
         lambda env: np.asarray(violation(_eval_expr(v, env))).ravel(),
+        margin=None if margin is None else (lambda env: np.asarray(margin(_eval_expr(v, env))).ravel()),
     )
 
 
@@ -926,7 +956,11 @@ def increasing(v, *, strict: bool = False) -> Constraint:
     """The entries of a vector RV/expression are non-decreasing (``strict`` -> strictly increasing)."""
     cmp = (lambda d: d > 0) if strict else (lambda d: d >= 0)
     return _shape_constraint(
-        v, lambda x: cmp(_diff(x)), lambda x: np.maximum(0.0, -_diff(x)), f"increasing({_expr_desc(v)})"
+        v,
+        lambda x: cmp(_diff(x)),
+        lambda x: np.maximum(0.0, -_diff(x)),
+        f"increasing({_expr_desc(v)})",
+        margin=lambda x: _diff(x),
     )
 
 
@@ -934,7 +968,11 @@ def decreasing(v, *, strict: bool = False) -> Constraint:
     """The entries of a vector RV/expression are non-increasing (``strict`` -> strictly decreasing)."""
     cmp = (lambda d: d < 0) if strict else (lambda d: d <= 0)
     return _shape_constraint(
-        v, lambda x: cmp(_diff(x)), lambda x: np.maximum(0.0, _diff(x)), f"decreasing({_expr_desc(v)})"
+        v,
+        lambda x: cmp(_diff(x)),
+        lambda x: np.maximum(0.0, _diff(x)),
+        f"decreasing({_expr_desc(v)})",
+        margin=lambda x: -_diff(x),
     )
 
 
@@ -946,14 +984,22 @@ def monotone(v) -> Constraint:
 def convex(v) -> Constraint:
     """The entries are convex: the second difference is non-negative everywhere."""
     return _shape_constraint(
-        v, lambda x: _diff(x, 2) >= 0, lambda x: np.maximum(0.0, -_diff(x, 2)), f"convex({_expr_desc(v)})"
+        v,
+        lambda x: _diff(x, 2) >= 0,
+        lambda x: np.maximum(0.0, -_diff(x, 2)),
+        f"convex({_expr_desc(v)})",
+        margin=lambda x: _diff(x, 2),
     )
 
 
 def concave(v) -> Constraint:
     """The entries are concave: the second difference is non-positive everywhere."""
     return _shape_constraint(
-        v, lambda x: _diff(x, 2) <= 0, lambda x: np.maximum(0.0, _diff(x, 2)), f"concave({_expr_desc(v)})"
+        v,
+        lambda x: _diff(x, 2) <= 0,
+        lambda x: np.maximum(0.0, _diff(x, 2)),
+        f"concave({_expr_desc(v)})",
+        margin=lambda x: -_diff(x, 2),
     )
 
 
@@ -965,6 +1011,7 @@ def lipschitz(v, bound: float) -> Constraint:
         lambda x: np.abs(_diff(x)) <= b,
         lambda x: np.maximum(0.0, np.abs(_diff(x)) - b),
         f"lipschitz({_expr_desc(v)}, {b})",
+        margin=lambda x: np.concatenate([b - _diff(x), b + _diff(x)]),
     )
 
 

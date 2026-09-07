@@ -24,7 +24,7 @@ artifacts.
 - Validate paths, sizes, shapes, dtypes, schemas, and digests before use.
 - Prefer safe structured formats. Never load an untrusted pickle or executable
   artifact merely because it has a Mixle filename.
-- Code-execution deserialization is opt-in, per call, as of 0.8.0. Every loader
+- Code-execution deserialization is opt-in, per call, as of 0.8.1. Every loader
   whose payload can execute code on load requires the caller to pass the literal
   `True` for its trust flag -- `load_encoded(path, encoder=..., trusted=True)`
   for encoded-data payloads, and the corresponding explicit flags on embedder

@@ -15,12 +15,9 @@ Takeaway: supervision is a per-observation PRIOR over components, not a separate
 same ``best_of`` restart loop that fits an unsupervised mixture fits this, and the labelled and
 unlabelled rows travel together in one dataset.
 
-KNOWN ISSUE (0.8.0): this script currently raises
-``NotImplementedError: SemiSupervisedMixtureDataEncoder must implement row_count()`` at the
-``best_of`` call below, for any component family whose encoded payload is not a plain array (the
-Composite/Sequence components used here). The encoder's payload already carries the row count as its
-first element but does not override ``row_count()``. This is a library defect, not an example defect,
-and the example is left as-is so it keeps reproducing it.
+Note: an earlier candidate of this script raised ``NotImplementedError`` from the semi-supervised
+encoder (``row_count()`` was missing for Composite/Sequence components); that defect is fixed and
+the script runs to completion, recovering the planted weights.
 """
 
 import numpy as np

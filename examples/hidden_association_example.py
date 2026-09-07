@@ -11,7 +11,7 @@ alongside the recovered marginal over given symbols.
 
 Takeaway: latent *structure between two fields* is fit by the same ``optimize`` call as a plain
 mixture -- you supply the estimator tree that mirrors the model (conditional / given / length) and the
-alignment sum happens inside the E-step. Runtime is roughly half a minute to a minute at 1000
+alignment sum happens inside the E-step. Runtime is roughly ten to twenty seconds at 1000
 observations and 1000 EM iterations.
 """
 

@@ -18,6 +18,9 @@ constrained graph. The pipeline:
                     reasoner with honest abstention.
 
 Everything measured in-process; seconds, no GPU, no network.
+
+The graph fits are budgeted (``max_its=40``); ``optimize`` reports the budget stop in a ``UserWarning`` on
+stderr, which is expected here.
 """
 
 from __future__ import annotations

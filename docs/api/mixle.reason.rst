@@ -28,7 +28,11 @@ Submodules
    mixle.reason.llm
    mixle.reason.modality
    mixle.reason.model
+   mixle.reason.model_fusion
    mixle.reason.ontology
+   mixle.reason.posterior_protocol
+   mixle.reason.posterior_schema
+   mixle.reason.receipt
    mixle.reason.store
    mixle.reason.task_projection
    mixle.reason.transport_edge

@@ -1,0 +1,132 @@
+[
+  {
+    "id": "P03-F01",
+    "severity": "real",
+    "title": "optimize()/fit() auto-structure return (HeterogeneousBayesianNetwork) carries no fit_provenance()/numerical_repairs() at all",
+    "surface": "mixle.inference.optimize / mixle.inference.fit with estimator=None and structure='auto' (default); mixle.inference.learn_bayesian_network; mixle.Model.fit; FitProvenanceCarrier",
+    "reproduction": "import numpy as np\nfrom mixle.inference import optimize, fit, learn_bayesian_network\nfrom mixle import Model\nrng=np.random.RandomState(0)\nplan=rng.choice(['free','pro'],600); usage=np.where(plan=='pro', rng.normal(60,5,600), rng.normal(10,3,600)); spend=usage*2+rng.normal(0,1,600)\nrows=[(str(p),float(u),float(s)) for p,u,s in zip(plan,usage,spend)]\nfor r in (optimize(rows), fit(rows), learn_bayesian_network(rows)):\n    print(type(r).__name__, callable(getattr(r,'fit_provenance',None)), callable(getattr(r,'numerical_repairs',None)))\nm=Model().fit(rows); print(sorted(k for k in m._fit_info if k!='when'), m.notes)",
+    "expected": "optimize()'s Returns docstring: 'The receipt distinguishing them ships on the model: model.fit_provenance() reports converged, iterations, final_objective ... and any numerical repairs.' FitProvenanceCarrier's docstring says the mixin was split out precisely so that a public fitting entry point never again produces 'a model that could not report how it was fitted at all (MXR-080-1190/1202)'. Model.fit's docstring says n_iter/converged are read from the receipt.",
+    "observed": "All three calls return HeterogeneousBayesianNetwork with has_fit_provenance=False and no numerical_repairs method (AttributeError on call). Model().fit(rows) records _fit_info keys ['n'] only (no n_iter, no converged) and empty notes. During fit(rows) the per-factor fits emit 'optimize() stopped at the max_its cap (30) before the objective settled (... delta=1e-06)' twice -- the caller has no receipt on the returned model to see that. This is the flagship 'one optimize(data)' path (quickstart_example.py, skeptic_challenge_example.py Act 1 print '-> HeterogeneousBayesianNetwork(...)').",
+    "notes": "learn_structure() (DependencyTreeDistribution) DOES carry a receipt (algorithm='dependency-tree-structure-search(per-factor-em-cap=30)'), so the carrier fix landed for one structure learner but not the one optimize()/fit() actually return by default. Composite/mixture returns from the same entry points carry a receipt."
+  },
+  {
+    "id": "P03-F02",
+    "severity": "real",
+    "title": "optimize()/fit() with estimator=None on a one-shot iterator silently fits an empty IgnoredDistribution (n_observations=0, converged=True, log_density=-inf everywhere)",
+    "surface": "mixle.inference.optimize / mixle.inference.fit, estimator=None (auto-inference) with a generator, iter(list), or map object as data",
+    "reproduction": "import numpy as np\nfrom mixle.inference import optimize, fit\ndata=list(np.random.RandomState(0).normal(3,2,200))\nfor r in (optimize(x for x in data), optimize(iter(data)), fit(x for x in data), optimize(map(float,data))):\n    fp=r.fit_provenance(); print(type(r).__name__, fp.n_observations, fp.converged, fp.final_objective, r.log_density(3.0))\nprint(optimize((x for x in data), __import__('mixle.stats',fromlist=['GaussianEstimator']).GaussianEstimator()).fit_provenance().n_observations)",
+    "expected": "Either a fit of the 200 observations (the explicit-estimator path materializes the same generator correctly and reports n_observations=200), or a ValueError naming the cause ('no observations' / 'data is a one-shot iterator'). The docstring's empty-data guard ('optimize() received no observations: data is empty') is the documented behavior for zero rows.",
+    "observed": "IgnoredDistribution with n_observations=0, converged=True, final_objective=0.0, and log_density(3.0) = -inf for every value, with no warning. Cause: the auto-inference (get_estimator) consumes the iterator, the empty-data guard only checks hasattr(data,'__len__'), and seq_encode then encodes zero rows. The same generator with an explicit GaussianEstimator fits n_observations=200. propose() materializes iterators correctly, so the two entry points disagree.",
+    "notes": "A 'converged' receipt over zero observations is exactly the fabricated-fit shape the empty-data guard was added to prevent."
+  },
+  {
+    "id": "P03-F03",
+    "severity": "real",
+    "title": "optimize(enc_data=<empty encoding>) and seq_initialize/seq_estimate on an empty corpus return a fabricated Gaussian(0, 1e-8) with converged=True; the changelog's low-level empty-corpus guard does not reject",
+    "surface": "mixle.inference.optimize (enc_data path), mixle.inference.seq_initialize, mixle.inference.seq_estimate, mixle.stats.seq_encode",
+    "reproduction": "import numpy as np\nfrom mixle.stats import seq_encode, GaussianEstimator, GaussianDistribution, MixtureEstimator\nfrom mixle.inference import optimize, seq_initialize, seq_estimate\nrng=np.random.RandomState(0)\nenc=seq_encode([], GaussianEstimator().accumulator_factory().make().acc_to_encoder()); print(enc)\nprint(seq_initialize(enc, GaussianEstimator(), rng, 0.1))\nprint(seq_initialize([], GaussianEstimator(), rng, 0.1))\nprint(seq_estimate(enc, GaussianEstimator(), GaussianDistribution(0,1)))\nfor e in (enc, []):\n    m=optimize(None, GaussianEstimator(), enc_data=e); print(m, m.fit_provenance())\nm=optimize(None, MixtureEstimator([GaussianEstimator()]*2), enc_data=enc); print(m, m.fit_provenance())",
+    "expected": "CHANGELOG 0.8.0: 'The high-level optimize([], ...) already guarded this cleanly; the guard now reaches the low-level entry point too' -- i.e. a 'no observations' ValueError like the data=[] path raises. At minimum, a receipt over zero observations must not claim converged=True.",
+    "observed": "seq_initialize / seq_estimate return GaussianDistribution(0.0, 1e-08) (and a 2-component mixture of them at weights 0.5/0.5) with no error or warning. optimize(None, est, enc_data=seq_encode([])) and enc_data=[] return the same model with FitProvenance(iterations=2, converged=True, final_objective=0.0, n_observations=0, repairs=('variance-floored(0 -> 1e-08)',)). Only the data=[] spelling raises.",
+    "notes": "_reject_all_zero_observation_weights documents that enc_data is opaque to it, but the zero-row case is visible (n_observations=0 is computed for the receipt) and is the case the changelog says is guarded. The 'guard' that landed only stops the IndexError; it does not reject."
+  },
+  {
+    "id": "P03-F04",
+    "severity": "real",
+    "title": "fit_provenance().objective reports 'map' for prior-free top-level Composite/Optional/Sequence estimators; fused E-step path is silently disabled for them",
+    "surface": "mixle.inference.optimize / fit objective='auto' resolution (_resolve_objective) with CompositeEstimator, OptionalEstimator, SequenceEstimator as the top-level estimator; FitProvenance.objective / .algorithm",
+    "reproduction": "import numpy as np\nfrom mixle.inference import optimize\nfrom mixle.stats import CompositeEstimator, GaussianEstimator, PoissonEstimator, OptionalEstimator, MixtureEstimator\nrng=np.random.RandomState(0)\nrows=[(float(a),int(b)) for a,b in zip(rng.normal(0,1,2000), rng.poisson(3,2000))]\nest=CompositeEstimator([GaussianEstimator(),PoissonEstimator()])\nprint(est.get_prior(), [e.get_prior() for e in est.estimators])\nm=optimize(rows, est); fp=m.fit_provenance(); print(fp.objective, fp.algorithm, fp.final_objective, sum(m.log_density(x) for x in rows))\nprint(optimize(rows, est, objective='mle').fit_provenance().algorithm)\nprint(optimize(rows, MixtureEstimator([CompositeEstimator([GaussianEstimator(),PoissonEstimator()])]*2), max_its=3, delta=None).fit_provenance().objective)\nprint(optimize([1.0,None,2.0]*20, OptionalEstimator(GaussianEstimator())).fit_provenance().objective)",
+    "expected": "objective='mle' and algorithm='fused-em' (the docstring: 'everything else by maximum likelihood'; 'With no prior anywhere, every objective reduces to plain EM'). Provenance is advertised as the machine-readable receipt of which objective was maximized.",
+    "observed": "CompositeEstimator.get_prior() returns [None, None] (OptionalEstimator/SequenceEstimator return (None, None)); _resolve_objective tests 'get_prior() is not None' and returns 'map'. The receipt says objective='map', algorithm='em', while final_objective equals the plain sum of log_density exactly (no prior term). Forcing objective='mle' gives algorithm='fused-em'. Wrapped inside a MixtureEstimator the same composite resolves to 'mle'/'fused-em', so the mislabel is specific to the top-level container. Every estimator=None fit of tabular data (auto-inferred composites, DataFrames, Optional-wrapped NaN columns) carries objective='map' in its receipt.",
+    "notes": "Consequences beyond the label: the fused E-step shortcut and reuse_estep_ll are disabled for these fits ('only mle is compatible with the fused E-step shortcut'); measured cost is negligible for closed-form composites but the receipt is wrong. _estimator_carries_prior() (the other prior detector, used for the zero-weight guard) correctly says False for the same estimators."
+  },
+  {
+    "id": "P03-F05",
+    "severity": "minor",
+    "title": "delta=0 is accepted but can never converge; the run always hits the cap and the warning reports 'before the objective settled (last objective gain 0, delta=0)'",
+    "surface": "mixle.inference.optimize(delta=0) / _validate_optimize_controls / _em_loop convergence test",
+    "reproduction": "import numpy as np, warnings\nfrom mixle.inference import optimize\nfrom mixle.stats import GaussianEstimator\nwarnings.simplefilter('always')\nm=optimize(list(np.random.RandomState(0).normal(3,2,200)), GaussianEstimator(), max_its=5, delta=0)\nprint(m.fit_provenance())",
+    "expected": "Docstring: 'Iterate until abs(old_loglikelihood - new_loglikelihood) < delta'. Either delta=0 is rejected by the validator (it can never be satisfied since the test is 0.0 <= dll < delta) or a zero gain counts as converged.",
+    "observed": "FitProvenance(iterations=5, max_iterations=5, converged=False, delta=0.0, objective_gain=0.0) plus UserWarning 'optimize() stopped at the max_its cap (5) before the objective settled (last objective gain 0, delta=0)' -- a gain of exactly 0 is reported as 'not settled'. delta<0, nan, inf are rejected; 0 is not.",
+    "notes": ""
+  },
+  {
+    "id": "P03-F06",
+    "severity": "minor",
+    "title": "max_its-cap warning under best-seen selection (monotone=False / neural leaves) reports a negative 'last objective gain' and advises 'Raise max_its to fit to convergence'",
+    "surface": "mixle.inference.estimation._warn_if_capped_unconverged; optimize(monotone=False) and any mutable/neural leaf (skeptic_challenge_example.py line 255 prints 'last objective gain -56.6')",
+    "reproduction": "import numpy as np, warnings\nfrom mixle.inference import optimize\nfrom mixle.stats import GaussianEstimator, GaussianDistribution\nfrom mixle.stats.compute.sequence import seq_estimate\ndata=list(np.random.RandomState(0).normal(3,2,200)); calls={'n':0}\ndef worsening(enc, est, model):\n    calls['n']+=1; nxt=seq_estimate(enc, est, model)\n    return GaussianDistribution(nxt.mu+50.0*calls['n'], nxt.sigma2) if calls['n']>=2 else nxt\nwarnings.simplefilter('always')\nm=optimize(data, GaussianEstimator(), delta=1e-9, max_its=5, strategy=worsening, monotone=False)\nprint(m.fit_provenance()); print(m.mu)",
+    "expected": "The Returns docstring describes the cap case as 'the max_its cap was reached with the objective still improving'. A best-seen run whose trajectory went downhill should say so (the returned model is the best iterate, more iterations of the same trajectory will not converge), not report a negative gain as 'not yet settled' with 'Raise max_its' as the remedy.",
+    "observed": "UserWarning: 'optimize() stopped at the max_its cap (5) before the objective settled (last objective gain -5.68e+05, delta=1e-09) ... Raise max_its to fit to convergence'. Provenance itself is honest (final_objective=-421.37 for the returned best model, last_accepted_objective=-1579401.29, objective_gain=-568432.77). The corpus example skeptic_challenge_example.py emits the same warning with 'last objective gain -56.6' on its RealNVP flow fit (max_its=8).",
+    "notes": "Docs/message only; no wrong model is returned."
+  },
+  {
+    "id": "P03-F07",
+    "severity": "docs",
+    "title": "ks_1samp / pit_values docs and CHANGELOG claim 'every fitted mixle distribution's .cdf' is a scalar-only callable; 134 of 165 exported distributions (incl. MixtureDistribution) have no cdf",
+    "surface": "mixle.inference.ks_1samp, mixle.inference.pit_values, mixle.inference.calibration.evaluate_cdf docstrings; CHANGELOG 0.8.0 'Independent-tester findings'",
+    "reproduction": "import numpy as np, inspect\nimport mixle.stats as S\nfrom mixle.stats.compute.pdist import ProbabilityDistribution\nfrom mixle.inference import ks_1samp, optimize\nfrom mixle.stats import MixtureEstimator, GaussianEstimator\nno=[n for n in dir(S) if inspect.isclass(getattr(S,n)) and issubclass(getattr(S,n), ProbabilityDistribution) and n.endswith('Distribution') and not hasattr(getattr(S,n),'cdf')]\nprint(len(no), 'MixtureDistribution' in no, 'CategoricalDistribution' in no, 'CompositeDistribution' in no)\ny=np.random.RandomState(0).normal(0,1,200)\nks_1samp(y, optimize(list(y), MixtureEstimator([GaussianEstimator()]*2), max_its=50).cdf)",
+    "expected": "Docstrings: 'cdf may be ... scalar-only, such as any fitted mixle distribution's .cdf method'; evaluate_cdf: 'Every distribution's cdf method in this library is scalar-only'; CHANGELOG: 'a scalar-only cdf callable, which every fitted mixle distribution's .cdf is'.",
+    "observed": "134 exported *Distribution classes have no cdf attribute, including MixtureDistribution, CategoricalDistribution, CompositeDistribution, HiddenMarkovModelDistribution. ks_1samp(y, mixture.cdf) raises AttributeError: 'MixtureDistribution' object has no attribute 'cdf'. The 31 that do have cdf are evaluated element-wise correctly (verified: Gaussian, Poisson, math.erf-based scalar callables; statistic matches scipy to 1e-16).",
+    "notes": "The goodness-of-fit helper therefore cannot be pointed at the most common fitted object in the tutorials (a mixture) despite the docs saying it can."
+  },
+  {
+    "id": "P03-F08",
+    "severity": "minor",
+    "title": "propose() multimodality note names fields as raw internal path tuples ('()', '(0,)', \"('key', 'height')\") instead of the '$', '$[0]', \"$['key']['height']\" spelling every other note uses",
+    "surface": "mixle.propose Model.notes / Model.explain() latent-structure caveat",
+    "reproduction": "import numpy as np, pandas as pd\nfrom mixle import propose\nrng=np.random.RandomState(0); bim=np.concatenate([rng.normal(-5,1,150), rng.normal(5,1,150)])\nfor data in (list(bim), pd.DataFrame({'height': bim, 'count': rng.poisson(2,300)}), [{'height': float(h), 'uni': float(u)} for h,u in zip(bim, rng.normal(0,1,300))]):\n    print([n for n in propose(data).notes if 'multimodal' in n][0][:60])",
+    "expected": "CHANGELOG 0.8.0: 'propose()'s latent-structure caveat is issued only for fields that look multimodal, naming them'. Field names in the same notes list are spelled '$', '$[0]', \"$['key']['height']\".",
+    "observed": "'field(s) () look multimodal' for scalar data (no field named), 'field(s) (0,) look multimodal' for tuple/DataFrame rows, \"field(s) ('key', 'height') look multimodal\" for dict rows -- the internal path tuple including the 'key' segment leaks into user-facing text.",
+    "notes": "Also observed: DataFrame column names ('height', 'count') do not appear anywhere in the notes; fields are reported as $[0], $[1]."
+  },
+  {
+    "id": "P03-F09",
+    "severity": "minor",
+    "title": "Several wrong-type arguments fail with internal AttributeErrors that do not name the argument or the cause",
+    "surface": "mixle.inference.optimize(rng=..., prev_estimate=..., data=dict); mixle.inference.seq_initialize(rng=...)",
+    "reproduction": "import numpy as np, random\nfrom mixle.inference import optimize, seq_initialize\nfrom mixle.stats import GaussianEstimator, seq_encode\ndata=list(np.random.RandomState(0).normal(3,2,100))\nenc=seq_encode(data, GaussianEstimator().accumulator_factory().make().acc_to_encoder())\nfor f in (lambda: optimize(data, GaussianEstimator(), rng='abc'), lambda: optimize(data, GaussianEstimator(), rng=random.Random(1)), lambda: optimize(data, GaussianEstimator(), prev_estimate=GaussianEstimator()), lambda: optimize({'a':1}, GaussianEstimator()), lambda: seq_initialize(enc, GaussianEstimator(), None, 0.1), lambda: seq_initialize(enc, GaussianEstimator(), 3, 0.1), lambda: seq_initialize(enc, GaussianEstimator(), np.random.default_rng(1), 0.1)):\n    try: f()\n    except Exception as e: print(type(e).__name__, str(e)[:90])",
+    "expected": "A TypeError/ValueError naming the argument ('rng must be a numpy RandomState (or int / Generator)', 'prev_estimate must be a fitted distribution, got an estimator', 'data must be a sequence of observations, got dict'). optimize() coerces int and Generator rng; the documented seq_encode/seq_initialize/seq_estimate pipeline does not, and its docstring says only 'RandomState'.",
+    "observed": "AttributeError: 'str' object has no attribute 'randint'; TypeError: Random.randint() missing 1 required positional argument: 'b'; AttributeError: 'GaussianEstimator' object has no attribute 'dist_to_encoder'; ValueError: could not convert string to float: 'a'; AttributeError: 'NoneType' / 'int' / 'numpy.random._generator.Generator' object has no attribute 'randint'.",
+    "notes": "All other control-argument attacks (max_its 0/-1/1.0/True, delta<0/nan/inf, init_p 0/1.5/-0.1, print_iter=-1, seed out of range, rng+seed together, fused_options unknown keys) raise a ValueError/TypeError that names the argument."
+  },
+  {
+    "id": "P03-F10",
+    "severity": "docs",
+    "title": "Corpus text contradicts the candidate's own run output: 'optimize runs EM to convergence' above a cell that warns it hit the cap; hierarchical example documents an iteration-count stop but emits the unconverged warning; warnings via best_of()/fit() are attributed to library internals",
+    "surface": "notebooks/tutorials/fitting_and_estimation.ipynb (cell 2-3), examples/hierarchical_mixture_example.py (docstring line 15 vs line 67), _warn_if_capped_unconverged stacklevel through best_of()",
+    "reproduction": "Execute /Users/grantboquet/mixle/.ci-repro-colima/corpus-081/notebooks-repo/notebooks/tutorials/fitting_and_estimation.ipynb on the candidate; cell after the markdown '`optimize` runs EM to convergence and returns the fitted distribution' prints stderr 'UserWarning: optimize() stopped at the max_its cap (40) before the objective settled (last objective gain 0.0055, delta=1e-09)'. Run examples/hierarchical_mixture_example.py: its docstring says 'this particular configuration is capped by iteration count rather than by a convergence delta' but line 67 calls optimize(data, est, max_its=2000, ...) without delta=None and emits 'stopped at the max_its cap (2000) before the objective settled'. In the same notebook the best_of() cell's warning is attributed to '.../mixle/inference/estimation.py:2167' (stacklevel=3 lands inside best_of's optimize call rather than the user's cell).",
+    "expected": "Tutorial prose should match what the executed cell reports; an example that says it uses a fixed iteration budget should pass delta=None (which the warning text itself recommends); warnings should point at user code.",
+    "observed": "As described; executed notebooks saved under reviews-081/pass-03/executed-1-*.ipynb (7 stderr entries) and executed-2-*.ipynb (20 stderr entries, all max_its-cap warnings).",
+    "notes": "The warnings themselves are correct disclosures (the fits are unconverged); the defect is that the corpus text was not updated to match them."
+  },
+  {
+    "id": "P03-F11",
+    "severity": "minor",
+    "title": "propose() on exactly 3 records trains every candidate on a single row and presents the winner as verified with held-out mean log-density -1.25e8, without noting the one-row training split",
+    "surface": "mixle.propose holdout split (n_val = max(2, round(n*holdout)))",
+    "reproduction": "from mixle import propose\nm=propose([1.0, 2.0, 3.0]); print(m.notes); print(m.frontier)",
+    "expected": "Either refuse (the check 'at least three records for a non-empty train/holdout split' admits a 1-row training set) or note that candidates were fitted on one row and that the score reflects a variance-floored point fit.",
+    "observed": "notes: ['field $: gaussian', ..., 'candidate recommended: held-out mean log-density -124999991.709', 'candidate structured: held-out mean log-density -124999991.709']; frontier has both candidates with no error/skip. The degenerate-spike guard does not fire because the held-out log-density is hugely negative rather than positive.",
+    "notes": ""
+  },
+  {
+    "id": "P03-F12",
+    "severity": "minor",
+    "title": "pit_values/ks_1samp element-wise fallback triggers only on TypeError; a scalar-only cdf that returns a scalar for an array is reported as a shape error",
+    "surface": "mixle.inference.calibration.evaluate_cdf",
+    "reproduction": "import numpy as np\nfrom mixle.inference import pit_values\ny=np.random.RandomState(0).normal(0,1,50)\nfor cdf in (lambda v: 0.5, lambda v: float('nan')):\n    try: pit_values(y, cdf)\n    except Exception as e: print(type(e).__name__, e)",
+    "expected": "Docstring: 'a scalar-only callable ... is evaluated element-wise'. A callable that accepts the array without raising but returns a scalar is scalar-only in effect; either evaluate it element-wise or name the actual cause (callable returned a scalar / a non-finite value).",
+    "observed": "ValueError: cdf values must have the same one-dimensional shape as y -- for both; the NaN-returning scalar cdf is reported as a shape problem, the very misattribution FU-04 was about.",
+    "notes": "Low impact; every real mixle .cdf raises TypeError on arrays and is handled correctly."
+  },
+  {
+    "id": "P03-F13",
+    "severity": "minor",
+    "title": "MixtureEstimator over SequenceEstimator without len_estimator fails inside optimize() with a message that names the mechanism but not the fix",
+    "surface": "mixle.inference.optimize -> seq_initialize -> MixtureDistribution.__init__ (_owned_generative_components)",
+    "reproduction": "import numpy as np\nfrom mixle.inference import optimize\nfrom mixle.stats import MixtureEstimator, SequenceEstimator, GaussianEstimator\nrng=np.random.RandomState(0); seqs=[list(rng.normal(0,1,rng.randint(3,9))) for _ in range(500)]\noptimize(seqs, MixtureEstimator([SequenceEstimator(GaussianEstimator())]*2), max_its=5)",
+    "expected": "Either the fit runs (a length-conditional sequence law is a perfectly usable mixture component when every component shares the same length treatment) or the error says 'SequenceEstimator without len_estimator is a likelihood factor; pass len_estimator=... (the corpus notebooks all do)'.",
+    "observed": "TypeError: MixtureDistribution components must be generative probability laws; likelihood factors found at indices [0, 1]. The user has to know that 'likelihood factor' means 'no length distribution'.",
+    "notes": "Boundary item: the guard lives in latent-model internals (another pass's area) but it is reached through optimize() and reported here because the message does not name its cause. All three corpus notebooks that mix over SequenceEstimator pass len_estimator=PoissonEstimator()."
+  }
+]

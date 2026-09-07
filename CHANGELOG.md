@@ -36,6 +36,81 @@ heading was shipped under that number; every entry there ships here.
   the notebook corpus and the examples, and adds README and documentation stale-content review
   gates (D-0212).
 
+### Fixed by the ten adversarial reviews (2026-09-07)
+
+Ten independent review passes over the 0.8.1 candidate (univariate families, latent models, the
+inference loop, the probabilistic-programming layer, production and MLOps, data adapters, the
+application notebooks, the tutorials and README, and the example scripts in two halves) raised 134
+findings. The blocking findings and the documentation findings are repaired here; every other
+finding is recorded, with the reviewer's reproduction, in `release-checklists/0.8.2-followups.md`
+for the 0.8.2 patch (D-0213).
+
+- `LogSeriesDistribution.cdf` and `quantile` past the 50-million-term scan cap (reachable at `p`
+  within `1e-8` of one) used one minus a geometric *bound* on the tail, loose by about
+  `1 / (k (1-p))` and unclamped: the CDF fell from 0.88 to 0.24 between `k = 5e7` and `6e7` at
+  `p = 1 - 1e-9`, reached -360 at `p = 1 - 1e-12`, and the quantile overshot by the same factor.
+  The tail is now the Euler-Maclaurin sum (the exponential integral plus the first three
+  correction terms), exact to double rounding where it stands in; the CDF is clamped to `[0, 1]`
+  and never below the partial sum at the cap, so it is monotone, and the quantile bisects the same
+  tail from the end of the scan, so it is monotone in `q` across the seam
+  (`logseries_bounded_series_test.py::TailPastTheCapTest`).
+- Constrained MAP fits (`fit(how='map', constraints=[increasing(v) | decreasing | convex | concave |
+  lipschitz | a < b])`) reach the constrained optimum or fail. The penalty ramp converged to within
+  0.02 of the isotonic or convex-regression target and then the feasibility repair, whose step is the
+  sum of the violated constraints' normals, could not clear overlapping tied constraints (adjacent
+  second-difference normals cancel on every interior coordinate); its fallback handed back the
+  starting vector, the walled Nelder-Mead polish could not move off the wall, and the fit returned a
+  constant grand-mean vector as `ok` -- 221 nats worse than the optimum at ten dimensions, 34,000
+  nats at ten-dimensional convexity -- while Powell's convergence flag was never read (`max_iter=1`
+  returned a wrong point as a success) and a fully tied corner stopped two to three standard errors
+  short of the pooled mean. Inequality constraints now carry a signed margin (`Constraint.margin`),
+  and a fit whose constraints all have one is solved by SLSQP with finite-difference gradients from
+  a strictly feasible start, with the result required to be feasible and no worse than SLSQP's own
+  value; the penalty ramp remains for constraints without a margin (disjunctions, negations) and now
+  checks Powell's convergence, repairs feasibility by a least-norm Gauss-Newton step into the
+  margins, and certifies its answer against the penalized bound, failing with a message that names
+  `max_iter` instead of returning a wrong vector. Verified against pool-adjacent-violators and
+  SLSQP convex-regression targets to `1e-4` at 2 to 20 dimensions
+  (`constrained_map_certified_test.py`).
+- `AutoregressiveEnumerable` accepts a next-token table normalized to reduced precision. A bfloat16
+  `log_softmax` over a 49k-token vocabulary (what transformers 5 returns for a checkpoint stored in
+  bfloat16) sums to 0.9985, and the 1e-4 tolerance rejected it, so the README's enumeration snippet
+  raised on a current install; tables within 2% of one are renormalized to an exact categorical,
+  float64-exact tables are left untouched, and a genuine truncation is still refused
+  (`autoregressive_reduced_precision_test.py`).
+- Example scripts: `gallery_directional_example.py` fitted the projected normal with the one-pass
+  `estimate`, which for that family is the first EM E-step (the resultant along the data mean,
+  1,453 nats short of the MLE), and `gallery_rankings_example.py` printed one Plackett-Luce
+  minorization step as the fit; both now run `optimize` to convergence for those families.
+  `calibrated_report_demo.py`'s claim teacher labelled a planted blob a stripe and a planted stripe
+  a blob (its spread cutoff sat exactly at the blob's octant lift), so the selective-risk gate
+  correctly certified nothing and the demo never served a claim; the teacher and scorer now decide
+  from the spread of the four brightest patches, the gate calibrates on the mix it serves, and clear
+  volumes are served while faint ones abstain. `gallery_univariate_example.py` fixes the binomial
+  `n` (`max_val=10`) instead of presenting a sample-maximum `n = 9` as parameter recovery.
+- `optimize()` says when a run ended on a rejected update below its cap while the objective was
+  still moving: a two-component generalized-Pareto mixture stopped at iteration 36 of 2,000 with
+  the last accepted step still gaining 0.009 against `delta=1e-8`, `converged=False`, and no note
+  (the rejected-step exit was silent under any caller-supplied `delta`). The note fires when the
+  trajectory had climbed for at least two iterations and was still gaining more than `delta` when
+  a proposal fell below the last accepted objective, and names both amounts; a closed-form fit
+  whose single refinement step is rejected (Weibull) and a settled fit stay quiet.
+- Documentation: `ks_1samp`/`pit_values` and this changelog no longer claim that every fitted mixle
+  distribution has a `cdf` (134 of 165 exported families, mixtures included, define none);
+  `potential()` documents that a referenced RV outside the model becomes an auxiliary latent rather
+  than an error; the registry and provenance docstrings say "digest-chained", not "authenticated",
+  and state what the digests do not bind (a writer with directory access can rewrite model and
+  digests together; the header's dataset hash, record count, and log-likelihood trace are recorded
+  claims), with `production_example.py`'s takeaway narrowed to match; the receipt module documents
+  the `executables` and `provenance={"sources": [...]}` shapes `verify_receipt` requires;
+  `optimize()` documents that an explicit `num_workers` far above the core count spawns that many
+  processes and fails slowly; example docstrings no longer claim a fixed `NotImplementedError`, a
+  one-to-two-minute runtime measured at twenty seconds, or an integer field that is a float, and
+  say when their fits are budgeted. The notebook corpus (`mixle-notebooks`) is re-executed on the
+  candidate with its prose corrected where it named a removed API (`iterate`, `mixle.utils.em`),
+  the library's old name, or a deprecated `JointMixtureDistribution` form, and with its two
+  unconditional claims (a recovered second mode, a topic signal) made conditional on the output.
+
 ## [0.8.0] — 2026-08-26 (never published; superseded by 0.8.1)
 
 **This version was not released.** Its candidate was prepared and rehearsed on TestPyPI, and the
@@ -123,8 +198,9 @@ item's disposition, is `release-checklists/0.8.1-followups.md`.
 - `GeneralizedParetoEstimator` discloses a shape clamp: a moment estimate that lands below
   `xi_min` (about 2% of seeded samples at n in 3..6) now appears in `numerical_repairs()` as
   `shape-clamped(...)` rather than printing `shape=-10.0` with no note.
-- `pit_values` and `ks_1samp` accept a scalar-only `cdf` callable, which every fitted mixle
-  distribution's `.cdf` is, evaluating it element-wise; `pit_values` no longer reports a
+- `pit_values` and `ks_1samp` accept a scalar-only `cdf` callable, which the `.cdf` method of
+  every univariate mixle family that defines one is (mixtures, categoricals, composites, and
+  sequence models define no `cdf`), evaluating it element-wise; `pit_values` no longer reports a
   callable-signature `TypeError` as a `ValueError` about non-finite values.
 - A dataset mixing 2-item winner/loser pairs with 3-item tie comparisons now raises a
   row-numbered `ValueError` naming the offending row and the fix, instead of numpy's

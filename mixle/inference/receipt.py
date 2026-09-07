@@ -10,9 +10,14 @@ A receipt makes four claims, each independently checkable from data the receipt 
     registry must reproduce every step bit-for-bit (:func:`mixle.task.replay.is_bit_identical_replay`).
   * **calibration** -- the ``alpha``/``qhat`` (or density-gate) state the answer was served under; a
     receipt with unknown calibration is flagged, never assumed calibrated.
-  * **provenance** -- where the evidence came from (source ids / citations), following the same
-    dict shape :class:`mixle.substrate.core.SubstrateItem.provenance` and
-    :class:`mixle.substrate.context.ContextPacket` citations already use.
+  * **provenance** -- where the evidence came from: ``{"sources": [{"id": ..., "digest": ...,
+    "content": ...}, ...]}``, each source's ``digest`` the :func:`~mixle.inference.integrity.canonical_digest`
+    of its ``content`` (``content`` may be omitted and supplied to :func:`verify_receipt` as
+    ``evidence={id: content}``). A source without content to check against is ``"unobserved"``.
+
+A receipt that carries a trace must also carry ``executables``: ``{tool name:
+:func:`~mixle.inference.integrity.implementation_digest`(tool)}`` for every tool the trace calls, so a
+verifier can tell the registry it replays against is the one the answer was produced with.
 
 Any of the four may be absent (a thin-shell :class:`~mixle.system.core.System` answer has no ledger yet);
 :func:`verify_receipt` marks missing claims ``"absent"`` but does not promote an evidence-free receipt.

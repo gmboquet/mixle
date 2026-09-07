@@ -1,0 +1,142 @@
+[
+  {
+    "id": "P01-F01",
+    "severity": "blocking",
+    "title": "LogSeriesDistribution.cdf returns negative / non-monotone values past the 0.8.1 term cap; quantile inherits the error",
+    "surface": "mixle.stats.LogSeriesDistribution.cdf / .quantile (mixle/stats/univariate/discrete/logseries.py: _SERIES_CAP, _tail_upper_bound)",
+    "reproduction": "from mixle.stats import LogSeriesDistribution\nd = LogSeriesDistribution(1 - 1e-9)\nprint(d.cdf(5*10**7), d.cdf(6*10**7), d.cdf(10**8))   # 0.880912  0.242587  0.563371\nprint(d.quantile(0.9))                                 # 342580000.0\nprint(LogSeriesDistribution(1 - 1e-12).cdf(10**8))     # -360.8835917992805\nprint(LogSeriesDistribution(1 - 1e-10).cdf(10**8))     # -3.299731408767059",
+    "expected": "A CDF in [0,1], non-decreasing in k, equal to the exact partial sum sum_{j<=k} p^j/(j*(-ln(1-p))). Exact chunked summation (work-dir logseries_exact.py) and the asymptotic 1 - E1(k(1-p))/(-ln(1-p)) both give cdf(6e7)=0.889240, cdf(1e8)=0.912035 at p=1-1e-9, cdf(1e8)=0.687553 at p=1-1e-12, cdf(1e8)=0.824635 at p=1-1e-10; true quantile(0.9) at p=1-1e-9 is ~7.07e7.",
+    "observed": "Past _SERIES_CAP=50_000_000 scanned terms cdf returns min(1, 1 - p^(k+1)/((k+1)(1-p))/norm) with no lower clamp. That geometric bound is loose by ~1/(k(1-p)) and exceeds 1 whenever k < 1/(1-p), so the CDF drops (0.881 -> 0.243 between k=5e7 and 6e7 at p=1-1e-9) and goes negative (-360.88 at p=1-1e-12, k=1e8). Worst |cdf-truth| over k in [1e6,1e13]: 5.4e-6 at 1-p=1e-7, 2.8e-2 at 1e-8, 0.70 at 1e-9, 7.5 at 1e-10, 643 at 1e-12; non-monotone at every 1-p <= 1e-8. The capped-branch quantile searches for the smallest k with that bound <= 1-q and so overshoots by the same factor (quantile(0.9)=3.43e8, whose true CDF is 0.961).",
+    "notes": "This is the 0.8.1 headline change ('log-series CDF, quantile, and entropy are finite computations in bounded memory'). Time and memory ARE bounded as claimed (every call < 1 s, flat RSS at p up to nextafter(1,0)); the values are wrong in exactly the p->1 regime the rewrite targeted, and the cdf docstring's 'exact to double rounding by then' is false (bound/true tail = 6.8x at the cap for 1-p=1e-9, 1823x for 1e-12). entropy() is not affected in value (matches Monte Carlo, |z|<=1.02) because the capped quantile only sets an over-generous summation limit. cdf(quantile(q)) round-trips still pass because the wrong cdf and wrong quantile are self-consistent. Fix direction: use E1(k(1-p))/(-ln(1-p)) (or the incomplete-gamma form) for the tail, clamp cdf to [0,1] and enforce monotonicity."
+  },
+  {
+    "id": "P01-F02",
+    "severity": "real",
+    "title": "PoissonDistribution.entropy() and NegativeBinomialDistribution.entropy() allocate one array up to the upper quantile (unbounded memory; MemoryError at large lambda)",
+    "surface": "mixle.stats.PoissonDistribution.entropy (poisson.py:354-357), mixle.stats.NegativeBinomialDistribution.entropy (negative_binomial.py:270-273)",
+    "reproduction": "import tracemalloc\nfrom mixle.stats import PoissonDistribution, NegativeBinomialDistribution\ntracemalloc.start(); PoissonDistribution(1e8).entropy(); print(tracemalloc.get_traced_memory()[1]/1e9, 'GB')   # ~3.2 GB\ntracemalloc.reset_peak(); NegativeBinomialDistribution(1e8, 0.5).entropy(); print(tracemalloc.get_traced_memory()[1]/1e9, 'GB')   # ~3.2 GB\nPoissonDistribution(1e15).entropy()   # MemoryError: Unable to allocate 7.11 PiB for an array with shape (1000001264911106,)",
+    "expected": "Entropy computed in bounded memory (block-summed, or Gaussian/Euler-Maclaurin tail), as 0.8.1 did for LogSeries; or a clear error/bound. lambda=1e8..1e10 is a constructible, sampleable, cdf-able parameter.",
+    "observed": "Peak allocation scales at ~32 bytes per unit of lambda (r): 3.6 MB at 1e5, 33 MB at 1e6, 324 MB at 1e7, 3.21 GB at 1e8 (1.4 s), did not finish in 60 s at 1e12 (thrashing), MemoryError at 1e15. Returned values are correct where it completes (10.629 at 1e8 = 0.5*ln(2*pi*e*lambda)). All other Poisson/NegBin methods at r up to 1e15 run in < 0.01 s.",
+    "notes": "Identical failure mode to the one the 0.8.1 changelog describes as the cause of every CI runner kill ('allocated one array up to the quantile (226 GiB ...)'), fixed only for LogSeries. lambda >= 1e9 will OOM a 16 GB machine."
+  },
+  {
+    "id": "P01-F03",
+    "severity": "real",
+    "title": "WeibullEstimator clamps shape to max_shape=1000 and scale to min_scale without disclosing it in numerical_repairs()",
+    "surface": "mixle.stats.WeibullEstimator (weibull.py: _shape_from_moments lines 44-52, estimate lines 422-426)",
+    "reproduction": "from mixle.stats import WeibullEstimator\nfrom mixle.inference import estimate\nf = estimate([2.0, 2.0, 2.0], WeibullEstimator()); print(f, f.numerical_repairs())\nf = estimate([1e-300]*5, WeibullEstimator()); print(f, f.numerical_repairs())",
+    "expected": "A numerical_repairs() entry such as shape-clamped(... -> max_shape=1000) / scale-floored(... -> 1e-12), matching the convention the changelog asserts for Gamma ('shape-ceiling-clamped'), GPD ('shape-clamped'), InverseGaussian and Bernoulli.",
+    "observed": "WeibullDistribution(1000.0, 2.001153119489987) with numerical_repairs() == (); WeibullDistribution(1000.0, 1.0005765597449936e-12) with numerical_repairs() == () (both clamps bound, silent). Same on a single observation and on any zero-variance sample.",
+    "notes": "The resulting distribution is a near-delta whose log_density raises OverflowError off its spike (see P01-F04). GammaEstimator on the same data reports 'shape-ceiling-clamped(2.5e+14 -> 1e+12)'."
+  },
+  {
+    "id": "P01-F04",
+    "severity": "real",
+    "title": "WeibullDistribution.log_density raises OverflowError where seq_log_density and scipy return -inf",
+    "surface": "mixle.stats.WeibullDistribution.log_density",
+    "reproduction": "from mixle.stats import WeibullDistribution\nd = WeibullDistribution(1000.0, 1.0)\nprint(d.log_density(2.0))    # -1.0715086071862673e+301 (ok)\nprint(d.seq_log_density(d.dist_to_encoder().seq_encode([10.0])))   # [-inf]\nprint(d.log_density(10.0))   # OverflowError: (34, 'Result too large')\nprint(WeibullDistribution(1000.0, 1e-12).log_density(1.0))   # OverflowError",
+    "expected": "-inf (scipy.stats.weibull_min(1000).logpdf(10.0) == -inf), consistent with the vectorized path.",
+    "observed": "Scalar path escapes a Python OverflowError from math.pow/exp once (x/scale)^shape exceeds float range; vectorized path returns -inf with a RuntimeWarning. mean()/variance() on the same objects are correct.",
+    "notes": "Any scalar scoring loop over data with a large-shape Weibull (including the F03 fits) crashes instead of scoring -inf."
+  },
+  {
+    "id": "P01-F05",
+    "severity": "real",
+    "title": "ExponentialEstimator silently ignores negative, NaN and -inf observations",
+    "surface": "mixle.stats.ExponentialEstimator / ExponentialAccumulator",
+    "reproduction": "from mixle.stats import ExponentialEstimator\nfrom mixle.inference import estimate\nprint(estimate([1.0,2.0,3.0], ExponentialEstimator()))                 # ExponentialDistribution(2.0)\nprint(estimate([1.0,2.0,3.0,-100.0], ExponentialEstimator()))          # ExponentialDistribution(2.0)\nprint(estimate([1.0,2.0,3.0,float('nan')], ExponentialEstimator()))    # ExponentialDistribution(2.0)\nprint(estimate([1.0,2.0,3.0,float('-inf')], ExponentialEstimator()))   # ExponentialDistribution(2.0)\nprint(estimate([-1.0,-2.0,-0.5], ExponentialEstimator()))              # ExponentialDistribution(1.0)",
+    "expected": "ValueError naming the family and support (x >= 0, finite), as Gamma, Weibull, Rayleigh, Pareto, HalfNormal, InverseGamma, InverseGaussian, Nakagami, Rician all raise on the same inputs; or at least a numerical_repairs() disclosure.",
+    "observed": "Invalid observations are dropped (fit identical to the clean fit); all-invalid data returns the default beta=1.0. Only +inf is caught, and only via the parameter check ('requires beta > 0'). numerical_repairs() is empty; no warning.",
+    "notes": "Silent data loss in an estimator; a user with a sign error or NaN-contaminated column gets a confident wrong fit."
+  },
+  {
+    "id": "P01-F06",
+    "severity": "real",
+    "title": "PoissonEstimator averages negative counts into lambda and accepts -inf; lambda floor undisclosed; NaN/+inf rejected only by the parameter validator",
+    "surface": "mixle.stats.PoissonEstimator / PoissonAccumulator",
+    "reproduction": "from mixle.stats import PoissonEstimator\nfrom mixle.inference import estimate\nprint(estimate([1,2,3,-5], PoissonEstimator()))                    # PoissonDistribution(0.25)\nprint(estimate([1.0,2.0,3.0,float('-inf')], PoissonEstimator()))   # PoissonDistribution(1e-12)\nprint(estimate([-1,-2], PoissonEstimator()))                       # PoissonDistribution(1e-12)\nf = estimate([0,0,0], PoissonEstimator()); print(f, f.numerical_repairs())   # PoissonDistribution(1e-12) ()\nestimate([1,2,float('nan')], PoissonEstimator())                   # ValueError: PoissonDistribution requires lam > 0.",
+    "expected": "ValueError naming the data requirement (non-negative finite integers) as Binomial/NegativeBinomial/Bernoulli/BetaBinomial raise; and a numerical_repairs() entry for the 1e-12 floor as BernoulliEstimator reports ('bernoulli-p-clamped(0 -> 1e-12)').",
+    "observed": "Negative counts are summed into the rate (lambda=0.25 from [1,2,3,-5]); -inf is accepted and floored to 1e-12 silently; the all-zero floor is silent; NaN/+inf produce a message about the parameter, not the data.",
+    "notes": ""
+  },
+  {
+    "id": "P01-F07",
+    "severity": "real",
+    "title": "GeometricEstimator silently ignores NaN, -inf, negative and zero observations, accepts +inf, and clamps p without disclosure",
+    "surface": "mixle.stats.GeometricEstimator / GeometricAccumulator",
+    "reproduction": "from mixle.stats import GeometricEstimator\nfrom mixle.inference import estimate\nprint(estimate([1,2,3], GeometricEstimator()))                        # GeometricDistribution(0.5)\nprint(estimate([1.0,2.0,3.0,float('nan')], GeometricEstimator()))     # GeometricDistribution(0.5)\nprint(estimate([1.0,2.0,3.0,float('-inf')], GeometricEstimator()))    # GeometricDistribution(0.5)\nprint(estimate([1,2,3,-7], GeometricEstimator()))                     # GeometricDistribution(0.5)\nprint(estimate([1.0,2.0,3.0,float('inf')], GeometricEstimator()))     # GeometricDistribution(1e-12)\nprint(estimate([0,0,0], GeometricEstimator()))                        # GeometricDistribution(0.5)\nf = estimate([1,1,1], GeometricEstimator()); print(f, f.numerical_repairs())   # GeometricDistribution(0.999999999999) ()",
+    "expected": "ValueError naming the support (integers k >= 1, finite); a numerical_repairs() entry when p is clamped to 1-1e-12 or 1e-12.",
+    "observed": "NaN, -inf, negative and zero observations are dropped without error (fit identical to the clean fit; all-invalid returns the default 0.5); +inf is accepted and yields p=1e-12; the [1,1,1] clamp to 0.999999999999 is silent. GeometricDistribution(0.5).log_density(0) is -inf, so zeros are outside the support the estimator silently accepts.",
+    "notes": ""
+  },
+  {
+    "id": "P01-F08",
+    "severity": "minor",
+    "title": "UniformEstimator silently drops NaN observations and applies an undisclosed width floor",
+    "surface": "mixle.stats.UniformEstimator",
+    "reproduction": "from mixle.stats import UniformEstimator\nfrom mixle.inference import estimate\nprint(estimate([0.0,1.0,float('nan')], UniformEstimator()))          # UniformDistribution(0.0, 1.0)\nf = estimate([5.0,5.0,5.0], UniformEstimator()); print(f, f.numerical_repairs())   # UniformDistribution(4.999999995, 5.000000005) ()",
+    "expected": "ValueError on NaN (as +-inf already raise 'requires finite low < high'); a numerical_repairs() entry for the min_width=1e-8 floor.",
+    "observed": "NaN is ignored by the min/max accumulation; the 1e-8 width floor binds silently.",
+    "notes": ""
+  },
+  {
+    "id": "P01-F09",
+    "severity": "minor",
+    "title": "LogSeriesEstimator raises raw Python conversion errors on NaN/inf and clamps p to 1e-12 without disclosure",
+    "surface": "mixle.stats.LogSeriesEstimator",
+    "reproduction": "from mixle.stats import LogSeriesEstimator\nfrom mixle.inference import estimate\nestimate([1.0,2.0,float('nan')], LogSeriesEstimator())   # ValueError: cannot convert float NaN to integer\nestimate([1.0,2.0,float('inf')], LogSeriesEstimator())   # OverflowError: cannot convert float infinity to integer\nf = estimate([1,1,1], LogSeriesEstimator()); print(f, f.numerical_repairs())   # LogSeriesDistribution(1e-12) ()",
+    "expected": "A family-named ValueError ('LogSeriesDistribution has support k >= 1' is what negative/zero data get); OverflowError is the wrong exception class for bad data. A numerical_repairs() entry for the p floor.",
+    "observed": "Messages come from an int() conversion; +-inf surface as OverflowError.",
+    "notes": ""
+  },
+  {
+    "id": "P01-F10",
+    "severity": "minor",
+    "title": "mean()/variance()/entropy() raise OverflowError/ZeroDivisionError or return nan at extreme but constructible parameters",
+    "surface": "WeibullDistribution.mean/variance, BetaDistribution.variance, LogSeriesDistribution.mean/variance, SkewNormalDistribution.entropy",
+    "reproduction": "from mixle.stats import *\nWeibullDistribution(1e-3, 1.0).mean()            # OverflowError: math range error   (scipy: inf)\nBetaDistribution(1e-300, 1e-300).variance()      # ZeroDivisionError\nLogSeriesDistribution(1e-300).mean()             # ZeroDivisionError   (scipy: 1.0)\nLogSeriesDistribution(1e-300).variance()         # ZeroDivisionError\nSkewNormalDistribution(0,1,1e300).entropy()      # nan   (0.7257913 at shape 1e10; scipy 0.7257913)",
+    "expected": "inf / the finite limit (LogSeries mean -> 1, variance -> 0 as p -> 0) / the half-normal entropy, or a clear ValueError.",
+    "observed": "Uncaught arithmetic exceptions from math.gamma / float division; nan from the skew-normal entropy integrand at huge shape.",
+    "notes": "log_density/cdf/quantile/sampler at these same parameters are correct and agree with scipy."
+  },
+  {
+    "id": "P01-F11",
+    "severity": "minor",
+    "title": "PoissonDistribution.quantile silently returns nan for lambda >= ~1e12 while cdf works",
+    "surface": "mixle.stats.PoissonDistribution.quantile (delegates to scipy.stats.poisson.ppf)",
+    "reproduction": "from mixle.stats import PoissonDistribution\nfor lam in [1e10, 1e12, 1e15]:\n    d = PoissonDistribution(lam); print(lam, d.quantile(0.5), d.quantile(0.99), d.cdf(int(lam)))\n# 1e10 10000000000.0 10000232636.0 0.50000027 ; 1e12 nan 1000002326349.0 0.50000027 ; 1e15 nan 1000000073565580.0 0.50000001",
+    "expected": "A finite quantile (the normal approximation gives it to the integer at these lambdas) or an error; not a silent nan from one q while a neighbouring q returns a number.",
+    "observed": "quantile(0.5) is nan at lambda 1e12/1e14/1e15 (scipy parity); quantile(0.99) and cdf return numbers.",
+    "notes": "scipy.stats.poisson.ppf(0.5, 1e12) is also nan; mixle inherits it without a check."
+  },
+  {
+    "id": "P01-F12",
+    "severity": "minor",
+    "title": "Inconsistent quantile boundary conventions across families (Gumbel raises at q=0/1; Poisson/Binomial/NegBin return -1 at q=0)",
+    "surface": "GumbelDistribution.quantile, PoissonDistribution.quantile, BinomialDistribution.quantile, NegativeBinomialDistribution.quantile",
+    "reproduction": "from mixle.stats import *\nGumbelDistribution(0.0, 1.0).quantile(0.0)     # ValueError   (GaussianDistribution(0,1).quantile(0.0) == -inf)\nPoissonDistribution(4.0).quantile(0.0)         # -1.0   (support is k >= 0; GeometricDistribution(0.3).quantile(0.0) == 0.0, LogSeries == 1.0)\nBinomialDistribution(0.4, 10).quantile(0.0)    # -1.0\nNegativeBinomialDistribution(4.0, 0.4).quantile(0.0)   # -1.0",
+    "expected": "One convention: -inf/+inf or the support bound at q in {0, 1} for every family.",
+    "observed": "Gumbel is the only continuous family that raises; three discrete families return a value outside their support.",
+    "notes": ""
+  },
+  {
+    "id": "P01-F13",
+    "severity": "minor",
+    "title": "An (n, 1) column array into any univariate estimator fails with an opaque numpy TypeError",
+    "surface": "mixle.inference.estimate with any univariate *Estimator",
+    "reproduction": "import numpy as np\nfrom mixle.stats import GaussianEstimator\nfrom mixle.inference import estimate\nestimate(np.random.rand(20, 1), GaussianEstimator())   # TypeError: only 0-dimensional arrays can be converted to Python scalars",
+    "expected": "A ValueError naming the estimator and the expected shape (1-D sequence of scalars), or acceptance of a single-column array.",
+    "observed": "Identical opaque TypeError for all 30 families tested; a flat array, list, pd.Series, float32/int64 arrays and lists of numpy scalars all work.",
+    "notes": "A DataFrame column selected as df[['x']].values is the common way to hit this."
+  },
+  {
+    "id": "P01-F14",
+    "severity": "docs",
+    "title": "gallery_univariate_example.py presents a biased Binomial fit (n=9, p=0.444 for true n=10, p=0.4) as parameter recovery with no remark",
+    "surface": "examples/gallery_univariate_example.py (BinomialEstimator(min_val=0) with no max_val)",
+    "reproduction": "cd <workdir> && /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/corpus-081/examples/gallery_univariate_example.py | grep -A2 '^Binomial'",
+    "expected": "Either BinomialEstimator(min_val=0, max_val=10) so the row recovers n=10, p~0.4 like every other row, or a printed note that n is estimated as the sample maximum and is biased low.",
+    "observed": "  true: BinomialDistribution(p=0.4, n=10, ...)\n  fit : BinomialDistribution(p=0.444022, n=9, min_val=0, ...)\nEvery other family in the gallery recovers within ~2%; this row is 11% off in p and wrong in n, under a docstring that says it prints 'the true vs. recovered parameters'.",
+    "notes": "Not a library bug (P(X=10)=1e-4, so no 10 appears in 5000 draws); it is the example's framing that is misleading. The example's output is pinned byte-for-byte by the reproduction bundle, so the pinned output carries the wrong fit."
+  }
+]

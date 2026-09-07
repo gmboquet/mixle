@@ -697,8 +697,11 @@ def _warn_if_capped_unconverged(
       case is scoped correctly by construction, unlike the case below which needs the caller's own value.
     * a run that stopped BELOW the cap on a rejected update, with a caller-supplied ``delta`` in force
       (``iterations < max_its`` and ``requested_delta is not None``), is a different condition -- more
-      iterations would not help -- and is described by ``FitProvenance.converged``'s docstring rather
-      than warned about, so an ordinary e.g. Weibull fit stays quiet.
+      iterations would not help. It stays quiet when the last accepted gain was already within
+      ``delta``, or when the rejection was the first refinement of the initial estimate (an ordinary
+      e.g. Weibull fit, whose one refinement step is not monotone), and is spoken when the objective
+      had climbed for at least two iterations and was still moving by more than ``delta`` (the run
+      ended on a rejection mid-trajectory, not on convergence: FU-03, P02-F06).
 
     What remains from THAT scope is a run the caller asked to iterate to a gain below ``delta`` that
     never got there: warn once, with both remedies.
@@ -730,9 +733,32 @@ def _warn_if_capped_unconverged(
             stacklevel=3,
         )
         return
-    if delta is None or trace.converged or int(trace.iterations) < int(max_its):
+    if delta is None or trace.converged:
         return
     gain = trace.objective_gain
+    if int(trace.iterations) < int(max_its):
+        # Stopped below the cap on a rejected update. Silent when the objective had already settled
+        # to within ``delta``, and silent when the rejection was the very first refinement of the
+        # initial estimate (a closed-form family such as Weibull whose one refinement step is not
+        # monotone: the fit is the one-pass estimate and more iterations would not help). Spoken
+        # when the trajectory had climbed for at least two iterations and was still gaining more
+        # than ``delta`` when a proposal fell below the last accepted objective: the run ended on a
+        # rejection mid-trajectory, not on convergence -- the case the independent tester's
+        # two-component generalized-Pareto mixture hit (FU-03) and the 0.8.1 adversarial review
+        # found silent under the default ``delta`` (P02-F06).
+        rejected = getattr(trace, "rejected_decrease", None)
+        if rejected is not None and int(trace.iterations) >= 2 and gain is not None and float(gain) > float(delta):
+            warnings.warn(
+                "optimize() stopped at iteration %d of max_its=%d on a rejected update: the proposal fell "
+                "%.3g below the last accepted objective while the last accepted step still gained %.3g > "
+                "delta=%g. The returned model is the last accepted one, an unconverged fit, and its "
+                "fit_provenance() reports converged=False. More of the same update would not help; a "
+                "different initialization or restarts=... may get past it."
+                % (int(trace.iterations), int(max_its), float(rejected), float(gain), float(delta)),
+                UserWarning,
+                stacklevel=3,
+            )
+        return
     gain_text = ("last objective gain %.3g" % gain) if gain is not None else "final gain unknown"
     warnings.warn(
         "optimize() stopped at the max_its cap (%d) before the objective settled (%s, delta=%g): the "
@@ -752,7 +778,15 @@ class _FitTrace:
     nothing to do with provenance.
     """
 
-    __slots__ = ("iterations", "converged", "final_objective", "objective_gain", "last_accepted_objective", "repairs")
+    __slots__ = (
+        "iterations",
+        "converged",
+        "final_objective",
+        "objective_gain",
+        "last_accepted_objective",
+        "rejected_decrease",
+        "repairs",
+    )
 
     def __init__(self) -> None:
         self.iterations = 0
@@ -763,6 +797,10 @@ class _FitTrace:
         # return an earlier iterate; the loop exit then rewrites final_objective to describe the
         # model actually returned (the FitProvenance docstring's contract; campaign T4-8).
         self.last_accepted_objective: float | None = None
+        # How far below the last accepted objective the proposal that ended the run fell, when the
+        # run ended on a rejected step (None otherwise): the number that separates a numerical-noise
+        # rejection after a closed-form jump from a real non-improving step mid-trajectory.
+        self.rejected_decrease: float | None = None
         self.repairs: tuple[str, ...] = ()
 
 
@@ -899,6 +937,8 @@ def _em_loop(
             trace.converged = bool(converged)
             trace.final_objective = float(ll) if accepted else trace.final_objective
             trace.objective_gain = float(dll) if accepted else 0.0
+            if not accepted and had_finite_baseline and np.isfinite(dll):
+                trace.rejected_decrease = float(max(-dll, 0.0))
         if converged or (not accepted):
             break
 
@@ -972,6 +1012,8 @@ def _fused_em_loop(
         accepted = bool(np.isfinite(ll_model)) and (prev_ll is None or dll >= -1.0e-12)
         if not accepted:
             exhausted = False
+            if trace is not None and prev_ll is not None and np.isfinite(dll):
+                trace.rejected_decrease = float(max(-dll, 0.0))
             break
 
         accepted_model = model
@@ -1453,7 +1495,10 @@ def optimize(
         backend (str): Encoded-data backend for raw data. ``'local'`` keeps the historical local encoding unless
             resources/placement are supplied; ``'mp'`` and ``'mpi'`` use the shared encoded-data factory.
         num_workers (Optional[int]): Worker count for ``backend='mp'`` and optional partition count hint for
-            ``backend='dask'``.
+            ``backend='dask'``. The default is the CPU count capped at the number of observations; an
+            explicit value is used as given (capped only at the number of observations), so a value far
+            above the core count spawns that many processes and fails slowly at the worker setup timeout
+            rather than promptly. Keep it at or below the core count.
         client (Optional[Any]): Existing dask.distributed client for ``backend='dask'``. If omitted, the dask backend
             uses an active default client or starts a local threaded client.
         comm (Optional[Any]): MPI communicator for ``backend='mpi'``.

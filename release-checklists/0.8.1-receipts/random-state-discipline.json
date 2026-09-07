@@ -1,10 +1,10 @@
 {
-  "artifact": "mixle.release_gate_receipt/v1",
-  "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
-  "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/fit_seed_test.py mixle/tests/sampler_seed_test.py -p no:randomly -q -m \"\" -n 0",
-  "date": "2026-08-22",
-  "evidence_digest": "c672a3438c21316e7ccd9e59839e1aec68f64538a5817d7d08ffbe932fc1b0c8",
-  "gate": "Random-state discipline",
-  "note": "Both named files pass. Scope limit worth stating: this evidences determinism-under-seed and per-test global-state restoration as those two files assert it; it is not a cross-suite proof that no other test leaks global RNG state -- that would be the Flake/order campaign's job, which has not run (see that gate).",
-  "result": "7 passed, 522 subtests passed in 2.78s (exit 0)"
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "c9c5fbbbbd63afbebcaa00d4bf4471d7464d8b02",
+ "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/fit_seed_test.py mixle/tests/sampler_seed_test.py -p no:randomly -q -m \"\" -n 0",
+ "date": "2026-08-22",
+ "evidence_digest": "83af0633c3cad1852761f43f5cefc995d9c85f07655396d7e80d46c533608086",
+ "gate": "Random-state discipline",
+ "note": "Both named files pass. Scope limit worth stating: this evidences determinism-under-seed and per-test global-state restoration as those two files assert it; it is not a cross-suite proof that no other test leaks global RNG state -- that would be the Flake/order campaign's job, which has not run (see that gate).",
+ "result": "7 passed, 522 subtests passed in 2.78s (exit 0)"
 }

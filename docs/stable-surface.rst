@@ -1,7 +1,7 @@
 The Stable Surface
 ==================
 
-This is the reviewed, deliberately short list of what 0.8.0 supports as **stable** (worklist A1.3): the
+This is the reviewed, deliberately short list of what 0.8.1 supports as **stable** (worklist A1.3): the
 surfaces covered by the compatibility policy in :doc:`support-policy`, whose behavior is pinned by tests and
 whose changes follow the deprecation lifecycle. It is short on purpose -- short enough to test exhaustively
 and read on one page. Everything not on this list is ``provisional`` or ``experimental`` per the machine

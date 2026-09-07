@@ -12,7 +12,7 @@ returns the outer-component responsibilities, which concentrate on the matching 
 Takeaway: this is the general admixture base -- LDA is its Categorical-topic special case, and the
 same class takes Gaussian, Poisson, or heterogeneous topics (see ``latent_variable_models_example.py``).
 The long comment on ``max_its`` below documents why this particular configuration is capped by
-iteration count rather than by a convergence delta. Runtime is on the order of one to two minutes.
+iteration count rather than by a convergence delta. Runtime is about twenty seconds.
 """
 
 import numpy as np
@@ -64,5 +64,7 @@ if __name__ == "__main__":
     # iteration-1500 escape -- capturing >99.99% of the log-likelihood improvement a full
     # 10000-iteration run achieves -- so this example finishes quickly and reliably instead of
     # grinding through thousands of iterations of marginal refinement.
-    model = optimize(data, est, max_its=2000, print_iter=500, rng=np.random.RandomState(2))
+    # delta=None: the stop is the iteration budget by design (see above), so the fit is not
+    # reported as an unconverged cap.
+    model = optimize(data, est, max_its=2000, delta=None, rng=np.random.RandomState(2))
     print(str(model))

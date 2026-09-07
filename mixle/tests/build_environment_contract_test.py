@@ -22,7 +22,7 @@ def _module():
 
 def test_build_lock_is_exact_and_matches_build_system() -> None:
     module = _module()
-    lock = ROOT / "release-checklists" / "0.8.0-build-requirements.txt"
+    lock = ROOT / "release-checklists" / "0.8.1-build-requirements.txt"
     locked = module._locked(lock)
     # The lock is the FULL resolved closure, not just the top-level tools. The equality form of
     # this assertion pinned exactly five names, which is precisely the incompleteness the systems

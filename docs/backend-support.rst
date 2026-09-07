@@ -102,7 +102,7 @@ workers under the same estimation contract.
      - ``ray``
      - Map/fold over a Ray cluster.
      - Tested, not CI-gated
-     - E1 — backend test skips in CI. Retained local execution evidence: the backend-execution-evidence appendix of ``release-checklists/0.8.1.md`` (the 0.8.0 checklist, carried into 0.8.1). Retained local execution evidence: the backend-execution-evidence appendix of ``release-checklists/0.8.1.md`` (the 0.8.0 checklist, carried into 0.8.1).
+     - E1 — backend test skips in CI. Retained local execution evidence: the backend-execution-evidence appendix of ``release-checklists/0.8.1.md`` (the 0.8.0 checklist, carried into 0.8.1).
    * - Lightning
      - ``lightning``
      - Mini-batch iteration driving stochastic/mini-batch EM.

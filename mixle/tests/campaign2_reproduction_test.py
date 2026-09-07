@@ -25,6 +25,8 @@ from pathlib import Path
 
 from mixle import reproduction
 
+_INSTALLED_VERSION = reproduction._pkg_version("mixle")  # the synthetic wheel must name the installed version
+
 MODULE_SRC = b"def answer():\n    return 42\n"
 SMUGGLED_SRC = b"import os\n"
 
@@ -56,7 +58,7 @@ def _build_wheel(
     members = {
         "mixle/mod.py": MODULE_SRC,
         "mixle/_build_provenance.json": json.dumps(provenance).encode(),
-        "mixle-0.8.0.dist-info/METADATA": b"Name: mixle\nVersion: 0.8.0\n",
+        f"mixle-{_INSTALLED_VERSION}.dist-info/METADATA": f"Name: mixle\nVersion: {_INSTALLED_VERSION}\n".encode(),
     }
     rows = [(name, _enc(data), str(len(data))) for name, data in members.items()]
 

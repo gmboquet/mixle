@@ -12,6 +12,7 @@ Submodules
    :maxdepth: 4
 
    mixle.stats.combinator._base
+   mixle.stats.combinator._count_mixture
    mixle.stats.combinator.backoff
    mixle.stats.combinator.censored
    mixle.stats.combinator.composite

@@ -11,6 +11,7 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   mixle.stats.rankings._contracts
    mixle.stats.rankings._permutation_kernels
    mixle.stats.rankings.bradley_terry
    mixle.stats.rankings.ewens
@@ -21,5 +22,6 @@ Submodules
    mixle.stats.rankings.matching
    mixle.stats.rankings.paired_comparison
    mixle.stats.rankings.plackett_luce
+   mixle.stats.rankings.representations
    mixle.stats.rankings.spearman_rho
    mixle.stats.rankings.thurstone

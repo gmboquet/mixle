@@ -72,9 +72,16 @@ _NEG_INF = -math.inf
 _INT64_SAFE_BITS = 60.0
 # Float-roundoff slack for validating a step's raw scores at the model boundary (MXR-080-0221): a
 # log-probability must be <= 0 (_SIGN_TOL) and the kept per-step probabilities must sum to ~1 (_NORM_TOL) --
-# both generous enough for float32-derived log_softmax output, tight enough to catch a genuinely broken model.
+# generous enough for reduced-precision log_softmax output, tight enough to catch a genuinely broken
+# model. A bfloat16 log_softmax over a 49k-token vocabulary (what transformers 5 hands back for a
+# checkpoint stored in bfloat16) sums to 0.9985 (8-bit mantissas summed 49k times); a step within the
+# tolerance is renormalized so the enumeration's counts and ranks stay exact, and a genuine truncation
+# or a missing normalization (sums of 0.9, or 3) is still rejected.
 _SIGN_TOL = 1.0e-9
-_NORM_TOL = 1.0e-4
+_NORM_TOL = 2.0e-2
+# Below this deficit a table is float64-exact and left untouched (renormalizing would move every score by
+# a rounding unit and break bit-for-bit agreement between the count-index paths); above it, renormalize.
+_RENORM_TOL = 1.0e-9
 # Bounded restarts before a terminating model's ancestral sampler gives up (MXR-080-0222): each restart is a
 # fresh, independent ancestral draw (proper rejection sampling for "terminates within max_depth"), so this
 # only matters for a model/max_depth combination where termination in-cap is itself rare.
@@ -547,6 +554,8 @@ class AutoregressiveEnumerable:
                     "next_logprobs returned a non-normalized distribution (kept probabilities sum to %.6g, "
                     "expected ~1.0) -- check the model's log_softmax / normalization." % total
                 )
+            if abs(total - 1.0) > _RENORM_TOL:  # reduced-precision rounding: renormalize to an exact categorical
+                lps = lps - math.log(total)
 
         order = np.argsort(-lps, kind="stable")  # descending by log-prob
         return tokens[order], lps[order]

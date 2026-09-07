@@ -30,6 +30,7 @@ Submodules
    mixle.inference.block_gibbs
    mixle.inference.calibrate_fit
    mixle.inference.calibration
+   mixle.inference.calibration_gate
    mixle.inference.causal
    mixle.inference.condition
    mixle.inference.conditional_jit_controller
@@ -51,6 +52,7 @@ Submodules
    mixle.inference.glm
    mixle.inference.gradient_fit
    mixle.inference.heterogeneous_executor
+   mixle.inference.integrity
    mixle.inference.jit
    mixle.inference.leaf_hotswap
    mixle.inference.model_comparison
@@ -65,12 +67,14 @@ Submodules
    mixle.inference.planning
    mixle.inference.posterior
    mixle.inference.precision_plan
+   mixle.inference.price_forecast
    mixle.inference.priors
    mixle.inference.project
    mixle.inference.receipt
    mixle.inference.refine
    mixle.inference.reproduce
    mixle.inference.resampling
+   mixle.inference.risk
    mixle.inference.robust
    mixle.inference.scenario
    mixle.inference.scoring
@@ -85,5 +89,6 @@ Submodules
    mixle.inference.synthesize
    mixle.inference.target
    mixle.inference.torsion
+   mixle.inference.transaction
    mixle.inference.uncertainty
    mixle.inference.uq

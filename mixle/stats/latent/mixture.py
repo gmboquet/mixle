@@ -1091,6 +1091,12 @@ class MixtureSampler(DistributionSampler):
 
 
 MIXTURE_INIT_STRATEGIES = ("dirichlet", "kmeans++")
+# Lloyd (k-means) iterations run from the k-means++ seeds before responsibilities are assigned; the
+# loop stops early once the assignment is stable, which on ordinary data takes well under this cap.
+_KMEANS_LLOYD_ITERATIONS = 20
+# The smallest share of ``n / k`` rows a k-means cluster may hold and still seed a component; below
+# it the k-means++ start is abandoned for the Dirichlet initialization (see the comment in place).
+_KMEANS_MIN_CLUSTER_FRACTION = 0.05
 """The closed set of ``init=`` strategies the mixture EM accumulator implements.
 
 ``"kmeans++"`` (the default) seeds near-hard responsibilities from k-means++ centers when the
@@ -1562,6 +1568,30 @@ class MixtureAccumulator(SequenceEncodableStatisticAccumulator):
         # squared distances (n, k); assign each kept point to its nearest center
         dists = np.sum((feats[:, None, :] - centers[None, :, :]) ** 2, axis=2)
         assign = np.argmin(dists, axis=1)
+        # Lloyd iterations from the k-means++ seeds (what sklearn's ``init_params="kmeans"`` does):
+        # the seeding alone picks a far outlier as a center with probability proportional to its
+        # squared distance, and the near-hard responsibilities then hand that component a handful
+        # of rows, from which EM shrinks it into a degenerate spike it never leaves (a 1500-row
+        # two-regime panel came back as weights 0.993 / 0.007 with ``converged=True`` on the seed a
+        # shipped notebook uses; 0.8.1 adversarial review P07-F02). Moving each center to the mean
+        # of its rows pulls an outlier seed onto the mass of its cluster before EM starts.
+        for _lloyd in range(_KMEANS_LLOYD_ITERATIONS):
+            for c in range(k):
+                members = assign == c
+                if np.any(members):
+                    centers[c] = feats[members].mean(axis=0)
+            dists = np.sum((feats[:, None, :] - centers[None, :, :]) ** 2, axis=2)
+            new_assign = np.argmin(dists, axis=1)
+            if np.array_equal(new_assign, assign):
+                break
+            assign = new_assign
+        # A cluster that still holds only a handful of rows after Lloyd is an outlier the seeding
+        # latched onto, not a component (heavy-tailed regimes do this to k-means at any seed);
+        # starting EM from it produces the spike above. Hand such a start to the Dirichlet
+        # initialization instead, which spreads every row across the components.
+        min_members = max(feats.shape[1] + 1, int(_KMEANS_MIN_CLUSTER_FRACTION * n / k))
+        if np.min(np.bincount(assign, minlength=k)) < min_members:
+            return None
 
         sz = len(keep_idx)
         ww = np.zeros((sz, k))

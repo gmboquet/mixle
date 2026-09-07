@@ -11,6 +11,8 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   mixle.task._ledger
+   mixle.task._teacher
    mixle.task.acquire
    mixle.task.active
    mixle.task.artifact
@@ -20,6 +22,7 @@ Submodules
    mixle.task.capability
    mixle.task.capacity
    mixle.task.cascade
+   mixle.task.catalog_router
    mixle.task.checkpoint_family_ladder
    mixle.task.collapse
    mixle.task.compose
@@ -47,6 +50,7 @@ Submodules
    mixle.task.imagine
    mixle.task.inverse
    mixle.task.irl
+   mixle.task.knowledge_routing
    mixle.task.llm
    mixle.task.model
    mixle.task.multilabel
@@ -71,6 +75,7 @@ Submodules
    mixle.task.structured_out
    mixle.task.task_decomposition
    mixle.task.toolcall
+   mixle.task.trace_record
    mixle.task.traces
    mixle.task.tune
    mixle.task.vlm

@@ -1,6 +1,6 @@
 """``get_estimator``: derive an estimator tree from raw Python data, with no schema declared.
 
-Three rows of mixed junk -- an int, an int that is sometimes ``None``, a string, and a variable-length
+Three rows of mixed junk -- a float, an int that is sometimes ``None``, a string, and a variable-length
 bag of ``(str, int)`` pairs -- are handed to :func:`mixle.utils.automatic.get_estimator`, which walks
 the data and builds the matching estimator tree: a Composite over the four fields, an Optional wrapper
 where a value went missing, a Categorical for the string, and a Sequence of Composites for the bag.

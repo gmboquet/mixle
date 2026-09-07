@@ -34,7 +34,7 @@ def test_tracked_bundle_is_canonical_and_complete():
         assert runner.validate_bundle(tracked) is tracked
     except ValueError as exc:
         # validate_bundle enforces the implementer-environment pins (numpy/scipy versions in
-        # 0.8.0-repro-environment.json) and fails CLOSED anywhere else. On such hosts the precise
+        # 0.8.1-repro-environment.json) and fails CLOSED anywhere else. On such hosts the precise
         # version-mismatch refusal IS correct validator behavior, so the test accepts exactly that
         # message and still fails on any other refusal. Same class as the replay skips below;
         # first fired when the sharded full tier ran on hosted runners (numpy 2.5.1).
@@ -55,7 +55,7 @@ def test_every_local_entry_reproduces_exact_expected_output(entry_id):
     except ValueError as exc:
         if "is required; found" in str(exc):
             # The bundle pins the implementer environment exactly (numpy/scipy versions recorded in
-            # 0.8.0-repro-environment.json), and the runner fails CLOSED on any other -- byte-exact
+            # 0.8.1-repro-environment.json), and the runner fails CLOSED on any other -- byte-exact
             # stdout digests are only meaningful under the arithmetic that produced them. On a host
             # with different pins that refusal is correct behavior, not a failed reproduction, so
             # the test records it as a skip. The checklist says the same: the local bundle is a

@@ -1,0 +1,152 @@
+[
+ {
+  "id": "P07-F01",
+  "severity": "blocking",
+  "title": "HiddenMarkovEstimator EM sits on an initialization plateau; behavioral_anomaly_detection's HMM detector now scores below chance (AUC 0.468, stored 0.837)",
+  "surface": "notebooks/applications/behavioral_anomaly_detection.ipynb cell 23; mixle.stats.HiddenMarkovEstimator via mixle.inference.estimation.optimize",
+  "reproduction": "cd /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-07 && /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python atk_hmm_trace.py ; and atk_beh_hmm.py . Equivalent inline: execute the notebook's code cells 1..19 (data from notebooks-repo/data/user_proc/), then hmm = optimize([train_u[u][0] for u in train_u], HiddenMarkovEstimator([CategoricalEstimator(pseudo_count=0.5) for _ in range(6)]), max_its=40, rng=np.random.RandomState(6), out=io.StringIO()); score clean vs impersonate(…,0.5,i) sequences with per_event() and compute the notebook's auc().",
+  "expected": "Stored output (2026-06-23): 'impersonate : HMM AUC 0.837 vs first-order Markov AUC 0.939'. An HMM with 6 categorical states fitted by Baum-Welch in 40 iterations should at least beat the bag-of-processes model it nests.",
+  "observed": "Fresh: 'impersonate : HMM AUC 0.468 vs first-order Markov AUC 0.939' and the prose line 'on impersonation the HMM trails the order-1 chain (0.47 vs 0.94); both read the transition/phase structure' is printed. LL trace: iteration 1 = -46604.7, iteration 30 = -46599 (gains of 0.05/iter), takeoff only at iteration ~36; final -46502 vs bag-of-words -46605 (HMM at 40 its is a slightly perturbed bag). All seeds 6,1,2,3 at its=40: AUC 0.468/0.463/0.662/0.466. its=200: 0.865/0.812/0.880. delta=1e-4 needs 433 iterations (LL -40637). init_p 0.1/0.5/1.0 all plateau. fit_provenance reports converged=False and a UserWarning is emitted, but the notebook's first cell does warnings.filterwarnings('ignore').",
+  "notes": "Same seed, same data, same max_its produced a working detector on the June build; the candidate's HMM initialization is ~35 iterations of near-zero progress. CHANGELOG 0.8.0 claims 'Mixture/HMM EM: ... the default initialization reaches the correct fit on ordinary data inside the default budget' — this notebook is a counterexample for an explicit 40-iteration budget."
+ },
+ {
+  "id": "P07-F02",
+  "severity": "blocking",
+  "title": "2-component MultivariateGaussian mixture collapses to w=[0.993,0.007] with converged=True and no warning on stock_portfolio_optimization's own seed; regime story is lost",
+  "surface": "notebooks/applications/stock_portfolio_optimization.ipynb cell 17; MixtureEstimator([MultivariateGaussianEstimator(dim=6)]*2) via optimize(rng=RandomState(0))",
+  "reproduction": "cd /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-07 && /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python atk_stock.py && …/python atk_stock2.py . Inline: run the notebook's code cells 1 and 3 (data/stocks/prices.csv; Asim is a 1500x6 simulated two-regime panel from RandomState(0)), then m = optimize(rows(Asim), MixtureEstimator([MultivariateGaussianEstimator(dim=N) for _ in range(2)]), max_its=80, rng=np.random.RandomState(0), out=io.StringIO()); print(m.w, m.fit_provenance()).",
+  "expected": "Stored output: 'calm regime: weight 0.79 avg vol 23.1% avg correlation 0.30 / crisis regime: weight 0.21 avg vol 67.7% avg correlation 0.65' (the simulated regimes' stationary crisis probability is 0.06/(0.06+0.20)=0.23). sklearn GaussianMixture(2, n_init=5) and mixle with seeds 1,2,4 reach LL 24346.5 with w=[0.788,0.212].",
+  "observed": "Fresh notebook: 'calm regime: weight 0.99 avg vol 35.6% avg correlation 0.53 / crisis regime: weight 0.01 avg vol 71.8% avg correlation 0.02 / posterior crisis-probability correlation with the true regime: 0.15'. Seed 0: w=[0.993,0.007], FitProvenance(converged=True, iterations=24, final_objective=23713.7, repairs=()), no warning; seed 3 also collapses (LL 23439.2); its=400 does not escape. The markdown above the cell asserts the mixture 'recovers them'.",
+  "notes": "A degenerate component carrying ~10 of 1500 rows is reported as a clean converged fit. Same seed recovered the regimes on the June build. 2 of 5 seeds collapse on the candidate."
+ },
+ {
+  "id": "P07-F03",
+  "severity": "real",
+  "title": "PPL .fit() on a distribution whose parameters are all constants is a silent no-op (result=None, no warning); three shipped notebooks now print unfitted likelihoods, one of them a false claim",
+  "surface": "mixle.ppl Poisson/NegativeBinomial/StudentT .fit(); notebooks/applications/bayesian_tweet_rhythm.ipynb cell 9, option_pricing_and_implied_volatility.ipynb cell 23, fake_news_detection.ipynb cell 13",
+  "reproduction": "cd /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-07 && /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python -c \"import numpy as np; from mixle.ppl import Poisson, NegativeBinomial, free; x=list(np.random.RandomState(0).poisson(14.8,164).astype(float)); m=Poisson(2.0).fit(x); print(m.dist.lam, m.result); print(Poisson(free).fit(x).dist.lam); print(NegativeBinomial(2.0,0.5).fit(x).dist)\" ; then …/python atk_tweet_ll.py",
+  "expected": "Either the constants are treated as initial values and fitted (the behaviour the stored June outputs show: tweet cell 9 'Poisson -934 vs negative binomial -594' equals the scipy MLE log-likelihoods -933.67 / -593.81 on the same 164 counts) or .fit() refuses/warns that there is nothing to fit.",
+  "observed": "Poisson(2.0).fit(x) -> lam stays 2.0, .result is None, no warning; NegativeBinomial(2.0,0.5).fit -> unchanged. Fresh tweet output: 'total log-likelihood: Poisson -3706 vs negative binomial -1502; AIC favours NB by -4406' (both models unfitted at lam=2, r=2,p=0.5; scipy at lam=2 gives -3706.08 exactly). Fresh option-pricing output: 'Student-t log-lik -1554 beats Gaussian -527' — a false statement printed by the notebook (StudentT(5.0,0.0,1.0).fit left at scale 1.0; stored: -464 beats -527).",
+  "notes": "mixle.ppl's module doc says a slot is 'the token free (estimate it)' so the notebooks misuse the API, but the silent no-op with result=None is the library rough edge: an ordinary user gets no signal. The stored outputs prove the semantics changed since June without a CHANGELOG entry."
+ },
+ {
+  "id": "P07-F04",
+  "severity": "real",
+  "title": "Grouped Bernoulli MCMC (Bernoulli(Beta(a,b).each()).fit(games, how='mcmc')) now raises NotImplementedError; baseball notebook silently falls back",
+  "surface": "mixle.ppl.inference._grouped_target; notebooks/applications/baseball_hierarchical_shrinkage.ipynb cell 10 (section 5 'Full Bayes by MCMC')",
+  "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python -c \"from mixle.ppl import Bernoulli, Beta; games=[[1.0]*h+[0.0]*(45-h) for h in [18,17,16,15,14,14,13,12,11,11,10,10,10,10,10,9,8,7]]; Bernoulli(Beta(164.0,453.9).each()).fit(games, how='mcmc', max_its=50)\"",
+  "expected": "Stored output (June, 155 s cell): 'mixle MCMC sampled per-player posteriors under the EB population prior (acceptance rate 0.37)'; the markdown says mixle's fit(how='mcmc') draws the per-player posterior rates and reports convergence diagnostics.",
+  "observed": "NotImplementedError: grouped NUTS currently supports a Normal likelihood. The notebook's try/except prints 'grouped Bernoulli MCMC is not available in this mixle build; using the explicit grid hyperposterior below' and the cell runs in <1 s. No CHANGELOG entry mentions grouped MCMC being restricted to Normal.",
+  "notes": "Capability regression on a shipped notebook path; harmless only because the notebook anticipated it with an except clause."
+ },
+ {
+  "id": "P07-F05",
+  "severity": "real",
+  "title": "LocalLevel().fit() returns an iteration-capped, unconverged fit with no warning on an ordinary 739-day series; retail notebook's 'matches to numerical precision' claim is now off by 3.3",
+  "surface": "mixle.ppl.LocalLevel.fit (default max_its=100, delta=1e-8); notebooks/applications/retail_trend_statespace.ipynb cells 6 and 28",
+  "reproduction": "cd /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-07 && /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python atk_retail.py ; inline: run the notebook's code cells up to 6 (data/online_retail_ii/transactions_top150.csv), r=LocalLevel().fit(list(s)).result; print(r.converged, r.termination_reason, r.iterations, r.level_sd); repeat with max_its=1000 and 5000.",
+  "expected": "A maximum-likelihood fit (the notebook's prose: 'estimating the level-drift and observation-noise variances by maximum likelihood') or, failing that, the same 'stopped at the max_its cap' UserWarning that optimize() emits. Stored: level-drift sd 3.05, obs sd 23.9, smoother max abs difference 0.0027, EM vs ML log-likelihoods within 0.00.",
+  "observed": "converged=False, termination_reason='iteration_limit', iterations=100, no warning. level_sd 3.2573 (100 its) -> 3.0329 (1000) -> 3.0244 (5000, still converged=False). Fresh notebook prints 'level-drift sd 3.26' and 'from-scratch smoother matches mixle LocalLevel: max abs difference 3.3013' (difference is 3.30 at t=0 decaying geometrically 2.88, 2.51, ... to 0 by t~43: an initial-state convention difference between mixle's initial_mean/initial_sd and the notebook's a0=s[0], P0=1e6). Cell 28: 'the two routes reach the same optimum (log-likelihoods within 0.08)'. Truncated to the first 73 points: also converged=False, iteration_limit, silent.",
+  "notes": "The 8% bias in level_sd at the default budget is small in absolute terms but the fit is reported without any signal that it stopped early; the notebook's two 'matches' claims are stale."
+ },
+ {
+  "id": "P07-F06",
+  "severity": "real",
+  "title": "knowledge_graph_umls prints KnowledgeGraphDistribution.log_density (now the joint log p(h,r,t)) as 'held-out mean log p(t|h,r)' against the uniform baseline -log(nE); fresh output says the model is worse than uniform",
+  "surface": "notebooks/applications/knowledge_graph_umls.ipynb cell 6; mixle.stats.graphs.knowledge_graph.KnowledgeGraphDistribution.log_density",
+  "reproduction": "cd /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-07 && /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python atk_kg2.py (runs the notebook's cells through the fit, ~100 s, then compares kg.log_density((h,r,t)) with kg.tail_log_posterior(h,r)[t] on the test facts). Also atk_kg.py: sum_t exp(kg.log_density((h,r,t))) over all 135 tails = 0.0002.",
+  "expected": "Stored output: 'held-out mean log p(t | h, r) on the test facts = -3.558 (uniform baseline = -4.905)'.",
+  "observed": "Fresh output: '... = -12.118 (uniform baseline = -4.905)'. mean tail_log_posterior(true t) = -3.384; mean log_density = -12.118; difference -8.734 = -log(135)-log(46) exactly (the docstring now says log_density returns the 'normalized joint log p(h,r,t)'). The model is actually better than in June (conditional -3.384 vs -3.558; filtered MRR 0.548 -> 0.735, Hits@10 0.818 -> 0.921), but the shipped cell tells the reader the opposite.",
+  "notes": "Semantics of log_density changed since the stored run without a CHANGELOG entry; the notebook should call tail_log_posterior. Downstream cells (recommend, conformal sets) still work."
+ },
+ {
+  "id": "P07-F07",
+  "severity": "docs",
+  "title": "baseball DP-mixture cell claims 'the nonparametric prior recovered the multi-mode structure (true modes ~.230, ~.310)' while the fresh output finds 1 mode; no seed recovers the true second mode",
+  "surface": "notebooks/applications/baseball_hierarchical_shrinkage.ipynb cell 12; DirichletProcessMixtureEstimator([BetaEstimator()]*6, prior=GammaDistribution(1,4)), max_its=18",
+  "reproduction": "cd /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-07 && /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python atk_dp.py",
+  "expected": "Stored output: 'DP mixture used 6 effective components; the implied talent density has 2 modes at [0.235 0.274]' followed by the unconditional claim line.",
+  "observed": "Fresh: '... has 1 modes at [0.245]' immediately followed by 'the nonparametric prior recovered the multi-mode structure'. Seeds 3,0,1,2,4 at its=18: all 1 mode (0.241-0.248), ELBO still rising (dELBO 0.01-0.07). its=100: seeds 0,2,4 give 2 modes at (0.245, ~0.38) — the second mode is a tail artefact, not the true .310; seeds 3,1 stay unimodal.",
+  "notes": "The claim is printed unconditionally; the mixture is unconverged at the notebook's budget."
+ },
+ {
+  "id": "P07-F08",
+  "severity": "docs",
+  "title": "Stored outputs in baseball, stock_portfolio and parallel_scaling were not produced by the notebooks' current source",
+  "surface": "notebooks/applications/baseball_hierarchical_shrinkage.ipynb cells 4, 18 (and 14-18 via the global rng); stock_portfolio_optimization.ipynb cell 17; architecture_studies/parallel_scaling.ipynb cell 3",
+  "reproduction": "baseball cell 4 is pure numpy with RandomState(1): the current source (trials=400) prints 'k= 5: 0.97->0.47 ...'; the stored '0.99->0.49' is reproduced by trials=1000 or 2000 (see the inline check in this pass's report). Cell 18: held-out LL of 60 players at n_sim=80 is -2653 on any build (RandomState(2) data); stored -6723 needs a larger n_sim. stock cell 17 prints three lines, the stored output has two. parallel_scaling stored rationale says N=10000 / N=500, the source has 1_500 / 250.",
+  "expected": "Stored outputs regenerated from the committed source.",
+  "observed": "Seed-fixed pure-numpy cells differ from their stored outputs; the baseball MCMC fallback (F04) additionally shifts the shared rng so cells 14, 16, 18 print different simulated numbers (e.g. 'variance components: between-team tau=0.29 (true 0.25)' vs stored 0.22).",
+  "notes": "Not a library defect; it means the corpus's stored outputs cannot be used as a regression baseline for these cells."
+ },
+ {
+  "id": "P07-F09",
+  "severity": "docs",
+  "title": "machine_translation_alignment stored outputs are stale on the candidate: NLLs, alignment accuracies and the printed EM iteration log all differ; optimize(print_iter=1) no longer prints without out=",
+  "surface": "notebooks/applications/machine_translation_alignment.ipynb cells 7, 8, 12, 15, 16, 20, 23; mixle.inference.estimation.optimize(out=None, print_iter=1)",
+  "reproduction": "execute the notebook on the candidate (this pass: executed/applications__machine_translation_alignment.ipynb, 40.6 s) and diff against the corpus copy; or optimize(data, MixtureEstimator([GaussianEstimator(),GaussianEstimator()]), max_its=5, delta=None, print_iter=1) prints nothing.",
+  "expected": "Stored: 'Iteration 1: ln[p_mat(Data|Model)]=-6.006654e+04 ...' lines, sparse valid/test NLL 103.450/101.947 bits, hidden 92.533/92.087, alignment accuracy 0.700 (sparse) and 0.600 (hidden).",
+  "observed": "Fresh: no iteration lines (the docstring now documents 'pass out=sys.stdout to watch convergence'), sparse NLL 73.458/73.927, hidden 79.774/77.849, alignment accuracy 1.000 and 0.800, retrieval MRR 0.41->0.49 and 0.32->0.37; cells 8 and 16 additionally show the new 'optimize() stopped at the max_its cap (40)' UserWarning in the output (this notebook does not suppress warnings).",
+  "notes": "The candidate is better, not worse; the narrative holds. The visible new warning and the vanished convergence log are what a reader will notice."
+ },
+ {
+  "id": "P07-F10",
+  "severity": "docs",
+  "title": "parallel_scaling: the 'model too big for 1 worker' case now plans 8x1 data-parallel with rationale 'model fits', contradicting the case label; MEMORY FIT UNKNOWN annotations appear",
+  "surface": "notebooks/architecture_studies/parallel_scaling.ipynb cell 3; mixle.utils.parallel.balance.balance_plan",
+  "reproduction": "execute cell 3 of the notebook on the candidate (mixture(8, d=24) over Resources of 8 cpu devices with memory_bytes=160_000, n_data=250).",
+  "expected": "Stored: 'model too big for 1 worker  1x8  model-parallel x8: N=500 too small to data-parallel, split the model across 8 workers'.",
+  "observed": "Fresh: 'model too big for 1 worker  8x1  data-parallel: model fits and N=250 fills 8/8 workers (no model-axis coupling)'; other rows gain '[MEMORY FIT UNKNOWN: at least one assigned device has no memory evidence]'; the backend list gained component_parallel.",
+  "notes": "Either the planner's memory model changed or the scenario no longer exercises the model-parallel path; the notebook prose treats the row as a model-parallel demonstration."
+ },
+ {
+  "id": "P07-F11",
+  "severity": "minor",
+  "title": "Architecture-study timing claims are far from what the candidate produces on this host (ppl_scaling '76x' -> 4x, import_and_warmup 'cache saves ~8.3x' -> 1.1x, parallel_scaling thread-scaling table)",
+  "surface": "notebooks/architecture_studies/ppl_scaling_vs_pyro_stan.ipynb, import_and_warmup.ipynb, engine_benchmarks.ipynb, parallel_scaling.ipynb",
+  "reproduction": "execute the notebooks on the candidate; this pass's batch run (3 notebooks concurrently) and the solo re-run recorded in report.md.",
+  "expected": "Stored headline numbers: Gaussian MLE N=200000 mixle 19 ms vs torch-Adam 1422 ms (76x); median speedup 72x; cold/warm numba cache 12.95 s / 1.55 s (8.3x); E-step 34.7 ms at 1 thread scaling 2.1x at 8 threads.",
+  "observed": "Uncontended solo re-run on the candidate (executed_solo/): 'Gaussian MLE N=200000 : mixle 92 ms vs torch-Adam 378 ms -> 4x' (stored 19 ms / 1422 ms / 76x), 'median speedup across N: 5x' (stored 72x), Poisson-Gamma exact-vs-MCMC 490x (stored 1614x); import_and_warmup 'cold numba cache (recompile all): 1.78 s / warm 2.84 s / on-disk cache saves ~0.6x' (stored 12.95 s / 1.55 s / 8.3x), steady-state per step 0.2328 s (stored 0.0622 s); engine_benchmarks numba column 0.0050-0.3833 s/iter vs numpy 0.0007-0.0249 (7-15x slower); parallel_scaling 1-thread E-step 1.1 ms (stored 34.7 ms). torch-Adam is 3.8x faster than the stored run on this host while mixle's path is 4x slower, so the gap is not host speed: the venv has no numba (P07-F15) and the notebooks print numba timings without checking.",
+  "notes": "Benchmarks are host-dependent; the finding is that the notebooks' prose states specific multipliers as facts about mixle. See report.md for the solo (uncontended) re-run."
+ },
+ {
+  "id": "P07-F12",
+  "severity": "docs",
+  "title": "fake_news_detection topic-model claim ('themes carry signal beyond individual words') is seed-fragile and its stored numbers differ on the candidate",
+  "surface": "notebooks/applications/fake_news_detection.ipynb cell 11; MixtureEstimator of 6 SequenceEstimator(IntegerCategoricalEstimator, PoissonEstimator), max_its=40",
+  "reproduction": "cd /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-07 && /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python atk_fn.py",
+  "expected": "Stored: 'most fake-skewed topic fake-fraction 0.56; most real-skewed 0.20'.",
+  "observed": "Fresh (seed 2): 0.51 / 0.24. Seeds 0,1,3: spread 0.11, 0.25, 0.10 (fake fractions 0.37-0.48 for seed 0; 0.39-0.48 for seed 3), all converged=True.",
+  "notes": "Two of four seeds produce topics that barely separate fake from real, while the printed conclusion is unconditional."
+ },
+ {
+  "id": "P07-F13",
+  "severity": "minor",
+  "title": "MarkovChainEstimator(pseudo_count=0.1) scores any sequence containing a symbol unseen in training at -inf",
+  "surface": "mixle.stats.MarkovChainEstimator / MarkovChainDistribution.seq_log_density",
+  "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python -c \"import io; from mixle.stats import MarkovChainEstimator, seq_encode; from mixle.inference.estimation import optimize; m=optimize([['a','b','a','b'],['b','a','c']], MarkovChainEstimator(pseudo_count=0.1), max_its=2, out=io.StringIO()); print(float(m.seq_log_density(seq_encode([['a','z']],model=m)[0][1])[0]))\"",
+  "expected": "A pseudo-count smoothed chain to give a finite (small) probability to an unseen symbol, or the encoder to reject the unknown symbol explicitly.",
+  "observed": "-inf. In the behavioral notebook trained on 10% of users, 'clean' held-out users score inf per-event surprise with no warning (the AUC still computes, 0.889).",
+  "notes": "Not reached on the shipped notebook's own path (the full training set covers the vocabulary)."
+ },
+ {
+  "id": "P07-F14",
+  "severity": "docs",
+  "title": "Numeric drift with conclusions intact across application/geoscience notebooks (stored outputs stale on the candidate)",
+  "surface": "geochemical_fingerprinting cells 9/11/15; behavioral_anomaly_detection cells 9/11/19; geospatial_tweet_clusters cell 13; knowledge_graph_umls cells 8/10/12; mineral_exploration_kriging cells 10/12/14; near_surface_joint_inversion; radar_tomography; bayesian_tweet_rhythm cell 3",
+  "reproduction": "diff the fresh executions (this pass: diffs/*.txt) against the corpus copies.",
+  "expected": "Stored numbers.",
+  "observed": "geochemical RAW model: acc 0.909->0.879, Brier '2.39x worse'->'3.40x', Galapagos 0.71->0.43 (deterministic data; MultivariateGaussianEstimator on ill-conditioned raw ppm). behavioral: mixture-of-sequences per-event surprise 2.95->3.64 (now worse than the bag's 3.22), impersonate-by-mixture AUC 0.669->0.616, GMM weights [0.78 0.10 0.08 0.04]->[0.79 0.17 0.03 0.02], DP keeps 19/20 not 20/20. geospatial BIC values shift by up to 4400 (still monotone in K). kriging range 0.78->0.79 kft. near_surface joint velocity RMSE 0.533->0.658, real-data cross-gradient 0.719->0.057 (mixle-pde 0.8.0.dev0). radar corr 0.928->0.939. tweet CI upper 29.8->29.7.",
+  "notes": "Every prose conclusion in these cells still holds on the fresh numbers; listed so the stale-output extent is on record."
+ },
+ {
+  "id": "P07-F15",
+  "severity": "real",
+  "title": "NumbaKernelFactory builds and runs a 'numba' kernel with no warning when numba is not installed (mixle[numba] extra absent); the review venv itself lacks numba, so every timing figure in architecture_studies is the non-JIT path",
+  "surface": "mixle.stats.compute.kernel.NumbaKernelFactory.build; notebooks/architecture_studies/engine_benchmarks.ipynb, import_and_warmup.ipynb, ppl_scaling_vs_pyro_stan.ipynb, parallel_scaling.ipynb; candidate venv /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv",
+  "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python -c \"import numba\" (ModuleNotFoundError; wheel METADATA: Provides-Extra: numba). Then: python -c \"import warnings; warnings.simplefilter('always'); from mixle.stats import MixtureEstimator, GaussianEstimator, MixtureDistribution, GaussianDistribution; from mixle.engines import NUMPY_ENGINE; from mixle.stats.compute.kernel import NumbaKernelFactory; m=MixtureDistribution([GaussianDistribution(0.0,1.0),GaussianDistribution(5.0,1.0)],[0.5,0.5]); k=NumbaKernelFactory().build(m, NUMPY_ENGINE, estimator=MixtureEstimator([GaussianEstimator(),GaussianEstimator()])); print(type(k).__name__)\" ; then execute architecture_studies/engine_benchmarks.ipynb and read the numba column.",
+  "expected": "An explicit request for the numba kernel factory should raise (numba not importable) or at least warn that it is falling back; benchmark notebooks should detect numba absence before printing 'numba' timings.",
+  "observed": "build returns GeneratedNumbaKernel, encode works, zero warnings. engine_benchmarks prints 'N= 2000 numpy 0.0007 numba 0.0050 torch 0.0022 ... N=200000 numpy 0.0249 numba 0.3833 torch 0.0244' (the 'numba fused' line is 7-15x slower than numpy) and import_and_warmup prints 'cold numba cache (recompile all): 1.78 s / warm 2.84 s / on-disk cache saves ~0.6x' as if a cache were in play. ppl_scaling's headline '76x' becomes '4x'.",
+  "notes": "Two consequences: (1) a user who installs plain mixle and asks for numba kernels gets a silently slow interpreted path labelled numba; (2) the candidate venv used by all ten review passes was built without the numba extra, so any performance evidence gathered in this review cycle is on the numpy path and the architecture-study prose (76x, 8.3x cache saving) is unverified on the candidate."
+ }
+]

@@ -7,7 +7,11 @@ named-field Record / DictRecord models. Self-contained random data only.
 
 Takeaway: "structured" is not a special mode. Every family here is built, sampled, and re-estimated by
 the same ``optimize``/``estimate`` calls a scalar Gaussian uses -- the latent structure lives inside
-the family, not in the calling code.
+the family, not in the calling code. Several fits are deliberately budgeted (small ``max_its``) to keep
+the gallery fast; ``optimize`` reports each budget stop in a ``UserWarning`` on stderr, which is expected.
+The quantized HMM re-estimates the exponent assignment jointly with ``theta``, so the recovered
+``theta`` need not equal the planted one: a nearby exponent assignment with a different ``theta`` is
+an equally good local optimum.
 
 Other model groups have their own focused scripts -- ``structured_hmm_example.py`` (HMMs over
 structured emissions), ``lookback_hmm_example.py`` (lag-1 emissions), ``hidden_association_example.py``

@@ -15,9 +15,9 @@ Evidence grades (from the 0.8.0 release contract):
 - **E5 — production/scale:** sustained real deployment, or representative multi-node/multi-GPU runs.
 
 Stable-core claims target at least **E2**; performance and backend claims target at least **E3**.
-"Production-ready", "safe", or "frontier" claims require **E5** and are **not** made in 0.8.0. Grades
+"Production-ready", "safe", or "frontier" claims require **E5** and are **not** made in 0.8.1. Grades
 here are the release owner's current assessment and are revised as evidence lands (several are pending
-the 0.8.0 re-run, marked below).
+the 0.8.1 re-run, marked below).
 
 .. list-table::
    :header-rows: 1
@@ -36,10 +36,10 @@ the 0.8.0 re-run, marked below).
        there with no source-tree import path and retains JUnit evidence.
    * - "15,000+ tests"
      - E1
-     - Measured 2026-08-04: 15,121 collected (``pytest --collect-only -m ""``) on the release-prep
-       tip. The tiers run in CI (``core`` on 3.11–3.12 and both platforms, ``full`` sharded on 3.12,
+     - Measured 2026-09-07: 16,538 collected (``pytest --collect-only -m ""``) on the 0.8.1 candidate
+       ``c9c5fbbb``. The tiers run in CI (``core`` on 3.11–3.12 and both platforms, ``full`` sharded on 3.12,
        ``optional`` sharded); not yet run from the wheel for the whole suite (only the import sweep
-       is) — that remains a 0.8.0 exit criterion.
+       is) — that remains a 0.8.1 exit criterion.
    * - One ``optimize(...)`` call fits a heterogeneous composed base model
      - E2
      - The collection-light public fit path runs from the isolated installed wheel and retains JUnit
@@ -71,7 +71,9 @@ the 0.8.0 re-run, marked below).
    * - Serialization round-trips and provenance / replay
      - E1
      - Fresh-process serialization tests; lineage/receipt tamper-and-replay tests. Cross-version
-       (load a prior release's artifact) fixtures are a 0.8.0 gate in progress (worklist M11.2).
+       (load a prior release's artifact) fixtures: digest-bound 0.7.0 load fixtures for the stable
+       persistence schemas exist (see :doc:`stable-surface`); broader cross-version coverage remains a
+       0.8.1 gate (worklist M11.2).
    * - Calibrated abstention (conformal / cascade / escalation)
      - E1
      - Conformal-coverage and calibration-diagnostic tests. This is a deferral mechanism, not a safety

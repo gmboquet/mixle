@@ -16,6 +16,7 @@ Submodules
    mixle.utils.parallel.em_observability
    mixle.utils.parallel.fault_tolerant_training
    mixle.utils.parallel.lightning_data
+   mixle.utils.parallel.megatron_training
    mixle.utils.parallel.model_decomposition
    mixle.utils.parallel.model_parallel
    mixle.utils.parallel.mpi
@@ -25,5 +26,8 @@ Submodules
    mixle.utils.parallel.resilient_em
    mixle.utils.parallel.sdc_audit
    mixle.utils.parallel.torch_neural
+   mixle.utils.parallel.torch_training
    mixle.utils.parallel.torchrun
+   mixle.utils.parallel.training_contracts
    mixle.utils.parallel.training_health
+   mixle.utils.parallel.training_launchers

@@ -11,6 +11,10 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   mixle.engines._bitpacked
+   mixle.engines._dd_kernels
+   mixle.engines._lns_kernel
+   mixle.engines._optional_extension
    mixle.engines.affine
    mixle.engines.arithmetic
    mixle.engines.base

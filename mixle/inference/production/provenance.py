@@ -325,7 +325,7 @@ class _EMHistory:
     ``em_record`` (the ``_write_em_iter`` hook) records the scalar trace -- loglik / delta / valid_loglik /
     objective. ``__call__`` (the ``optimize(on_step=...)`` hook) fingerprints the accepted model each
     iteration and chains it to the previous model and transition digests, so when both are wired the
-    trace is an authenticated execution chain rather than a set of asserted parent hashes. Records are
+    trace is a digest-chained execution record rather than a set of asserted parent hashes. Records are
     merged by iteration, so either hook may be absent or fire in either order."""
 
     def __init__(self) -> None:
@@ -392,9 +392,11 @@ def fit_with_provenance(
     log-likelihood, and environment. Pass your own ``out=`` to print iterations (then the trace is not
     captured).
 
-    With ``lineage=True`` (default) each iteration in the convergence trace records an authenticated
+    With ``lineage=True`` (default) each iteration in the convergence trace records a digest-chained
     transition from the previous accepted model, and a terminal record binds the model actually returned
-    by the optimizer (check it with :func:`verify_lineage`). This fingerprints the model every iteration;
+    by the optimizer (check it with :func:`verify_lineage`; the digests bind the iteration sequence and
+    the model, not the header's dataset hash, record count, or log-likelihood values, which stay
+    recorded claims). This fingerprints the model every iteration;
     pass ``lineage=False`` to skip it for very large models. Any user ``on_step=`` is still called."""
     import inspect
 

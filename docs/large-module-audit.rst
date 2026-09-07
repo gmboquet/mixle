@@ -32,7 +32,7 @@ Estimator / DataEncoder). Their bulk is the vectorized ``seq_update`` / ``seq_lo
 for several, compiled Numba kernels. They share one extraction principle: the compiled kernels and the data
 encoder are the only clean seams; the distribution/estimator pair is a single numerical unit.
 
-``mixle/stats/latent/hidden_markov.py`` (4,395)
+``mixle/stats/latent/hidden_markov.py`` (5,308)
     * **Responsibilities:** the principal HMM path — distribution, scaled forward/backward, Baum-Welch EM,
       terminal/terminal-value likelihoods, Dirichlet chain prior.
     * **Stateful globals:** only ``TypeVar``\s (``T``, ``E1``, ``E2`` …); no mutable registry.
@@ -44,7 +44,7 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
       terminal-value likelihood blocks are the next candidate seam **if** a defect ever localizes there;
       absent that, leave as-is — this is the most parity-tested numerical code in the tree.
 
-``mixle/stats/latent/tree_hidden_markov_model.py`` (2,571)
+``mixle/stats/latent/tree_hidden_markov_model.py`` (2,990)
     * **Responsibilities:** tree-structured HMM; Numba forward/backward, Baum-Welch, posteriors, Viterbi.
     * **Stateful globals:** ``TypeVar``\s and shape aliases only.
     * **Optional imports:** none (Numba kernels inline as module functions ``numba_*``).
@@ -53,7 +53,7 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
     * **Extraction boundary:** the ``numba_*`` kernel group is the clean seam (mirror ``hidden_markov``'s
       split into a ``_..._numba_kernels`` module) — worth doing only alongside a kernel change.
 
-``mixle/stats/latent/structured_hmm.py`` (1,822)
+``mixle/stats/latent/structured_hmm.py`` (3,320)
     * **Responsibilities:** HMM with pluggable transition operators (dense / low-rank / sparse /
       block-diagonal / banded), 24 classes.
     * **Stateful globals:** ``_DENSE_FB_NUMBA`` (compiled-kernel handle).
@@ -63,9 +63,9 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
     * **Extraction boundary:** the ``TransitionOperator`` family (already an internal class hierarchy) is
       the natural module split — a genuine isolated-testing win, low numerical risk.
 
-``mixle/stats/latent/lookback_hidden_markov_model.py`` (1,528)
-    * **Responsibilities:** the lookback-window HMM — a typed rewrite of the sibling
-      ``mixle.stats.lookback_hmm`` — forward/backward and Baum-Welch EM over a bounded lookback
+``mixle/stats/latent/lookback_hidden_markov_model.py`` (2,096)
+    * **Responsibilities:** the lookback-window HMM — a typed rewrite of a since-removed
+      untyped sibling module — forward/backward and Baum-Welch EM over a bounded lookback
       horizon, terminal-state/value likelihoods, and (as of the conjugate-prior fix) a Dirichlet
       chain prior mirroring ``hidden_markov.py``'s own MAP path.
     * **Stateful globals:** only ``TypeVar``\s (``T``, ``E0``, ``E1``); no mutable registry.
@@ -80,7 +80,7 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
       ``hidden_markov.py``'s own inline placement rather than introducing a separable module —
       the file crossed 1,500 lines to reach that parity, not through unrelated growth.
 
-``mixle/stats/sequences/markov_chain.py`` (2,009)
+``mixle/stats/sequences/markov_chain.py`` (2,755)
     * **Responsibilities:** Markov chain distribution/estimator, Dirichlet prior, stationary distribution,
       gradient-fit state.
     * **Stateful globals:** ``TypeVar``\s only.
@@ -90,7 +90,7 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
     * **Extraction boundary:** leave as-is; the gradient-fit state (``_MarkovChainGradientFitState``) is the
       only separable piece and is small.
 
-``mixle/stats/latent/mixture.py`` (1,829)
+``mixle/stats/latent/mixture.py`` (2,348)
     * **Responsibilities:** the general finite mixture — responsibilities, weight prior, EM.
     * **Stateful globals:** ``TypeVar``\s only.
     * **Optional imports:** none (Numba referenced through the compute layer).
@@ -99,7 +99,7 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
     * **Extraction boundary:** leave as-is; the prior-construction helpers (``mixture_prior`` and friends)
       could move to a ``_priors`` helper but that is cosmetic, not defect-driven.
 
-``mixle/stats/latent/lda.py`` (1,721) and ``mixle/stats/latent/labeled_lda.py`` (1,608)
+``mixle/stats/latent/lda.py`` (1,966) and ``mixle/stats/latent/labeled_lda.py`` (1,837)
     * **Responsibilities:** LDA and label-supervised LDA — variational E-step, alpha updates.
     * **Stateful globals:** shape aliases only; no registry.
     * **Optional imports:** none.
@@ -108,7 +108,7 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
     * **Extraction boundary:** the shared alpha-update math (``update_alpha`` exists in both) is a real
       duplication seam — a small shared helper would remove copy drift; safe, defect-adjacent.
 
-``mixle/stats/combinator/conditional.py`` (1,570)
+``mixle/stats/combinator/conditional.py`` (1,965)
     * **Responsibilities:** conditional-distribution combinator (feature → response) and its accumulation.
     * **Stateful globals:** shape aliases only.
     * **Optional imports:** none.
@@ -116,7 +116,7 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
     * **Serialization:** ``dist_to_encoder`` / ``seq_encode``.
     * **Extraction boundary:** leave as-is; the two module-level stat helpers are already factored.
 
-``mixle/stats/graphs/temporal_graph_grammar.py`` (2,509)
+``mixle/stats/graphs/temporal_graph_grammar.py`` (4,424)
     * **Responsibilities:** temporal graph-grammar family (37 classes: motifs, labeled/unlabeled variants).
     * **Stateful globals:** ``_EPS`` only.
     * **Optional imports:** none at import (graph backends reached lazily).
@@ -125,7 +125,7 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
     * **Extraction boundary:** the labeled vs unlabeled variant families are separable, but they share the
       motif and alignment helpers; split only if a variant grows an independent defect surface.
 
-``mixle/stats/latent/integer_hidden_association.py`` (1,842)
+``mixle/stats/latent/integer_hidden_association.py`` (1,843)
     * **Responsibilities:** integer hidden-association models over grouped-count word sets.
     * **Stateful globals:** encoding/statistic ``TypeVar``\s (``E0``--``E4``, ``SS1``, ``SS2``) only, plus
       the engine-kernel registration performed by ``_register_int_hidden_association_engine_kernel``.
@@ -136,7 +136,7 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
     * **Extraction boundary:** the ``numba_*`` kernels are the only clean seam, as elsewhere in this
       section; the distribution/estimator pair is one numerical unit. Leave as-is absent a defect.
 
-``mixle/stats/latent/integer_probabilistic_latent_semantic_indexing.py`` (1,719)
+``mixle/stats/latent/integer_probabilistic_latent_semantic_indexing.py`` (1,723)
     * **Responsibilities:** integer PLSI — the EM fixed point over document/topic/word factors.
     * **Stateful globals:** ``T1``/``SS1`` aliases, plus ``_register_int_plsi_engine_kernel``'s registration.
     * **Optional imports:** Numba, through the compute layer.
@@ -156,7 +156,7 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
       ``_HeterogeneousPCFGQuantizedIndexBuilder`` are already self-contained and are the seam if one is
       ever needed; the recursions themselves are a single unit.
 
-``mixle/stats/sequences/integer_markov_chain.py`` (1,971)
+``mixle/stats/sequences/integer_markov_chain.py`` (1,972)
     * **Responsibilities:** integer Markov chains with optional lagged transitions, including the
       explicitly non-generative scoring mode (``NonGenerativeIntegerMarkovChainError``).
     * **Stateful globals:** ``E1``/``E2``/``SS1``/``SS2`` aliases only.
@@ -166,7 +166,7 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
     * **Extraction boundary:** leave as-is. The lag handling threads through encode, score and update
       together; separating it would split one contract across two modules.
 
-``mixle/stats/multivariate/multivariate_gaussian.py`` (1,893)
+``mixle/stats/multivariate/multivariate_gaussian.py`` (1,911)
     * **Responsibilities:** full-covariance Gaussian six-type contract, the covariance ridge and its
       repair disclosure, the robust Cholesky self-heal, the opt-in conditioning receipt, and the
       conditioning-gated shift-anchored moment track.
@@ -182,7 +182,7 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
       ``_consistent_anchored_moments``, ``_anchored_mean_offset``, ``_anchored_pooled_covariance``)
       are the one clean seam, shared in spirit with the diagonal and univariate Gaussian families.
 
-``mixle/stats/multivariate/diagonal_gaussian.py`` (1,514)
+``mixle/stats/multivariate/diagonal_gaussian.py`` (1,624)
     * **Responsibilities:** diagonal-covariance Gaussian six-type contract, per-coordinate variance
       floor and its repair disclosure, and the same conditioning-gated shift-anchored moment track.
     * **Stateful globals:** none.
@@ -191,7 +191,7 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
     * **Serialization:** ``dist_to_encoder``/``seq_encode`` and ``DiagonalGaussianSuffStat.__reduce__``.
     * **Extraction boundary:** the anchored-moment helpers, jointly with the full-covariance module's.
 
-``mixle/stats/multivariate/integer_multinomial.py`` (1,576)
+``mixle/stats/multivariate/integer_multinomial.py`` (1,586)
     * **Responsibilities:** integer-keyed multinomial over a bounded support.
     * **Stateful globals:** ``SS0``/``D``/``E0``/``E`` aliases only.
     * **Optional imports:** none.
@@ -199,7 +199,7 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
     * **Serialization:** ``dist_to_encoder`` / ``seq_encode``.
     * **Extraction boundary:** leave as-is; the six-type contract is already the minimum unit here.
 
-``mixle/stats/combinator/sequence.py`` (1,666)
+``mixle/stats/combinator/sequence.py`` (1,679)
     * **Responsibilities:** iid sequence laws plus the explicitly non-generative sequence score modes
       (``NonGenerativeSequenceError``), including the length-support reasoning.
     * **Stateful globals:** ``T``/``E1``/``E2``/``E`` aliases and the two proof limits
@@ -224,7 +224,7 @@ encoder are the only clean seams; the distribution/estimator pair is a single nu
 Probabilistic-programming surface
 ---------------------------------
 
-``mixle/ppl/inference.py`` (2,843)
+``mixle/ppl/inference.py`` (4,490)
     * **Responsibilities:** posterior inference for the PPL — conjugate, Laplace, VI, MCMC routes.
     * **Stateful globals:** several **registries** — ``_CONJUGATE``, ``_CONJ_LOGM``, ``_HIERARCHICAL``,
       ``_PRIOR_DICT_BUILDERS``, ``_EXPECTED_PRIOR_FAMILY`` (dispatch tables; the first thing to preserve).
@@ -235,7 +235,7 @@ Probabilistic-programming surface
       of its own, separable from the Laplace/VI/MCMC numeric routes — a real isolated-testing win. Move the
       registries as a unit so dispatch stays in one place.
 
-``mixle/ppl/core.py`` (2,235)
+``mixle/ppl/core.py`` (3,317)
     * **Responsibilities:** the PPL authoring DSL (``Field`` / ``Group`` / ``Net`` / ``Conv`` /
       ``Transformer``) and the fitter registry.
     * **Stateful globals:** ``_ROUTE_CAVEATS``, ``_CMP``, ``_RESIDUAL`` plus the fitter registry populated by
@@ -248,7 +248,7 @@ Probabilistic-programming surface
 Compiled-kernel code generation
 -------------------------------
 
-``mixle/stats/compute/fused_codegen.py`` (1,703)
+``mixle/stats/compute/fused_codegen.py`` (2,438)
     * **Responsibilities:** the fused-kernel source generator — per-family ``LeafTemplate``\s (scalar,
       vector, matrix, tabulated, categorical, chain), plan analysis (``analyze``/``fusible``), source
       emission for the one-pass scorer and E-step (sequential and chunk-parallel prange variants), the
@@ -274,7 +274,7 @@ Compiled-kernel code generation
 Infrastructure and facade
 -------------------------
 
-``mixle/lifecycle.py`` (1,531)
+``mixle/lifecycle.py`` (1,702)
     * **Responsibilities:** the ``Model`` facade (fit/deploy/load, provenance and integrity checks) and
       ``propose`` — automatic model-family selection and its held-out verified-frontier scoring.
     * **Stateful globals:** none (module-level constants only).
@@ -287,7 +287,7 @@ Infrastructure and facade
       the tabular-record helpers (``_tabular_records`` et al.); a real seam, but split only if one half's
       test surface needs isolating from the other's.
 
-``mixle/inference/estimation.py`` (1,548)
+``mixle/inference/estimation.py`` (2,422)
     * **Responsibilities:** the ``optimize`` / ``fit`` / ``best_of`` front door — data encoding, model
       proposal handoff (``_maybe_structured_model``), the fused/standard EM drivers, and the
       schedule/objective plumbing.
@@ -300,7 +300,7 @@ Infrastructure and facade
       EM-driver loops are separable seams; extract only to remove a demonstrated defect, per the
       audit's own rule.
 
-``mixle/inference/glm.py`` (1,853)
+``mixle/inference/glm.py`` (1,895)
     * **Responsibilities:** the GLM front door (``glm``) across the exponential-family link/family
       set and its robust standard-error variants (HC0-HC3, with their leverage/rank diagnostics),
       ``robust_regression`` (Huber/Tukey IRLS and its degenerate-fit breakdown disclosure), the
@@ -324,7 +324,7 @@ Infrastructure and facade
       growth elsewhere -- extract only if that family needs an isolated test surface of its own, not
       as a line-count exercise.
 
-``mixle/stats/__init__.py`` (2,133)
+``mixle/stats/__init__.py`` (2,426)
     * **Responsibilities:** the ``mixle.stats`` facade — lazy ``__getattr__`` re-exports, capability
       registration, and the ``load_models`` / ``dump_models`` model-collection serialization entry points.
     * **Stateful globals:** ``_INTERNAL_SUFFIXES`` plus the lazy-export and capability tables.
@@ -335,7 +335,7 @@ Infrastructure and facade
       ``_registration`` helper, leaving ``__init__`` as thin re-export glue. Low risk, improves import
       readability; do it when the registration tables next change.
 
-``mixle/utils/automatic/profiling.py`` (2,180)
+``mixle/utils/automatic/profiling.py`` (3,301)
     * **Responsibilities:** automatic-modeling data profiling — marginal/pairwise structure detection.
     * **Stateful globals:** tuning constants ``_MIXTURE_EM_CAP``, ``_NUMERIC_MODEL_MARGIN_BITS``,
       ``GOF_ABSTAIN_PVALUE`` (thresholds, not mutable state).
@@ -343,7 +343,7 @@ Infrastructure and facade
     * **Extraction boundary:** the goodness-of-fit / entropy scoring helpers are separable from the
       profile dataclasses; a defect-neutral tidy, not urgent.
 
-``mixle/utils/parallel/planner.py`` (1,884)
+``mixle/utils/parallel/planner.py`` (2,345)
     * **Responsibilities:** device/placement/sharding planning and the encoded-data backend registry.
     * **Stateful globals:** the encoded-data backend registry (via ``register_encoded_data_backend``).
     * **Optional imports:** ``dask``, ``torch``.
@@ -351,7 +351,7 @@ Infrastructure and facade
     * **Extraction boundary:** the encoded-data backend registry and its backends are separable from the
       placement/calibration solver; a real seam, but touch it only with a distributed-path change.
 
-``mixle/stats/compute/declarations.py`` (1,528)
+``mixle/stats/compute/declarations.py`` (2,303)
     * **Responsibilities:** distribution declarations (parameter/statistic specs, exponential-family specs)
       and the Numba-lowering validation.
     * **Stateful globals:** ``_NUMBA_INFIX_OPS``, ``_NUMBA_FUNC_OPS``, ``_KNOWN_PARAMETER_CONSTRAINTS``,
@@ -360,7 +360,7 @@ Infrastructure and facade
     * **Extraction boundary:** the Numba-lowering tables and their validation are separable from the spec
       dataclasses; split when the lowering rules next grow.
 
-``mixle/stats/compute/pdist.py`` (1,689)
+``mixle/stats/compute/pdist.py`` (2,068)
     * **Responsibilities:** the root contracts — the six-type ABCs, ``DensitySemantics``, and the error
       types (``ContractError``, ``EnumerationError``, ``KeyValidationError``).
     * **Stateful globals:** ``SS`` alias and ``_KEY_ATTRS``.
@@ -371,7 +371,7 @@ Infrastructure and facade
       split multiplies the import-cycle surface that ``doe_task_models_clean_import_test`` guards. The
       error classes could move if that test ever forces it, and nothing else should.
 
-``mixle/stats/compute/fused_kernels.py`` (1,759)
+``mixle/stats/compute/fused_kernels.py`` (1,803)
     * **Responsibilities:** fused Numba kernels for mixture estimation over heterogeneous data, and the
       per-leaf builders that generate them.
     * **Stateful globals:** ``_BUILDERS`` (the leaf-builder registry) and ``_NEG_INF``.
@@ -392,7 +392,7 @@ Infrastructure and facade
     * **Extraction boundary:** the ``FieldKernel`` hierarchy is fully separable from ``FieldSystem`` and
       the ``Proxy`` family; a genuine three-way seam, and the first place to split if this module grows.
 
-``mixle/relations.py`` (1,558)
+``mixle/relations.py`` (1,825)
     * **Responsibilities:** relations over structured spaces enumerated by residual — shortest path,
       assignment, spanning tree, edit distance, Viterbi path, best-subset regression.
     * **Stateful globals:** none.

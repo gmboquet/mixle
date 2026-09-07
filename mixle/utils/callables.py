@@ -32,7 +32,7 @@ def accepts_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> bool:
 
     Args:
         fn: The callable to check.
-        *args, **kwargs: The arguments the richer call would pass.
+        ``*args``, ``**kwargs``: The arguments the richer call would pass.
 
     Returns:
         True if the signature accepts this call shape, else False.

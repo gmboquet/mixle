@@ -87,7 +87,7 @@ _ENTRIES = (
             # on no platform but the one it was pinned on (macOS arm64, Linux arm64, and the old
             # pinned value were three distinct hashes). Rounded, the output is identical across
             # macOS arm64 and Linux arm64; new digest measured on both.
-            "stdout_sha256": "9c9292b458b3a5120c2e93373151c9ed6f43dae89904802a3fa8f6082bc7c005",
+            "stdout_sha256": "238593732ace807b0735348a5a943e5f41d0c5a49dd8457eddcee4457f1e86b5",  # 0.8.1: the binomial row fixes n (max_val=10)
             "contains": [
                 "fit : GaussianDistribution(1.5486, 4.02041",
                 "fit : PoissonDistribution(4.027",

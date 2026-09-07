@@ -187,6 +187,21 @@ Complete Inventory
    * - ``auto_example.py``
      - Automatic inference
      - Infer an estimator shape for mixed Python records.
+   * - ``autoregressive_enumeration_example.py``
+     - Enumeration
+     - Exact count, rank, and unrank over an autoregressive model's sequence space
+       without enumerating it.
+   * - ``calibrated_report_demo.py``
+     - Calibrated reporting
+     - Volumes to claims to a calibrated report: every sentence in the output carries
+       its own receipt.
+   * - ``capability_layer_example.py``
+     - Capability layer
+     - What an object can actually do, not what class it is.
+   * - ``copula_vine_example.py``
+     - Dependence structure
+     - Copula and vine dependence-structure fitting, including the joint tails a
+       Gaussian-copula assumption would miss.
    * - ``cross_modal_fit_receipt.py``
      - Cross-modal inference
      - Fit a heterogeneous Bayesian network over categorical, image-vector,
@@ -221,6 +236,10 @@ Complete Inventory
      - Local reasoning ecosystem
      - End-to-end tour of substrate, creation, simulation, skills, reasoning,
        telemetry, and governance surfaces.
+   * - ``frontier_family_showcase.py``
+     - Frontier family lifecycle
+     - Checkpoint, size ladder, quantized artifacts, edge student, and served cascade
+       with cost/quality receipts at every stage (illustrative, synthetic data).
    * - ``gallery_combinators_example.py``
      - Distribution gallery
      - Composite, record, sequence, optional, and transformed families.
@@ -245,6 +264,10 @@ Complete Inventory
    * - ``gallery_univariate_example.py``
      - Distribution gallery
      - Scalar continuous and discrete families.
+   * - ``geoscience_inversion_report.py``
+     - Scientific inference
+     - Sense, simulate, invert, report: the full inference loop on a toy geoscience
+       story.
    * - ``heterogeneous_correctness_example.py``
      - Validation
      - Correctness checks across heterogeneous components.
@@ -260,6 +283,10 @@ Complete Inventory
    * - ``joint_mixture_example.py``
      - Latent models
      - Joint mixture variants.
+   * - ``label_economics_demo.py``
+     - Task workflow
+     - Expert-label economics: the ``acquire()`` receipt as a runnable standalone
+       artifact.
    * - ``latent_variable_models_example.py``
      - Latent models
      - Latent families beyond the first HMM path.
@@ -270,6 +297,17 @@ Complete Inventory
      - Projection/compression
      - Compare closed-form Gaussian-mixture reduction with sample-and-refit
        projection.
+   * - ``model_comparison_example.py``
+     - PPL
+     - Rank fitted models by out-of-sample predictive accuracy (``waic``, ``loo``,
+       ``compare``), not by in-sample fit.
+   * - ``multimodal_stage1_demo.py``
+     - Neural leaf
+     - LLaVA-style stage-1 on toy volumes: a thin trainable projection between a
+       frozen encoder and a frozen toy LM.
+   * - ``peft_lora_grad_leaf.py``
+     - Neural leaf
+     - peft LoRA through the GradLeaf bridge with a real HuggingFace checkpoint.
    * - ``project_neural_to_structured.py``
      - Projection/compression
      - Project a trained neural density onto a structured Gaussian-mixture
@@ -277,9 +315,16 @@ Complete Inventory
    * - ``ppl_example.py``
      - PPL
      - ``free`` parameters, mixtures, sequences, and moments.
+   * - ``precedence_scheduling_example.py``
+     - Combinatorial optimization
+     - Precedence-constrained scheduling: maximum-weight closure and time-phased MILP
+       scheduling.
    * - ``production_example.py``
      - Production
      - Provenance, registry, serving, drift, and checkpoints.
+   * - ``quickstart_example.py``
+     - Entry points
+     - The two front-door entry points: ``mixle.describe()`` and ``mixle.propose()``.
    * - ``reasoner_investigation_demo.py``
      - Reasoning ecosystem
      - Evidence acquisition over retrieve, compute, simulate, and delegate
@@ -305,6 +350,9 @@ Complete Inventory
    * - ``structured_leaves_example.py``
      - Structured models
      - Structured emissions and leaves.
+   * - ``symbolic_export_example.py``
+     - Symbolic export
+     - Closed-form log-densities exported as LaTeX, SymPy, or (optionally) Sage.
    * - ``task_cascade_economics_example.py``
      - Task workflow
      - Cascade cost accounting, harvesting, and retraining.
@@ -317,6 +365,9 @@ Complete Inventory
    * - ``task_llm_active_example.py``
      - Task workflow
      - LLM teacher, active labeling, local student, and calibrated cascade.
+   * - ``vlm_trust_receipts_demo.py``
+     - Verification workflow
+     - Trust receipts on a VLM: three subsystems composed around a frozen 3-D encoder.
    * - ``win_demo_example.py``
      - End-to-end workflow
      - Replace a ticket router and invoice extractor with calibrated models.

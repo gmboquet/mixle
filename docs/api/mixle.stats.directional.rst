@@ -11,6 +11,7 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   mixle.stats.directional._circular
    mixle.stats.directional.bingham
    mixle.stats.directional.kent
    mixle.stats.directional.projected_normal

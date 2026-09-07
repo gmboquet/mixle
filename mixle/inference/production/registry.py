@@ -472,12 +472,17 @@ class Registry:
         return payload
 
     def record_digest(self, name: str, version: str = "latest") -> str:
-        """Verified digest of the exact persisted version envelope."""
+        """Content digest of the exact persisted version envelope, re-verified on load.
+
+        A content digest, not a signature: it detects corruption and out-of-band edits of the model
+        alone, not a writer with directory access who rewrites the model and every digest together
+        (the same limit :meth:`mixle.lifecycle.Model.load` states); integrity against that threat needs
+        a signature or a copy of the digests kept outside the directory."""
         version = self._resolve_version(name, version)
         payload = self._load_payload(name, version)
         stored = payload.get("record_digest")
         if not isinstance(stored, str):
-            raise ValueError(f"{name!r} version {version!r} has no authenticated record digest")
+            raise ValueError(f"{name!r} version {version!r} has no record digest")
         return stored
 
     def promote(self, name: str, version: str, alias: str = "production") -> None:
@@ -551,9 +556,15 @@ class Registry:
     def verify_chain(self, name: str, *, trust_code: bool = False) -> bool:
         """Verify the persisted checkpoint lineage for ``name`` (see :meth:`checkpointer`).
 
-        Requires every version to carry a complete authenticated lineage record. Checks exact parent
+        Requires every version to carry a complete digest-chained lineage record. Checks exact parent
         versions, record digests, model hashes, transition digests, run identity, and iteration order,
         and re-hashes each loaded model. Missing or partial lineage is unverified and returns False.
+
+        Every digest is an unkeyed content digest recomputed by this module's own helpers, so the
+        chain proves that the stored versions are consistent with each other and unchanged since
+        they were written, not who wrote them: a writer with directory access can replace a model
+        and recompute every digest, and the chain verifies. Guard against that threat with a
+        signature or a copy of the tip digest kept outside the directory.
 
         See :meth:`get` -- ``trust_code`` is required in the same way and for the same reason: a chain
         that contains a NeuralLeaf-family checkpoint must be loaded to be re-hashed, so verifying it is

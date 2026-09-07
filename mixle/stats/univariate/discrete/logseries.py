@@ -305,17 +305,46 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
         k = np.arange(start, stop, dtype=np.float64)
         return k * self.log_p - np.log(k) - self.log_norm
 
-    def _tail_upper_bound(self, k: int) -> float:
-        """An upper bound on ``P(X > k)``: ``sum_{j>k} p^j / j <= p^(k+1) / ((k+1)(1-p))``."""
+    def _tail_mass(self, k: int) -> float:
+        """``P(X > k) = sum_{j>k} p^j / (j * -log(1-p))`` by Euler-Maclaurin from ``a = k + 1``.
+
+        With ``f(x) = p^x / x = exp(-lambda x) / x`` and ``lambda = -log p``, the sum from ``a`` is
+        the integral of ``f`` over ``[a, inf)`` plus ``f(a)/2``, minus the first derivative over
+        12, plus the third over 720, and so on; the integral is the exponential integral
+        ``E1(lambda a)``. The neglected term is of order ``f(a) (lambda + 1/a)^5``, below double
+        rounding wherever this stands in for direct summation (``a`` past the term cap, or where
+        the terms no longer move a double sum). The geometric bound ``p^a / (a (1-p))`` this
+        replaces was loose by a factor of about ``1 / (a (1-p))`` and, unclamped, sent the CDF
+        negative past the cap at ``p`` within ``1e-8`` of one.
+        """
         import math
 
-        return math.exp((k + 1) * self.log_p - math.log(k + 1) - math.log1p(-self.p) - self.log_norm)
+        from scipy.special import exp1
+
+        a = k + 1
+        lam = -self.log_p
+        if not lam > 0.0:  # p == 1 rounds log p to zero: the tail is all the mass
+            return 1.0
+        x = lam * a
+        f_a = math.exp(-x - math.log(a))
+        if f_a == 0.0:
+            return 0.0
+        inv_a = 1.0 / a
+        euler_maclaurin = (
+            float(exp1(x))
+            + 0.5 * f_a
+            + f_a * (lam + inv_a) / 12.0
+            - f_a * (lam**3 + 3.0 * lam**2 * inv_a + 6.0 * lam * inv_a**2 + 6.0 * inv_a**3) / 720.0
+        )
+        return float(min(1.0, max(0.0, euler_maclaurin * math.exp(-self.log_norm))))
 
     def cdf(self, x: float) -> float:
         """Cumulative distribution function ``P(X <= x)``, support ``x >= 1``.
 
         Summed directly in bounded blocks (the series has no closed form); past ``_SERIES_CAP``
-        terms the closed-form tail bound stands in, which is exact to double rounding by then.
+        terms one minus the Euler-Maclaurin tail mass stands in, exact to double rounding by
+        then and never below the partial sum at the cap, so the result is monotone in ``x`` and
+        within ``[0, 1]``.
         """
         import math
 
@@ -329,7 +358,7 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
             total += float(np.sum(np.exp(self._log_pmf_terms(start, stop))))
             start = stop
         if start <= k:
-            return float(min(1.0, 1.0 - self._tail_upper_bound(k)))
+            return float(min(1.0, max(total, 1.0 - self._tail_mass(k))))
         return float(min(1.0, total))
 
     def quantile(self, q: float) -> float:
@@ -343,7 +372,8 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
         so the bound doubled without limit and the vectorized CDF sums grew until the 16 GB
         runner was OOM-killed -- through ``entropy()``, which calls this at exactly that ``q``.
         Here a block whose terms no longer move the running sum, or the term cap, ends the
-        scan, and the closed-form tail bound answers for whatever lies beyond.
+        scan, and the Euler-Maclaurin tail mass answers for whatever lies beyond: the smallest
+        ``k`` past the scan whose tail mass is at most ``1 - q``.
         """
         import math
 
@@ -356,6 +386,7 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
             return math.inf
         total = 0.0
         start = 1
+        scanned = 0  # every k <= scanned has a summed CDF below q
         while start <= self._SERIES_CAP:
             stop = start + self._SERIES_BLOCK
             terms = np.exp(self._log_pmf_terms(start, stop))
@@ -363,20 +394,23 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
             hit = np.flatnonzero(cumulative >= q)
             if hit.size:
                 return float(start + int(hit[0]))
+            scanned = stop - 1
             new_total = float(cumulative[-1])
             if new_total == total or terms[-1] < 1.0e-300:  # the series can no longer move the sum
                 break
             total = new_total
             start = stop
-        # saturated or capped: the smallest k whose tail bound is below the remaining mass, searched
-        # from the bottom of the support (the bound is monotone in k), never from the scan's end
+        # saturated or capped: bisect the monotone tail mass for the smallest k beyond the scan
+        # with P(X > k) <= 1 - q; never below the scan's end, so the answer is monotone in q
+        # across the seam between the two methods
         remaining = max(1.0 - q, 5.0e-324)
-        lo, hi = 0, 1
-        while self._tail_upper_bound(hi) > remaining and hi < 2**62:
+        lo = scanned
+        hi = max(2 * lo, 1)
+        while self._tail_mass(hi) > remaining and hi < 2**62:
             hi *= 2
         while lo + 1 < hi:
             mid = (lo + hi) // 2
-            if self._tail_upper_bound(mid) > remaining:
+            if self._tail_mass(mid) > remaining:
                 lo = mid
             else:
                 hi = mid

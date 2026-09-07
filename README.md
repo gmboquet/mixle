@@ -65,8 +65,7 @@ Everything past the base is opt-in — install any subset, e.g. `pip install "mi
 - **Data sources** — `pandas` · `arrow` · `sql` · `mongo` · `hadoop` · `arrays`
 - **Other** — `highprec` (mpmath fallback) · `gmpy2` (fast exact ranking) · `umap` · `sympy` / `sage` (symbolic export) · `grammar` (graph grammars)
 
-`[all]` covers `numba`, `torch`, the scale-out backends, and `pandas`/`arrow`/`sql`; `jax`, `gmpy2`,
-`sympy`/`sage`, and `mongo`/`hadoop`/`arrays` install separately. Every declared floor installs and
+`[all]` installs every extra listed above in one go. Every declared floor installs and
 imports — CI pins each extra to its minimum and proves it.
 
 Development: `git clone … && pip install -e ".[all]"`.
@@ -324,8 +323,9 @@ python -m pytest -m full -m ""              # everything non-optional (~15 min a
 
 Hosted CI runs the same tiers sharded across runners — core, full (four shards plus a combined
 coverage floor), optional extras, and scheduled numerical/hardware lanes.
-`base_dist_test.py` alone exercises 40 of its 41 base-distribution families end to end: sampler
-repeatability, `str`/`eval` round-trips, vectorized-vs-scalar density agreement, EM convergence.
+`base_dist_test.py` alone exercises 40 base-distribution configurations across 34 families end to
+end: sampler repeatability, `str`/`eval` round-trips, vectorized-vs-scalar density agreement, EM
+convergence.
 See [`mixle/tests/README.md`](https://github.com/gmboquet/mixle/blob/v0.8.1/mixle/tests/README.md).
 
 ## Maintainers & contributors

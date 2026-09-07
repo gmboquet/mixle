@@ -427,10 +427,11 @@ def top_label_confidence(prob: np.ndarray, labels: np.ndarray) -> tuple[np.ndarr
 def evaluate_cdf(cdf: Callable[[Any], Any], y: np.ndarray) -> np.ndarray:
     """Apply ``cdf`` to the vector ``y``, element-wise when ``cdf`` only takes scalars.
 
-    Every distribution's ``cdf`` method in this library is scalar-only (``float(x)`` on an array
-    raises ``TypeError``), while the goodness-of-fit and calibration helpers type their ``cdf``
-    argument as vectorized. A fitted model's ``.cdf`` is the most natural thing to hand them, so both
-    conventions are accepted here. A ``TypeError`` raised on a scalar call is a real error in ``cdf``
+    The ``cdf`` methods this library defines (the univariate families that have one; mixtures,
+    categoricals, composites, and sequence models define none) are scalar-only (``float(x)`` on an
+    array raises ``TypeError``), while the goodness-of-fit and calibration helpers type their
+    ``cdf`` argument as vectorized. A fitted univariate model's ``.cdf`` is the most natural thing to
+    hand them, so both conventions are accepted here. A ``TypeError`` raised on a scalar call is a real error in ``cdf``
     and propagates as-is rather than being re-labelled a values problem (FU-04).
     """
     try:
@@ -444,7 +445,8 @@ def pit_values(y: np.ndarray, cdf: np.ndarray | Callable[[np.ndarray], np.ndarra
 
     Under a calibrated continuous predictive distribution the PIT values are Uniform(0, 1). Pass either
     the precomputed CDF values ``F_i(y_i)`` or a callable ``cdf(y) -> F(y)``; a scalar-only callable
-    such as a fitted distribution's ``.cdf`` is evaluated element-wise.
+    such as a fitted univariate distribution's ``.cdf`` is evaluated element-wise (mixtures and
+    other structured families define no ``cdf``; pass their CDF as your own callable).
 
     Args:
         y: ``(n,)`` realised values.

@@ -16,6 +16,7 @@ Submodules
    mixle.represent.generative
    mixle.represent.graph
    mixle.represent.heterogeneous
+   mixle.represent.identity
    mixle.represent.learned_segment
    mixle.represent.modality
    mixle.represent.posterior

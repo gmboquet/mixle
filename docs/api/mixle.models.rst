@@ -40,6 +40,7 @@ Submodules
    mixle.models.neural_density
    mixle.models.neural_families
    mixle.models.neural_leaf
+   mixle.models.optimizer_routing
    mixle.models.partially_observable_markov_decision_process
    mixle.models.pinn
    mixle.models.qat

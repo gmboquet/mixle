@@ -9,8 +9,10 @@ public release.
 Authoritative Release Evidence
 ------------------------------
 
-The dated narrative below is historical engineering context, **not** 0.8.0
-release evidence. The authoritative record is the generated
+The dated narrative below is historical engineering context, **not** 0.8.1
+release evidence. The dated passes ran on the 0.8.0 candidate branch (``release/0.8.0`` /
+``release-prep/0.8.0``, since renamed ``release/0.8.1``; 0.8.0 was never published,
+D-0212). The authoritative record is the generated
 ``example-execution-manifest.json`` attached to the GitHub release. Publication
 builds it only after all entries in
 ``release-checklists/0.8.1-repro-bundle.json`` have passing receipts. It binds

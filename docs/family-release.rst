@@ -10,13 +10,13 @@ Use this page as the public-facing summary of the coordinated release process.
 The detailed release records should live in the repository's release evidence
 area and must be completed before any final publication claim.
 
-0.8.0 Scope Decision
+0.8.1 Scope Decision
 --------------------
 
-Mixle Core 0.8.0 is deliberately a **standalone core release**, not a
+Mixle Core 0.8.1 is deliberately a **standalone core release**, not a
 coordinated family release. ``mixle-knowledge``, ``mixle-mlops``,
 ``mixle-pde``, ``mixle-discrete``, ``mixle-agent``, ``mixle-demos``,
-``mixle-notebooks``, and ``mixle-ios`` are all excluded from the 0.8.0
+``mixle-notebooks``, and ``mixle-ios`` are all excluded from the 0.8.1
 artifact, support, co-installation, and compatibility claims. They retain
 independent versions and release evidence.
 
@@ -109,7 +109,7 @@ The co-install evidence should prove:
 * ``mixle-knowledge`` validates contracts consumed by sibling packages; and
 * no package depends on an unpublished sibling version.
 
-No item in this section is claimed or required by the standalone Core 0.8.0
+No item in this section is claimed or required by the standalone Core 0.8.1
 release.
 
 Publication Order

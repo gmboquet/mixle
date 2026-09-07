@@ -40,7 +40,7 @@ source.
 Deserialization Consent
 -----------------------
 
-As of 0.8.0, every loader whose payload can execute code on load requires the
+As of 0.8.1, every loader whose payload can execute code on load requires the
 caller to pass the literal ``True`` for its trust flag. ``load_encoded`` is the
 canonical case::
 

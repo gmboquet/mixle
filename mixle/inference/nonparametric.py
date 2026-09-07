@@ -286,8 +286,10 @@ def ks_2samp(x: Any, y: Any, *, alternative: str = "two-sided") -> TestResult:
 def ks_1samp(x: Any, cdf: Callable[[np.ndarray], np.ndarray], *, alternative: str = "two-sided") -> TestResult:
     """One-sample Kolmogorov-Smirnov goodness-of-fit test against a fully-specified ``cdf`` callable.
 
-    ``cdf`` may be vectorized (``ndarray -> ndarray``) or scalar-only, such as any fitted mixle
-    distribution's ``.cdf`` method; a scalar-only callable is evaluated element-wise.
+    ``cdf`` may be vectorized (``ndarray -> ndarray``) or scalar-only, such as the ``.cdf`` method
+    of a fitted univariate mixle distribution; a scalar-only callable is evaluated element-wise.
+    Mixtures, categoricals, composites, and sequence models define no ``cdf``: for those, pass the
+    CDF as your own callable (for a univariate mixture, the weighted sum of the component CDFs).
 
     The p-value is ASYMPTOTIC in every mode: ``two-sided`` uses the limiting Kolmogorov distribution
     (scipy's ``method='asymp'``) and the one-sided modes use the large-sample exponential bound

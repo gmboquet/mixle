@@ -14,6 +14,7 @@ Submodules
    mixle.stats.compute._sampling
    mixle.stats.compute.backend
    mixle.stats.compute.capabilities
+   mixle.stats.compute.capability_decline
    mixle.stats.compute.declarations
    mixle.stats.compute.decomposition
    mixle.stats.compute.encoded
@@ -24,6 +25,7 @@ Submodules
    mixle.stats.compute.fused_nested
    mixle.stats.compute.gradient
    mixle.stats.compute.kernel
+   mixle.stats.compute.mixture_evidence
    mixle.stats.compute.pdist
    mixle.stats.compute.posterior
    mixle.stats.compute.sampling_api

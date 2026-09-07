@@ -11,8 +11,11 @@ Everything lives in ``mixle.inference.production``. This walks the lifecycle end
 
 Takeaway: the deliverable is not "the calls succeeded" -- it is the CHAIN. Each step emits a hash that
 the next step can check, so ``verify_lineage`` and ``Registry.verify_chain`` answer "is this served
-model really the one that came out of that data and that fit?" without trusting anyone's word. Losing
-the chain is the failure mode; producing a model is the easy part.
+model really the one the recorded fit produced, iteration by iteration, and the one that was
+registered and promoted?" from the digests alone. What the digests do not bind: the header's dataset
+hash, record count, and log-likelihood trace are recorded claims about the data, carried alongside
+the chain, not covered by it (a rewritten ``dataset_hash`` still verifies). Losing the chain is the
+failure mode; producing a model is the easy part.
 
 Note on ``trust_code``: ``Registry.get`` / ``current`` / ``verify_chain`` take a keyword-only
 ``trust_code`` (default ``False``, and it must be exactly ``True`` or ``False`` -- not a truthy value).

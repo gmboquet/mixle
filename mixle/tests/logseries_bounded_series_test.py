@@ -43,7 +43,7 @@ class QuantileAndCdfTest(unittest.TestCase):
                 k = d.quantile(q)
                 self.assertLess(time.perf_counter() - start, 2.0, (p, q))
                 self.assertGreaterEqual(k, previous, (p, q))
-                self.assertLessEqual(d._tail_upper_bound(int(k)), 4.0 * (1.0 - q) + 1.0e-300, (p, q))
+                self.assertLessEqual(d._tail_mass(int(k)), 4.0 * (1.0 - q) + 1.0e-300, (p, q))
                 previous = k
 
     def test_endpoints_and_validation(self):
@@ -64,6 +64,78 @@ class QuantileAndCdfTest(unittest.TestCase):
         self.assertGreater(far, median)
         self.assertGreater(far, 1.0e9)  # the true support really is that long; the answer is just bounded
         self.assertLessEqual(d.cdf(1.0e12), 1.0)
+
+
+def _tail_mass_by_quadrature(p: float, k: int) -> float:
+    """``P(X > k)`` by an independent route: ``sum_{j>k} p^j / j = int_0^p t^k / (1-t) dt``, with
+    ``t = p e^{-s}`` so the integrand is ``exp(a (log p - s)) / (1 - p e^{-s})`` over ``s >= 0``."""
+    from scipy.integrate import quad
+
+    a = k + 1
+
+    def integrand(s: float) -> float:
+        return math.exp(a * (math.log(p) - s)) / (1.0 - p * math.exp(-s))
+
+    scale = 1.0 / a
+    edges = [0.0] + [scale * m for m in (1, 2, 4, 8, 16, 32, 64, 128)]
+    value = sum(quad(integrand, lo, hi, limit=200)[0] for lo, hi in zip(edges, edges[1:]))
+    return value / (-math.log1p(-p))
+
+
+class TailPastTheCapTest(unittest.TestCase):
+    """0.8.1 adversarial review P01-F01: past ``_SERIES_CAP`` the CDF used one minus a geometric
+    tail *bound*, loose by about ``1 / (k (1-p))`` and unclamped, so at ``p`` within ``1e-8`` of one
+    the CDF fell from 0.88 to 0.24 between ``k = 5e7`` and ``6e7`` and reached -360 at ``p = 1 -
+    1e-12``; the quantile inherited the overshoot. The tail is now the Euler-Maclaurin sum."""
+
+    def test_cdf_past_the_cap_matches_an_independent_quadrature(self):
+        d = LogSeriesDistribution(1.0 - 1.0e-9)
+        for k in (5 * 10**7, 6 * 10**7, 10**8, 10**9, 10**11):
+            expected = 1.0 - _tail_mass_by_quadrature(d.p, k)
+            self.assertAlmostEqual(d.cdf(k), expected, places=8, msg=k)
+        self.assertAlmostEqual(d.cdf(6 * 10**7), 0.889240, places=5)
+        self.assertAlmostEqual(d.cdf(10**8), 0.912035, places=5)
+        self.assertAlmostEqual(LogSeriesDistribution(1.0 - 1.0e-12).cdf(10**8), 0.687553, places=5)
+        self.assertAlmostEqual(LogSeriesDistribution(1.0 - 1.0e-10).cdf(10**8), 0.824635, places=5)
+
+    def test_cdf_is_within_the_unit_interval_and_monotone_across_the_cap(self):
+        for p in (1.0 - 1.0e-8, 1.0 - 1.0e-9, 1.0 - 1.0e-10, 1.0 - 1.0e-12):
+            d = LogSeriesDistribution(p)
+            ks = np.unique(np.logspace(0, 13, 120).astype(np.int64))
+            values = [d.cdf(int(k)) for k in ks]
+            self.assertTrue(all(0.0 <= v <= 1.0 for v in values), p)
+            self.assertTrue(all(b >= a for a, b in zip(values, values[1:])), p)
+
+    def test_quantile_past_the_cap_is_the_smallest_k_with_cdf_at_least_q(self):
+        d = LogSeriesDistribution(1.0 - 1.0e-9)
+        for q in (0.9, 0.99):
+            k = int(d.quantile(q))
+            self.assertGreater(k, LogSeriesDistribution._SERIES_CAP)
+            self.assertGreaterEqual(1.0 - _tail_mass_by_quadrature(d.p, k), q - 1.0e-9)
+            self.assertLess(1.0 - _tail_mass_by_quadrature(d.p, k - 1), q + 1.0e-9)
+        quantiles = [d.quantile(q) for q in (0.5, 0.9, 0.99, 1.0 - 1.0e-4, 1.0 - 1.0e-8, 1.0 - 1.0e-12, 1.0 - 1.0e-16)]
+        self.assertTrue(all(b >= a for a, b in zip(quantiles, quantiles[1:])), quantiles)
+
+    def test_capped_branch_agrees_with_scipy_where_scipy_can_sum(self):
+        cap = LogSeriesDistribution._SERIES_CAP
+        try:
+            LogSeriesDistribution._SERIES_CAP = 4096
+            d = LogSeriesDistribution(0.999)
+            for k in (4097, 5000, 10_000, 50_000, 100_000):
+                self.assertAlmostEqual(d.cdf(k), float(logser.cdf(k, 0.999)), places=13, msg=k)
+            for q in (0.9, 0.99, 0.999, 1.0 - 1.0e-8):
+                self.assertEqual(d.quantile(q), float(logser.ppf(q, 0.999)), q)
+        finally:
+            LogSeriesDistribution._SERIES_CAP = cap
+
+    def test_tail_mass_matches_quadrature_over_the_regime_it_serves(self):
+        for p in (0.999, 1.0 - 1.0e-6, 1.0 - 1.0e-9):
+            d = LogSeriesDistribution(p)
+            for k in (10**3, 10**5, 10**7, 10**9):
+                expected = _tail_mass_by_quadrature(p, k)
+                if expected < 1.0e-250:
+                    continue
+                self.assertAlmostEqual(d._tail_mass(k) / expected, 1.0, places=8, msg=(p, k))
 
 
 class EntropyTest(unittest.TestCase):

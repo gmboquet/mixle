@@ -16,7 +16,7 @@ of heterogeneous fields; compare only systems that express the same model.
 Exact-candidate evidence
 ------------------------
 
-The 0.8.0 release does not publish a numerical crossover table. Historical
+The 0.8.1 release does not publish a numerical crossover table. Historical
 developer measurements were produced by an older Mixle release and are retained
 under ``benchmarks/archive/`` only as engineering history. They are not evidence
 for this candidate. Run the tracked benchmark harness on the exact candidate to
@@ -60,7 +60,7 @@ So the honest framing is:
 GPU and backend numbers
 -----------------------
 
-No GPU or distributed-backend performance number is claimed for 0.8.0 without a
+No GPU or distributed-backend performance number is claimed for 0.8.1 without a
 retained exact-candidate hardware receipt. Capability support is reported
 separately from latency and throughput. Any future performance claim must state
 which quantity it measures and name the candidate, system, workload, and receipt.

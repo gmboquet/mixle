@@ -1439,34 +1439,112 @@ def _hard_violation(constraints, slots):
     return lambda u: -float(penalty(u))
 
 
-def _repair_feasibility(u, feasible, violation, anchor):
+def _hard_margins(constraints, slots):
+    """Compile hard constraints into ``margins(u) -> 1-D array`` (``>= 0`` exactly where they all hold,
+    signed on both sides), or ``None`` when some constraint has no signed margin (an equality, a
+    negation, a disjunction)."""
+    if constraints is None:
+        return None
+    values = [constraints] if isinstance(constraints, Constraint) else list(constraints)
+    if not values or any(c.margin is None for c in values):
+        return None
+    groups = _handle_groups(slots)
+    _check_constraint_handles(values, groups)
+
+    def margins(u):
+        env = _constraint_env(values, groups, _vals_from_u(slots, u))
+        return np.concatenate([np.atleast_1d(np.asarray(c.margin(env), dtype=float)).ravel() for c in values])
+
+    return margins
+
+
+def _step_into_margins(u, margins, slack, *, rounds=20):
+    """Move ``u`` the least-norm distance to where every signed margin is at least ``slack``.
+
+    Gauss-Newton on the deficient margins: a finite-difference Jacobian of ``margins`` and the
+    least-squares step that lifts each deficient row to ``slack``, repeated while a step disturbs a
+    row that was fine (the constraints are coupled: neighbouring second differences share
+    coordinates). For the linear shape constraints one or two rounds land exactly. This is the
+    projection the sum-of-normals step in :func:`_repair_feasibility` cannot make when every
+    constraint is active at once: summed, the normals of adjacent second-difference constraints
+    cancel on every interior coordinate, so that step never touches the interior violations.
+
+    Returns ``(x, ok)``.
+    """
+    x = np.asarray(u, dtype=float).copy()
+    for _round in range(rounds):
+        current = np.asarray(margins(x), dtype=float)
+        deficit = np.minimum(current - slack, 0.0)
+        rows = deficit < -0.5 * slack  # rounding of a lifted row does not count as a deficit
+        if not np.any(rows):
+            return x, True
+        h = 1.0e-6 * np.maximum(np.abs(x), 1.0)
+        jacobian = np.empty((current.size, x.size))
+        for k in range(x.size):
+            plus, minus = x.copy(), x.copy()
+            plus[k] += h[k]
+            minus[k] -= h[k]
+            jacobian[:, k] = (np.asarray(margins(plus), dtype=float) - np.asarray(margins(minus), dtype=float)) / (
+                2.0 * h[k]
+            )
+        if not np.all(np.isfinite(jacobian)):
+            return x, False
+        delta, *_ = np.linalg.lstsq(jacobian[rows], -deficit[rows], rcond=None)
+        if not np.all(np.isfinite(delta)):
+            return x, False
+        x = x + delta
+    return x, bool(np.all(np.asarray(margins(x), dtype=float) >= 0.5 * slack))
+
+
+def _repair_feasibility(u, feasible, violation, anchor, margins=None):
     """Move the penalty optimum ``u``, which sits O(1/weight) outside the feasible set (exactly on the
     boundary when a constraint is active), the last hair into it.
 
     Step against the gradient of ``sqrt(violation)``: that direction is the sum of the normals of
-    exactly the violated constraints, so one small step fixes every active tie at once (two
-    coordinates in the wrong order by 1e-8 get swapped, not both shifted). ``sqrt`` keeps the
-    gradient O(1) where the squared hinge is O(1e-16). Random jitter almost never lands inside a
-    corner in several dimensions, and a segment toward a feasible anchor moves tied coordinates
-    equally and so never reorders them (that is what FU-15's tutorial case does).
+    the violated constraints, weighted by their residuals, so one small step fixes every active tie
+    of comparable size at once (two coordinates in the wrong order by 1e-8 get swapped, not both
+    shifted). ``sqrt`` keeps the gradient O(1) where the squared hinge is O(1e-16). When the
+    residuals differ in size (a block of three or more tied coordinates, one pair out of order by
+    1e-9 and the next by 1e-6) the step that clears the larger residual pushes the smaller one the
+    wrong way, so no single step lands inside: take the step along the ray that most reduces the
+    violation and repeat, the newly dominant residual leading the next step. Random jitter almost
+    never lands inside a corner in several dimensions, and the segment toward the feasible anchor
+    moves tied coordinates equally and so never reorders them (that is what FU-15's tutorial case
+    does); it stays as the last resort, and the caller checks the result rather than trusting it.
     """
     if feasible(u):
         return u
-    scale = np.maximum(np.abs(u), 1.0)
-    h = 1.0e-7 * scale
-    gradient = np.zeros(u.size)
-    for k in range(u.size):
-        plus, minus = u.copy(), u.copy()
-        plus[k] += h[k]
-        minus[k] -= h[k]
-        gradient[k] = (math.sqrt(max(violation(plus), 0.0)) - math.sqrt(max(violation(minus), 0.0))) / (2.0 * h[k])
-    norm = float(np.linalg.norm(gradient))
-    if norm > 0.0 and np.all(np.isfinite(gradient)):
+    if margins is not None:
+        for slack in (1.0e-12, 1.0e-9, 1.0e-7):
+            projected, ok = _step_into_margins(u, margins, slack)
+            if ok and feasible(projected):
+                return projected
+    x = np.asarray(u, dtype=float).copy()
+    scale = np.maximum(np.abs(x), 1.0)
+    current = max(float(violation(x)), 0.0)
+    for _round in range(50):
+        h = 1.0e-7 * scale
+        gradient = np.zeros(x.size)
+        for k in range(x.size):
+            plus, minus = x.copy(), x.copy()
+            plus[k] += h[k]
+            minus[k] -= h[k]
+            gradient[k] = (math.sqrt(max(violation(plus), 0.0)) - math.sqrt(max(violation(minus), 0.0))) / (2.0 * h[k])
+        norm = float(np.linalg.norm(gradient))
+        if not (norm > 0.0 and np.all(np.isfinite(gradient))):
+            break
         direction = -gradient / norm
+        best_value, best_point = current, None
         for alpha in np.logspace(-12, 0, 61):
-            candidate = u + alpha * scale * direction
+            candidate = x + alpha * scale * direction
             if feasible(candidate):
                 return candidate
+            value = float(violation(candidate))
+            if value < best_value:
+                best_value, best_point = value, candidate
+        if best_point is None:  # no step along the ray reduces the violation: give up on this route
+            break
+        x, current = best_point, best_value
     for t in np.logspace(-9, 0, 46):  # last resort: the segment back to the feasible anchor
         candidate = u + t * (anchor - u)
         if feasible(candidate):
@@ -1474,10 +1552,93 @@ def _repair_feasibility(u, feasible, violation, anchor):
     return u
 
 
-def _derivative_free_constrained(objective, feasible, violation, u0, *, max_iter, tol, rng):
+def _minimize_powell_to_convergence(fn, u, *, max_iter, tol):
+    """Powell restarted from its own result while it reports the iteration budget rather than
+    convergence; each restart rebuilds the direction set, which degenerates on a stiff penalty valley.
+
+    Returns ``(x, fun, converged)``; ``converged`` is Powell's own success flag from the last run.
+    """
+    from scipy.optimize import minimize
+
+    result = None
+    for _restart in range(4):
+        result = minimize(fn, u, method="Powell", options={"maxiter": max_iter, "xtol": tol, "ftol": tol})
+        if np.all(np.isfinite(result.x)):
+            u = np.asarray(result.x, dtype=float)
+        if bool(result.success):
+            break
+    return u, float(result.fun), bool(result.success)
+
+
+def _feasible_simplex(u, feasible, step):
+    """A Nelder-Mead starting simplex whose vertices lie in the feasible set where one can be found.
+
+    Coordinate steps break every tie a shape constraint holds active, so from a fully tied corner the
+    standard simplex has all its vertices against the wall and Nelder-Mead cannot move. Try, in
+    order, coordinate steps, block shifts of a prefix or suffix (feasible for monotone constraints),
+    the whole vector, and hinges (feasible for convex and concave constraints); keep the feasible
+    directions that are linearly independent of those already kept, and fill any remaining slots
+    with coordinate steps.
+    """
+    d = u.size
+    eye = np.eye(d)
+    candidates = []
+    for k in range(d):
+        candidates.extend([eye[k], -eye[k]])
+    ones = np.ones(d)
+    candidates.extend([ones, -ones])
+    for j in range(1, d):
+        prefix = np.zeros(d)
+        prefix[:j] = 1.0
+        suffix = ones - prefix
+        candidates.extend([prefix, -prefix, suffix, -suffix])
+    for j in range(1, d - 1):
+        hinge = np.maximum(np.arange(d, dtype=float) - j, 0.0)
+        hinge /= hinge.max()
+        candidates.extend([hinge, -hinge])
+    chosen: list[np.ndarray] = []
+    for direction in candidates:
+        if len(chosen) == d:
+            break
+        if not feasible(u + step * direction):
+            continue
+        trial = np.vstack([*chosen, direction])
+        if np.linalg.matrix_rank(trial) == trial.shape[0]:
+            chosen.append(direction)
+    for k in range(d):
+        if len(chosen) == d:
+            break
+        trial = np.vstack([*chosen, eye[k]])
+        if np.linalg.matrix_rank(trial) == trial.shape[0]:
+            chosen.append(eye[k])
+    return np.vstack([u] + [u + step * direction for direction in chosen])
+
+
+# Acceptance gap for the penalty path, relative to max(1, |f|): a feasible point whose objective
+# exceeds the final penalized value (a lower bound on the constrained optimum when Powell has
+# converged) by more than this is not certified as the constrained optimum and the fit fails
+# rather than returning it. The gap at a true optimum is of order ||grad f||^2 / weight, measured
+# below 2e-6 relative over isotonic, convex, concave, and Lipschitz fits up to 20 dimensions.
+_PENALTY_CERTIFICATION_GAP = 1.0e-4
+# How far inside the region SLSQP is asked to land (in the constraint margin's own units): larger
+# than SLSQP's constraint tolerance at the ``tol`` used here, small against any parameter scale.
+_SQP_MARGIN_SHIFT = 1.0e-7
+
+
+def _derivative_free_constrained(objective, feasible, violation, u0, *, max_iter, tol, rng, margins=None):
     """Minimize ``objective`` (already ``-log_target``, soft penalties included) over ``feasible``.
 
     Returns ``(u, f, algorithm, success, message)``.
+
+    When every hard constraint has a signed margin (inequalities and the shape constraints), the
+    problem is a smooth inequality-constrained program and sequential least-squares programming
+    (SLSQP, finite-difference gradients) solves it directly, walking along the active constraints
+    rather than against a wall: this is what recovers the pooled-adjacent-violators solution of an
+    isotonic fit or the convex-regression projection in ten or twenty dimensions to optimizer
+    tolerance, where the penalty ramp below stalls in its stiff valley by 0.01 to 0.03 per
+    coordinate at a fully tied corner. SLSQP's result must be feasible (repaired by the last hair
+    when it is a rounding error outside) and no worse than SLSQP's own value; otherwise, and when a
+    constraint has no margin, the penalty path takes over.
 
     Nelder-Mead against a hard ``1e18`` wall is what FU-15 exposed: in five dimensions the simplex
     collapses against the infeasible face and either exhausts ``max_iter`` or reports convergence at a
@@ -1488,6 +1649,14 @@ def _derivative_free_constrained(objective, feasible, violation, u0, *, max_iter
     wall; then nudge the result into the feasible set and polish it with a small-simplex Nelder-Mead
     on the walled objective. Without residuals, fall back to walled Nelder-Mead restarted from its
     best point while it keeps improving.
+
+    The penalty path certifies what it returns. Powell's convergence flag is checked (a budget of
+    ``max_iter`` it exhausts is a failure, as on the gradient path), the repaired point must be
+    feasible (the anchor fallback used to hand back the starting vector, which the polish could not
+    move off the wall, as a success), and the objective at the returned point may exceed the final
+    penalized value, a lower bound on the constrained optimum, by at most
+    ``_PENALTY_CERTIFICATION_GAP`` relative. Anything else raises through the caller instead of
+    returning a nearly constant vector as the fit.
     """
     from scipy.optimize import minimize
 
@@ -1500,32 +1669,88 @@ def _derivative_free_constrained(objective, feasible, violation, u0, *, max_iter
         return finite(objective(u))
 
     u = np.asarray(u0, dtype=float)
+    if feasible is not None and violation is not None and margins is not None:
+        # The margins are tightened by a hair so SLSQP's answer, which satisfies its constraints
+        # only to its own tolerance, lands strictly inside the region instead of a rounding error
+        # outside it (an all-tied corner then comes back as ties of 1e-7, not 1e-12 the wrong way).
+        # SLSQP started on the boundary (a tied start is the common case: a constant vector
+        # satisfies every shape constraint with equality) reports its linearized constraints
+        # incompatible on the first step, so the start is first moved the least-norm distance
+        # strictly inside the tightened region.
+        # The objective is solved in units of its starting value: SLSQP's line search and ``ftol``
+        # are absolute, and a log-target of tens of thousands of nats with finite-difference
+        # gradients otherwise ends in "positive directional derivative" at a tied corner. A run
+        # that stops without convergence is restarted from where it stopped, up to three times.
+        try:
+            start, inside = _step_into_margins(u, margins, 2.0 * _SQP_MARGIN_SHIFT)
+            if not inside:
+                start = u
+            scale = max(1.0, abs(finite(objective(start))))
+            sqp = None
+            point = start
+            for _restart in range(4):
+                sqp = minimize(
+                    lambda z: finite(objective(z)) / scale,
+                    point,
+                    method="SLSQP",
+                    constraints=[{"type": "ineq", "fun": lambda z: margins(z) - _SQP_MARGIN_SHIFT}],
+                    options={"maxiter": max_iter, "ftol": tol},
+                )
+                if bool(sqp.success) or not np.all(np.isfinite(sqp.x)):
+                    break
+                point = np.asarray(sqp.x, dtype=float)
+        except (ValueError, FloatingPointError, OverflowError, np.linalg.LinAlgError, _ParameterDomainError):
+            sqp = None
+        if sqp is not None and bool(sqp.success) and np.all(np.isfinite(sqp.x)) and np.isfinite(sqp.fun):
+            x = np.asarray(sqp.x, dtype=float)
+            if not feasible(x):
+                x = _repair_feasibility(x, feasible, violation, np.asarray(u0, dtype=float), margins)
+            f = walled(x)
+            reached = float(sqp.fun) * scale
+            if feasible(x) and f < 1e18 and f <= reached + max(tol, 1.0e-6 * abs(reached)):
+                return x, f, "slsqp", True, "constrained optimum reached"
     if feasible is not None and violation is not None:
+        converged = False
+        bound = -np.inf  # the final stage's penalized value: at most the constrained optimum when Powell converged
         for weight in (1e1, 1e3, 1e5, 1e7, 1e9):
-            penalized = minimize(
-                lambda z, w=weight: finite(objective(z)) + w * violation(z),
-                u,
-                method="Powell",
-                options={"maxiter": max_iter, "xtol": tol, "ftol": tol},
+            u, bound, converged = _minimize_powell_to_convergence(
+                lambda z, w=weight: finite(objective(z)) + w * violation(z), u, max_iter=max_iter, tol=tol
             )
-            if np.all(np.isfinite(penalized.x)):
-                u = np.asarray(penalized.x, dtype=float)
+        algorithm = "powell-penalty+nelder-mead"
+        if not converged:
+            return u, finite(objective(u)), algorithm, False, "penalty ramp exhausted max_iter without converging"
         if not feasible(u):
-            u = _repair_feasibility(u, feasible, violation, np.asarray(u0, dtype=float))
-        if feasible(u):
-            best_u, best_f = u, walled(u)
-            step = 1e-3 * np.maximum(np.abs(u), 1.0)
-            simplex = np.vstack([u] + [u + step * np.eye(u.size)[k] for k in range(u.size)])
-            polish = minimize(
-                walled,
-                u,
-                method="Nelder-Mead",
-                options={"initial_simplex": simplex, "xatol": tol, "fatol": tol, "maxiter": max_iter},
+            u = _repair_feasibility(u, feasible, violation, np.asarray(u0, dtype=float), margins)
+        if not feasible(u):
+            return u, finite(objective(u)), algorithm, False, "could not move the penalty optimum into the feasible set"
+        best_u, best_f = u, walled(u)
+        step = 1e-3 * np.maximum(np.abs(u), 1.0)
+        polish = minimize(
+            walled,
+            u,
+            method="Nelder-Mead",
+            options={
+                "initial_simplex": _feasible_simplex(u, feasible, step),
+                "xatol": tol,
+                "fatol": tol,
+                "maxiter": max_iter,
+            },
+        )
+        if np.isfinite(polish.fun) and polish.fun < best_f and np.all(np.isfinite(polish.x)) and feasible(polish.x):
+            best_u, best_f = np.asarray(polish.x, dtype=float), float(polish.fun)
+        if not (np.isfinite(best_f) and best_f < 1e18):
+            return best_u, best_f, algorithm, False, "objective not finite at the feasible point"
+        gap = best_f - bound
+        if gap > _PENALTY_CERTIFICATION_GAP * max(1.0, abs(best_f)):
+            return (
+                best_u,
+                best_f,
+                algorithm,
+                False,
+                f"feasible point is {gap:.3g} above the penalty bound (limit {_PENALTY_CERTIFICATION_GAP:g} relative): "
+                "not certified as the constrained optimum",
             )
-            if np.isfinite(polish.fun) and polish.fun < best_f and np.all(np.isfinite(polish.x)) and feasible(polish.x):
-                best_u, best_f = np.asarray(polish.x, dtype=float), float(polish.fun)
-            if np.isfinite(best_f) and best_f < 1e18:
-                return best_u, best_f, "powell-penalty+nelder-mead", True, "constrained optimum reached"
+        return best_u, best_f, algorithm, True, "constrained optimum reached"
     last = np.inf
     result = None
     for _restart in range(6):
@@ -2399,6 +2624,7 @@ def map_fit(
         else:
             hard_constraints, _soft = _constraint_policy(constraints, penalty)
             violation = _hard_violation(hard_constraints, slots) if hard_constraints else None
+            margins = _hard_margins(hard_constraints, slots) if hard_constraints else None
             grouped_x, grouped_fun, grouped_algorithm, grouped_ok, grouped_message = _derivative_free_constrained(
                 lambda u: -log_target(u),
                 feasible,
@@ -2407,6 +2633,7 @@ def map_fit(
                 max_iter=max_iter,
                 tol=tol,
                 rng=np.random.RandomState() if rng is None else rng,
+                margins=margins,
             )
             grouped_nit = 0
         if not grouped_ok or not np.isfinite(grouped_fun) or not np.all(np.isfinite(grouped_x)):
@@ -2498,6 +2725,7 @@ def map_fit(
     smooth_target = _penalize_target(log_target, soft)
     smooth_target = _penalize_target(smooth_target, _potential_term(potentials, slots))
     violation = _hard_violation(hard_constraints, slots) if hard_constraints else None
+    margins = _hard_margins(hard_constraints, slots) if hard_constraints else None
     project_rng = np.random.RandomState() if rng is None else rng
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
@@ -2510,6 +2738,7 @@ def map_fit(
         max_iter=max_iter,
         tol=tol,
         rng=project_rng,
+        margins=margins,
     )
     if not ok or not np.isfinite(f_opt) or not np.all(np.isfinite(x_opt)):
         raise RuntimeError(

@@ -1,0 +1,172 @@
+[
+  {
+    "id": "P05-F01",
+    "severity": "real",
+    "title": "Registry: swapping two version files is undetected; the promoted alias serves the other version",
+    "surface": "mixle.inference.production.Registry.get / current / _load_payload",
+    "reproduction": "cd to a dir outside any mixle checkout; /Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F01_registry_swap.py  (registers mu=1 as v1 and mu=9 as v2, promotes production->v1, swaps the two files' contents on disk, then reads current('m','production'))",
+    "expected": "get('m','v1') / current('m','production') refuse (integrity failure) or at least disclose that the envelope read from v1.json declares version 'v2'. The record_digest is described as authenticating 'the exact persisted version envelope'.",
+    "observed": "current('m','production') returns the v2 model (mu=9.0) with no error or warning; get('m','v1').mu == 9.0; the file v1.json contains \"version\": \"v2\" and its digest verifies because the digest covers the payload, never the file name. A rollback (promote back to v1) is therefore defeated by a plain file swap, which is precisely the failure mode current()'s docstring says the alias mechanism exists to prevent.",
+    "notes": "_load_payload never checks payload['version'] == the requested version. One line (raise if payload.get('version') != version) closes it. The same gap lets a version file be copied over another with a valid digest."
+  },
+  {
+    "id": "P05-F02",
+    "severity": "real",
+    "title": "Registry.get/current serve a model of another family under the original provenance header without any cross-check",
+    "surface": "mixle.inference.production.Registry.get / current / Service.from_registry",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F02_registry_family_swap.py  (registers a Gaussian fitted with fit_with_provenance, rewrites the 'model' block of v1.json to a PoissonDistribution, recomputes record_digest with the library's own _record_digest, then get('m'))",
+    "expected": "Model.load performs exactly this cross-check (manifest family vs deserialized type -> refuse; model_content_hash vs model_hash(loaded) -> warn + note). Registry.get should at least disclose that header['model_hash'] != model_hash(model) or header['model_type'] != type(model).__name__.",
+    "observed": "get('m') returns (PoissonDistribution, header) where header['model_type'] == 'GaussianDistribution' and header['model_hash'] != model_hash(loaded); no error, no warning. Service.from_registry then scores with the Poisson under the Gaussian's provenance. The header is stored as an opaque dict and never compared with the model it accompanies.",
+    "notes": "record_digest is an unkeyed content digest, so recomputing it is trivial for anyone who can write the directory; the point is that the registry carries the fingerprint needed to notice the substitution and does not look at it, while the lifecycle artifact path does."
+  },
+  {
+    "id": "P05-F03",
+    "severity": "real",
+    "title": "fit_with_provenance's attached .header makes the fitted model unserializable through to_json/dump_models and silently turns Model.deploy into a pickle artifact",
+    "surface": "mixle.inference.production.fit_with_provenance; mixle.stats.dump_models; ProbabilityDistribution.to_json; mixle.lifecycle.Model.deploy",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F03_header_breaks_serialization.py",
+    "expected": "The provenance module docstring says headers 'serialize to JSON alongside the model' and the model returned is 'self-describing'. dump_models(model) / model.to_json() should succeed (Registry.register and model_hash already strip the header before encoding), and Model.deploy should write model.json.",
+    "observed": "dump_models(model) and model.to_json() raise SerializationError ('... does not match its declared fields (missing=[], extra=[\"header\"])'). Wrapping the same model in mixle.Model and calling deploy() writes format='pickle' with format_fallback 'the serialization registry has no JSON form for GaussianDistribution ...' -- a plain Gaussian becomes a code-executing artifact that Model.load refuses without trust_code=True. `del model.header` restores JSON serialization.",
+    "notes": "Two of the three encode paths (Registry.register, data.hashing.model_hash) special-case 'header'; utils.serialization.to_serializable and Model._write_model do not. Either strip 'header' in to_serializable or attach the header somewhere the schema check ignores."
+  },
+  {
+    "id": "P05-F04",
+    "severity": "real",
+    "title": "Header.training['fit_request_digest'] differs between byte-identical fit requests (estimator_repr embeds the object address)",
+    "surface": "mixle.inference.production.fit_with_provenance (training.fit_request / fit_request_digest)",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F04_fit_request_digest.py",
+    "expected": "Two calls with the same data, the same estimator class/configuration, the same seed and the same optimize kwargs produce the same fit_request_digest (that is what an 'immutable request snapshot' digest is for: matching a header to the request that produced it).",
+    "observed": "The digests differ on every call. fit_request['estimator_repr'] is repr(estimator) == '<mixle.stats.univariate.continuous.gaussian.GaussianEstimator object at 0x125a728d0>' (MixtureEstimator likewise), so the digest hashes a memory address. model_hash and dataset_hash agree between the two runs.",
+    "notes": "Estimators have no __repr__; the request should use a structural description (e.g. to_serializable(estimator) or the estimator's own to_json) rather than repr."
+  },
+  {
+    "id": "P05-F05",
+    "severity": "real",
+    "title": "Registry.verify_chain returns False on a valid chain when trust_code is an invalid value, swallowing the trust_code rejection; checkpointer then reports 'lineage does not verify'",
+    "surface": "mixle.inference.production.Registry.verify_chain / checkpointer(resume=True)",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F05_verify_chain_swallows_trust_error.py",
+    "expected": "verify_chain(name, trust_code='yes') / trust_code=1 / trust_code=None raise the same 'must be exactly True' ValueError that get() raises (the docstring says trust_code 'is required in the same way and for the same reason'). The checkpointer comment says 'anything verify_chain RAISES is a different state -- verification could not be performed at all' and must propagate.",
+    "observed": "verify_chain('ck') -> True but verify_chain('ck', trust_code='yes') -> False and trust_code=1 -> False: the require_explicit_true ValueError raised inside self.get() is caught by the blanket `except (KeyError, TypeError, ValueError): return False`. checkpointer('ck', trust_code='yes') consequently raises 'checkpoint lineage for ck does not verify ... repair or remove the damaged versions', blaming the (intact) data for a caller-side flag error.",
+    "notes": "A wrong verdict from a verification function is worse than an exception. Validate trust_code up front in verify_chain (as get() does) before the try block."
+  },
+  {
+    "id": "P05-F06",
+    "severity": "real",
+    "title": "detect_drift on a composite model reports DRIFT for a numpy-array batch of the very rows that a list batch reports as no drift",
+    "surface": "mixle.inference.production.detect_drift (_raw_columns / _numeric_pair), Service.check_drift, Monitor.check",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F06_drift_ndarray_false_positive.py",
+    "expected": "The verdict depends on the data, not on the container: rows[:100] as a list and np.array(rows[:100]) are the same 100 records and both should give drift=False with per-feature PSI for field_0 and field_1.",
+    "observed": "list batch: drift=False, per_feature={'field_0': psi 0.093, 'field_1': psi 0.004}. ndarray batch: drift=True, reasons=[\"feature 'field_0' PSI 0.717 > 0.25\"], per_feature has only 'field_0'. Service.check_drift(np.array(...)) -> True. _raw_columns tests isinstance(rows[0], (tuple, list)); an ndarray row fails the test, so the whole 2-column batch is treated as ONE scalar column, np.asarray(...) flattens both fields into one PSI computation against the reference's field_0 only, and a false drift verdict follows. Score drift (ks=0.058) is identical in both cases, i.e. the model scores the ndarray rows fine.",
+    "notes": "A production batch arriving as an ndarray (the natural output of most feature pipelines) trips a retrain in Monitor.update. Accept np.ndarray rows in _raw_columns, or materialize rows as tuples once."
+  },
+  {
+    "id": "P05-F07",
+    "severity": "real",
+    "title": "Corpus notebook receipts_and_replay.ipynb: the un-tampered Receipt now FAILS verify_receipt on 0.8.1, contradicting the notebook's narrative and its committed outputs",
+    "surface": "notebooks/data_science/receipts_and_replay.ipynb (cell 8) vs mixle.inference.receipt.verify_receipt",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F07_receipt_notebook.py  (cell 8 of the notebook verbatim); or nbconvert --execute the notebook and read cell 8's output (executed copy: /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/executed-1.ipynb)",
+    "expected": "The committed notebook output is 'receipt verifies offline: True' with ledger_exact/trace_replayable/calibration_named/provenance_present all 'pass'; the following markdown says 'corrupt any one claim and verification fails on that claim, while the others still stand' and the closing section claims the Receipt is 'offline re-verifiable'.",
+    "observed": "On the candidate the same cell prints 'receipt verifies offline: False' with executables_match=fail, trace_replayable=fail, provenance_present=fail (calibration_observed / provenance_observed = unobserved) even though is_bit_identical_replay(trace, TOOLS) is True in the cell above. verify_receipt now requires receipt.executables to be pre-filled with implementation_digest(tool) for every tool (nothing in Receipt or record_step fills it, and no public helper exists), and requires provenance to be {'sources': [{'id':..., 'digest':..., 'content':...}]} while the module docstring still says provenance follows the SubstrateItem.provenance dict shape and the notebook passes {'source_id': ...}. The notebook executes with rc=0 because nothing asserts, so the corpus gate does not see it.",
+    "notes": "Either the notebook is stale (it should build executables via mixle.inference.integrity.implementation_digest and a sources list) or the receipt API regressed for the documented usage; either way a shipped corpus notebook demonstrates the feature failing. Also the 'tamper' section's contrast (tampered receipt fails) is meaningless when the good receipt already fails on the same checks."
+  },
+  {
+    "id": "P05-F08",
+    "severity": "minor",
+    "title": "DriftReport is frozen but its score/per_feature/reasons containers are mutable after construction; str() reports injected values",
+    "surface": "mixle.inference.production.drift.DriftReport",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F08_driftreport_mutable.py",
+    "expected": "__post_init__ says 'a mutation after construction cannot rewrite evidence that was already recorded' and the CHANGELOG lists Report records among the '35 durable records ... frozen'.",
+    "observed": "r.score['ks'] = 99.0; r.reasons.append('injected'); r.per_feature['value']['psi'] = 99.0 all succeed and str(r) prints 'DriftReport[ok]  score: ks=99.000 ... reasons: injected'. Only rebinding the attribute itself is blocked (FrozenInstanceError). The same pattern applies to Receipt (detach_receipt_container keeps concrete mutable types).",
+    "notes": "The docstring conflates 'severs the caller's alias' with 'cannot be rewritten'. Wrap in MappingProxyType / tuple, or reword the guarantee."
+  },
+  {
+    "id": "P05-F09",
+    "severity": "minor",
+    "title": "Registry.checkpointer does not validate `every`: 0, -1 and True checkpoint every iteration; 1.5 checkpoints once; '2' and None fail only later inside optimize()",
+    "surface": "mixle.inference.production.Registry.checkpointer(every=...)",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F09_checkpointer_every.py",
+    "expected": "every must be a positive int; anything else rejected at construction (the module validates trust_code exactly, Service.health validates window exactly, Monitor validates thresholds exactly).",
+    "observed": "every=0 -> 4 versions for 4 iterations; every=-1 -> 4 versions; every=True -> 4 versions; every=1.5 -> 1 version (iteration 3 only, 3 % 1.5 == 0); every='2' and every=None -> TypeError raised from inside optimize() on the first step, after the fit has started.",
+    "notes": "Also resume= is truthiness-coerced (resume='no' behaves as resume=True; see P05-F16)."
+  },
+  {
+    "id": "P05-F10",
+    "severity": "minor",
+    "title": "Service(keep=0) keeps an unbounded activity log; Service(keep=-1) discards every event so health() reports events=0",
+    "surface": "mixle.inference.production.Service(keep=...) / _log",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F10_service_keep.py",
+    "expected": "keep validated as a positive integer, the way health(window=0 / -1) is rejected with a clear error in the same class.",
+    "observed": "keep=0: after 5 score() calls len(activity)=5 (the trim `activity[-0:]` is a full slice). keep=-1: len(activity)=0 and health() == {'events': 0, 'drift_events': 0} although five batches were scored -- a monitoring blind spot with no error.",
+    "notes": ""
+  },
+  {
+    "id": "P05-F11",
+    "severity": "minor",
+    "title": "Damaged or foreign files in a registry directory surface as raw JSONDecodeError / OSError(ELOOP) / KeyError('model'), and versions() lists non-version names",
+    "surface": "mixle.inference.production.Registry.versions / get / current / _load_payload",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F11_registry_raw_errors.py",
+    "expected": "A truncated version file is reported as a registry integrity failure (ValueError with name/version), a symlinked version/alias as an unsafe-entry ValueError (as _model_dir does for a symlinked model directory), and versions() only returns 'v<int>' ids.",
+    "observed": "truncated v1 -> json.decoder.JSONDecodeError; symlinked v5.json is listed by versions() and get() raises OSError [Errno 62] Too many levels of symbolic links (O_NOFOLLOW's errno, not a registry error); a symlinked production.alias raises the same OSError from current(); a stray vX.json is listed as version 'vX' (sorted first, key 0) and get('m','vX') raises KeyError('model').",
+    "notes": "The refusals are correct (nothing unsafe is followed); the reporting is not. verify_chain also turns a truncated tip into a bare False."
+  },
+  {
+    "id": "P05-F12",
+    "severity": "minor",
+    "title": "A NaN observation in a production batch makes detect_drift / Service.check_drift / Monitor.check raise, while Service.score on the same batch counts it as unscorable",
+    "surface": "mixle.inference.production.detect_drift (_log_densities), Service.check_drift, Monitor.check/update",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F12_drift_nan_raises.py",
+    "expected": "detect_drift's own design computes fraction_unscorable_current and fails closed on lost coverage; a NaN is the canonical unscorable record and Service.score already scores it -inf and counts n_unscorable=1. The drift path should count it the same way (or the two surfaces should at least agree).",
+    "observed": "detect_drift, Service.check_drift and Monitor.check all raise UnscorableObservation('GaussianDistribution rejects NaN observations.') -- the batch path raises, the scalar fallback re-raises, and nothing catches UnscorableObservation as Service._safe_logd does. A Monitor loop dies on the first NaN in production data.",
+    "notes": ""
+  },
+  {
+    "id": "P05-F13",
+    "severity": "minor",
+    "title": "Registry writes NaN/-Infinity literals into version files (json.dump default), which mixle's own strict from_json rejects",
+    "surface": "mixle.inference.production.Registry.register (json.dump without allow_nan=False)",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F13_registry_nonstrict_json.py",
+    "expected": "Version files are strict JSON like every other mixle artifact (utils.serialization.to_json forces allow_nan=False), or a non-finite header value is rejected at register().",
+    "observed": "A header whose final_loglik is NaN (which _final_loglik can legitimately produce for a model that scores non-finitely) registers fine and the file contains the literal NaN; Registry.get reads it back via Python's lenient json.load, but mixle.utils.serialization.from_json(version_text) raises SerializationError(\"non-standard JSON constant 'NaN' is forbidden\"), and any non-Python consumer of the registry directory gets invalid JSON.",
+    "notes": ""
+  },
+  {
+    "id": "P05-F14",
+    "severity": "docs",
+    "title": "verify_lineage does not bind the data hash, record count or log-likelihood trace; production_example.py claims the chain answers 'did this model come out of that data'",
+    "surface": "mixle.inference.production.verify_lineage; examples/production_example.py docstring",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F14_lineage_does_not_bind_data.py",
+    "expected": "production_example.py: 'verify_lineage and Registry.verify_chain answer \"is this served model really the one that came out of that data and that fit?\" without trusting anyone's word'. A reader takes that to mean the header's dataset_hash is covered.",
+    "observed": "After rewriting dataset_hash to all zeros, n_records to 1e9, every convergence loglik to 0.0 and final_loglik to 0.0, verify_lineage(header) is still True. The transition digests cover only iter/run_id/model_hash/parent fields; dataset_hash, fit_request_digest and the scalar trace are unbound claims.",
+    "notes": "Either fold dataset_hash and fit_request_digest into the root transition record, or narrow the example's claim to 'this model is the one the recorded EM run produced'."
+  },
+  {
+    "id": "P05-F15",
+    "severity": "docs",
+    "title": "Registry lineage docs say 'authenticated'; every digest is an unkeyed content digest and a forged tip verifies",
+    "surface": "mixle.inference.production.Registry.verify_chain / checkpointer / record_digest docstrings",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F15_chain_forgeable.py",
+    "expected": "Docs that say 'authenticated lineage record', 'authenticated tip', 'Verified digest of the exact persisted version envelope' should state, as Model.load's docstring does, that a writer with directory access can rewrite model + digests together and that integrity against that threat needs a signature kept outside the directory.",
+    "observed": "Replacing the tip model with GaussianDistribution(1234, 1) and recomputing model_hash, transition_digest and record_digest with the module's own helpers leaves verify_chain(name) == True and get(name)[0].mu == 1234.0.",
+    "notes": "Not a code defect (the design is content-hashing, not signing); the wording over-claims relative to the lifecycle module, which is honest about the same limitation."
+  },
+  {
+    "id": "P05-F16",
+    "severity": "minor",
+    "title": "Assorted input-validation gaps: verify_lineage(non-dict) raises; Service.from_registry cannot pass trust_code; checkpointer resume= is truthiness-coerced; detect_drift threshold strings fail late and a positive loglik_shift_threshold flags identical data",
+    "surface": "mixle.inference.production.verify_lineage / Service.from_registry / Registry.checkpointer / detect_drift",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/repro/P05-F16_misc_validation.py",
+    "expected": "verify_lineage of a non-header returns False ('Missing lineage is an unverified result'); Service.from_registry forwards trust_code to Registry.current so a NeuralLeaf entry can be served; resume validated as an exact bool like lineage= is; thresholds validated for type up front; a positive loglik_shift_threshold rejected (it makes drift unconditional).",
+    "observed": "verify_lineage('x') -> ValueError('dictionary update sequence element #0 ...'); Service.from_registry(reg, 'g', trust_code=True) -> TypeError (kwarg forwarded to Service.__init__); checkpointer(name, resume='no') behaves as resume=True; detect_drift(psi_threshold='0.5') passes validation (float('0.5') works) and dies later with TypeError '>' not supported between float and str; detect_drift(..., loglik_shift_threshold=0.5) on identical reference/current returns drift=True.",
+    "notes": ""
+  },
+  {
+    "id": "P05-F17",
+    "severity": "real",
+    "title": "Six more families outside the two CHANGELOG-disclosed modules are write-only for to_json/dump_models (refused loudly) and fall back to pickle in Model.deploy",
+    "surface": "ProbabilityDistribution.to_json / mixle.stats.dump_models / utils.serialization.to_json; CHANGELOG 0.8.0 'to_json()/from_json() cannot round-trip any family in mixle.stats.directional or mixle.stats.matrix (12 families across two whole modules)'",
+    "reproduction": "/Users/grantboquet/mixle/.ci-repro-colima/candidate-081/venv/bin/python /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/attacks/e_roundtrip.py (fits 63 families and round-trips each through to_json/from_json, dump_models/load_models and utils.to_json/from_json; see /Users/grantboquet/mixle/.ci-repro-colima/reviews-081/pass-05/attacks/e2.out). Minimal: optimize(np.random.dirichlet([1,2,3],200).tolist(), DirichletEstimator(), max_its=3, out=None).to_json()",
+    "expected": "Per the CHANGELOG the only families that cannot round-trip are the directional and matrix modules. Fitted DirichletDistribution, DirichletProcessMixtureDistribution (mixle.stats.bayes), MultivariateStudentTDistribution (mixle.stats.multivariate), ProbabilisticPCADistribution, HierarchicalMixtureDistribution and JointMixtureDistribution (mixle.stats.latent) should serialize to JSON, or be named in the disclosure.",
+    "observed": "All six raise SerializationError from to_json()/dump_models() ('does not match its constructor-owned schema; define __pysp_setstate__' for Dirichlet/DPM; 'requires a class-owned __pysp_setstate__ hook' for MvT/PPCA/HierarchicalMixture; 'constructor rejected serialized state' for JointMixture). The refusal is correct and disclosed at call time (no write-only text escapes), and Model.deploy falls back to pickle with the documented warning. 51 other fitted families round-trip bit-exactly (identical seq_log_density, identical model_hash, identical re-serialized text).",
+    "notes": "Rated real rather than docs because these are mainstream families a user reaches through optimize()/propose() with no directional/matrix data involved; every save path costs them a code-executing pickle."
+  }
+]

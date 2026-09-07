@@ -1,10 +1,10 @@
 {
-  "artifact": "mixle.release_gate_receipt/v1",
-  "candidate_commit": "5cca9e960b230a4cabcb7fba27fe044531bac12e",
-  "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/api_consistency_test.py mixle/tests/duplicate_body_scan_test.py mixle/tests/signature_docstring_sync_test.py -p no:randomly -q -m \"\" -n 0",
-  "date": "2026-08-22",
-  "evidence_digest": "c672a3438c21316e7ccd9e59839e1aec68f64538a5817d7d08ffbe932fc1b0c8",
-  "gate": "Accidental or duplicate public surface",
-  "note": "Exactly the three focused checks the row names, all green on the release tip under Python 3.12.12.",
-  "result": "38 passed, 7 subtests passed in 5.78s (exit 0)"
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "c9c5fbbbbd63afbebcaa00d4bf4471d7464d8b02",
+ "command": "cd . && PYTHONPATH=. python -m pytest mixle/tests/api_consistency_test.py mixle/tests/duplicate_body_scan_test.py mixle/tests/signature_docstring_sync_test.py -p no:randomly -q -m \"\" -n 0",
+ "date": "2026-08-22",
+ "evidence_digest": "83af0633c3cad1852761f43f5cefc995d9c85f07655396d7e80d46c533608086",
+ "gate": "Accidental or duplicate public surface",
+ "note": "Exactly the three focused checks the row names, all green on the release tip under Python 3.12.12.",
+ "result": "38 passed, 7 subtests passed in 5.78s (exit 0)"
 }

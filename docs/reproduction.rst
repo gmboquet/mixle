@@ -67,8 +67,9 @@ What a mismatch means
 * A failed check or nonzero exit is a failed reproduction, not an ordinary receipt. Treat it as a bug and
   retain both receipts; their artifact and environment blocks localize the discrepancy.
 * A **``checks`` difference across versions** is expected when a release intentionally changes behavior; it
-  must correspond to a changelog entry and a `release decision log <../release-checklists/0.8.0-decisions.md>`_
-  entry.
+  must correspond to a changelog entry and an entry in the release decision log
+  (``release-checklists/0.8.1-decisions.md`` in the repository; decisions D-0001..D-0211 in
+  ``release-checklists/0.8.0-decisions.md`` remain in force).
 
 The receipt's determinism is itself gated by ``mixle/tests/reproduce_receipt_test.py``, so the reproduction
 path cannot silently rot.
