@@ -91,7 +91,10 @@ class MixtureInitValidationTest(unittest.TestCase):
         # failing subtest reported "DumpError: can't serialize <class 'function'>" under xdist
         # instead of the assertion that failed.
         for label, factory in (
-            ("MixtureAccumulator", lambda value: MixtureAccumulator([GaussianAccumulator(), GaussianAccumulator()], init=value)),
+            (
+                "MixtureAccumulator",
+                lambda value: MixtureAccumulator([GaussianAccumulator(), GaussianAccumulator()], init=value),
+            ),
             ("MixtureAccumulatorFactory", lambda value: MixtureAccumulatorFactory([], init=value)),
         ):
             with self.subTest(factory=label):
