@@ -34,7 +34,7 @@ jobs:
       - name: Block release sign-off on pending decision reviews
         run: |
           python scripts/verify_decision_reviews.py release-checklists/0.8.0-decisions.md
-          python scripts/verify_decision_reviews.py release-checklists/0.8.1-decisions.md
+          python scripts/verify_decision_reviews.py release-checklists/0.8.2-decisions.md
 
   smoke:
     name: smoke / collection-light
@@ -336,7 +336,7 @@ jobs:
       - name: Build the wheel and source distribution
         run: |
           python -m pip install --upgrade "pip==26.1.2"
-          python -m pip install -r release-checklists/0.8.1-build-requirements.txt
+          python -m pip install -r release-checklists/0.8.2-build-requirements.txt
           python -m build --no-isolation --outdir dist
       - name: Install each artifact into its own clean base environment
         run: |

@@ -1,7 +1,7 @@
 <p align="left">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/gmboquet/mixle/v0.8.1/assets/mixle_logo_dark.png"/>
-    <img src="https://raw.githubusercontent.com/gmboquet/mixle/v0.8.1/assets/mixle_logo.png" alt="mixle" width="480"/>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/gmboquet/mixle/v0.8.2/assets/mixle_logo_dark.png"/>
+    <img src="https://raw.githubusercontent.com/gmboquet/mixle/v0.8.2/assets/mixle_logo.png" alt="mixle" width="480"/>
   </picture>
 </p>
 
@@ -32,10 +32,10 @@ deployment.
 
 mixle removes the boilerplate, not the modeling judgment: you still choose the data, the objective,
 and the validation. Not every surface is equally settled, either — the
-**[maturity guide](https://gmboquet.github.io/mixle/v0.8.1/maturity.html)** separates the stable center
+**[maturity guide](https://gmboquet.github.io/mixle/v0.8.2/maturity.html)** separates the stable center
 (distributions, estimators, `optimize`) from the provisional workflow layers, and headline claims trace
-to it and to the [release-readiness](https://gmboquet.github.io/mixle/v0.8.1/release-readiness.html) and
-[validation](https://gmboquet.github.io/mixle/v0.8.1/validation.html) evidence.
+to it and to the [release-readiness](https://gmboquet.github.io/mixle/v0.8.2/release-readiness.html) and
+[validation](https://gmboquet.github.io/mixle/v0.8.2/validation.html) evidence.
 
 **Docs:** [gmboquet.github.io/mixle](https://gmboquet.github.io/mixle/) · **Release notes:**
 [CHANGELOG.md](CHANGELOG.md)
@@ -278,8 +278,8 @@ Normal(free * Field("x") + free * Field("z") + free, free).fit(
 
 ## Related projects
 
-Mixle Core 0.8.1 is a standalone release (the 0.8.0 candidate tree; 0.8.0 itself was never published). The independently versioned projects below are related
-development efforts, not members of the 0.8.1 artifact set, and this release makes no co-installation
+Mixle Core 0.8.2 is a standalone release (a patch of 0.8.1; 0.8.0 itself was never published). The independently versioned projects below are related
+development efforts, not members of the 0.8.2 artifact set, and this release makes no co-installation
 or compatibility claim for them:
 
 - **[mixle-notebooks](https://github.com/gmboquet/mixle-notebooks)** — runnable tutorials, data-science
@@ -300,7 +300,7 @@ or compatibility claim for them:
 
 Every example in this repository runs on synthetic data it generates itself — none downloads a
 dataset. The five below are additionally dependency-free beyond the base install, in the
-[version-bound examples directory](https://github.com/gmboquet/mixle/tree/v0.8.1/examples):
+[version-bound examples directory](https://github.com/gmboquet/mixle/tree/v0.8.2/examples):
 
 ```sh
 cd examples
@@ -313,14 +313,14 @@ python scaling_example.py              # same fit by backend= (mp / mpi / spark)
 
 A few examples load pinned open model weights (CLIP, a small LM) on first run; each pin, its cache
 behavior, and its release-evidence status are recorded in the
-[example execution manifest](https://gmboquet.github.io/mixle/v0.8.1/example-execution-manifest.html).
+[example execution manifest](https://gmboquet.github.io/mixle/v0.8.2/example-execution-manifest.html).
 Real-dataset walkthroughs live in
 [mixle-notebooks](https://github.com/gmboquet/mixle-notebooks).
 
 ## Tests
 
 15,000+ tests, organized into purpose/time-budget tiers (see the
-[test tiers guide](https://gmboquet.github.io/mixle/v0.8.1/test-tiers.html)):
+[test tiers guide](https://gmboquet.github.io/mixle/v0.8.2/test-tiers.html)):
 
 ```sh
 python -m pytest path/to/focused_test.py    # the smallest relevant test while developing
@@ -333,7 +333,7 @@ coverage floor), optional extras, and scheduled numerical/hardware lanes.
 `base_dist_test.py` alone exercises 40 base-distribution configurations across 34 families end to
 end: sampler repeatability, `str`/`eval` round-trips, vectorized-vs-scalar density agreement, EM
 convergence.
-See [`mixle/tests/README.md`](https://github.com/gmboquet/mixle/blob/v0.8.1/mixle/tests/README.md).
+See [`mixle/tests/README.md`](https://github.com/gmboquet/mixle/blob/v0.8.2/mixle/tests/README.md).
 
 ## Maintainers & contributors
 
@@ -344,4 +344,4 @@ Contributions, issues, and discussion are welcome — open a PR or an issue.
 
 ## License
 
-MIT — see [LICENSE](https://github.com/gmboquet/mixle/blob/v0.8.1/LICENSE).
+MIT — see [LICENSE](https://github.com/gmboquet/mixle/blob/v0.8.2/LICENSE).

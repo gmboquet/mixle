@@ -40,5 +40,6 @@ def test_release_surfaces_exclude_retracted_headline_numbers() -> None:
 def test_changelog_has_current_comparison_boundaries() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert "[Unreleased]: https://github.com/gmboquet/mixle/compare/v0.7.0...HEAD" in changelog
+    assert "[0.8.2]: https://github.com/gmboquet/mixle/compare/v0.8.1...v0.8.2" in changelog
     assert "[0.8.1]: https://github.com/gmboquet/mixle/compare/v0.7.0...v0.8.1" in changelog
     assert "[0.7.0]: https://github.com/gmboquet/mixle/compare/v0.6.2...v0.7.0" in changelog

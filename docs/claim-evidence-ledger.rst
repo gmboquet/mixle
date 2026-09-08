@@ -15,7 +15,7 @@ Evidence grades (from the 0.8.0 release contract):
 - **E5 — production/scale:** sustained real deployment, or representative multi-node/multi-GPU runs.
 
 Stable-core claims target at least **E2**; performance and backend claims target at least **E3**.
-"Production-ready", "safe", or "frontier" claims require **E5** and are **not** made in 0.8.1. Grades
+"Production-ready", "safe", or "frontier" claims require **E5** and are **not** made in 0.8.2. Grades
 here are the release owner's current assessment and are revised as evidence lands (several are pending
 the 0.8.1 re-run, marked below).
 

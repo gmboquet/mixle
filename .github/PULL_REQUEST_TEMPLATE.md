@@ -1,7 +1,7 @@
 <!--
-0.8.1 is a credibility/stability/proof release under a feature freeze (the 0.8.0 candidate tree, D-0212). Until 0.8.1 ships, every PR
-must map to an item in the 0.8.1 worklist; new-capability work goes to the post-0.8 backlog or stays
-under `mixle.experimental`. See release-checklists/0.8.1.md and CONTRIBUTING.md.
+0.8.2 is a patch release of the shipped 0.8.1 under a feature freeze (the 0.8.2 follow-ups ledger, D-0213). Until 0.8.2 ships, every PR
+must map to an item in the 0.8.2 worklist; new-capability work goes to the post-0.8 backlog or stays
+under `mixle.experimental`. See release-checklists/0.8.2.md and CONTRIBUTING.md.
 -->
 
 ## Worklist item

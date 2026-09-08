@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_BUNDLE = ROOT / "release-checklists" / "0.8.1-repro-bundle.json"
+DEFAULT_BUNDLE = ROOT / "release-checklists" / "0.8.2-repro-bundle.json"
 
 
 def _read(path: Path) -> dict[str, Any]:

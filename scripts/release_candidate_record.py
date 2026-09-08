@@ -10,7 +10,7 @@ real workflow could not have bound a single receipt. Usage::
 
     python scripts/release_candidate_record.py \
         --commit "$SHA" --tree "$(git rev-parse 'HEAD^{tree}')" \
-        --tag v0.8.1 --version 0.8.1 --workflow-run "$GITHUB_RUN_ID" \
+        --tag v0.8.2 --version 0.8.2 --workflow-run "$GITHUB_RUN_ID" \
         --out metadata/release-candidate.json
 """
 

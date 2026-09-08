@@ -86,7 +86,7 @@ def test_real_license_gate_rejects_a_record_stripped_of_approval() -> None:
     gate must still refuse it, or approval has become a formality the verifier no longer checks.
     """
     verifier = _load("verify_license_provenance.py")
-    record = json.loads((ROOT / "release-checklists" / "0.8.1-license-provenance.json").read_text(encoding="utf-8"))
+    record = json.loads((ROOT / "release-checklists" / "0.8.2-license-provenance.json").read_text(encoding="utf-8"))
     assert verifier.validate(record) == []
     assert verifier.validate(record, require_approved=True) == []
     stripped = {**record, "status": "pending", "reviewer": None, "review_date": None, "evidence": None}

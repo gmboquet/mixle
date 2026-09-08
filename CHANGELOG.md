@@ -6,6 +6,13 @@ All notable changes to mixle are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-09-08
+
+A patch release of the shipped 0.8.1 artifact: the same public surface, with the defects the ten
+adversarial reviews of the 0.8.1 candidate deferred (decision D-0213) repaired, plus the release-process
+repairs the 0.8.1 publication itself required. Several repairs turn a silent wrong answer into an
+error; the [0.8.2 migration guide](docs/migrations/0.8.2.md) lists every one of them.
+
 ### Fixed
 
 Repairs for the findings the ten adversarial reviews of the 0.8.1 candidate deferred to this
@@ -1655,6 +1662,7 @@ FSDP2/Spark/MPI transports).
   users on too-old dependencies get a clear resolver error instead of obscure runtime breakage.
 
 [Unreleased]: https://github.com/gmboquet/mixle/compare/v0.7.0...HEAD
+[0.8.2]: https://github.com/gmboquet/mixle/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/gmboquet/mixle/compare/v0.7.0...v0.8.1
 [0.8.0]: https://github.com/gmboquet/mixle/compare/v0.7.0...v0.8.1
 [0.7.0]: https://github.com/gmboquet/mixle/compare/v0.6.2...v0.7.0

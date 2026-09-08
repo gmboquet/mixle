@@ -7,9 +7,21 @@ import argparse
 import re
 from pathlib import Path
 
+PRE_RELEASE_SUFFIX = re.compile(r"(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?$")
+
+
+def base_release(version: str) -> str:
+    """The release a PEP 440 pre-release rehearses: ``0.8.2rc1`` -> ``0.8.2``.
+
+    A release candidate is cut from the release tree with only the version string changed, so its
+    changelog heading, docs changelog section and migration guide are the final release's (D-0216).
+    """
+    return PRE_RELEASE_SUFFIX.sub("", version, count=1)
+
 
 def validate(root: Path, version: str) -> list[str]:
     errors: list[str] = []
+    version = base_release(version)
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     if re.search(rf"^## \[{re.escape(version)}\] — \d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.MULTILINE) is None:
         errors.append(f"CHANGELOG.md has no dated {version} release heading")

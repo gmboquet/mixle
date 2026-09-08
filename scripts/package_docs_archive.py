@@ -12,7 +12,7 @@ import re
 import tarfile
 from pathlib import Path
 
-VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+VERSION = re.compile(r"^\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 

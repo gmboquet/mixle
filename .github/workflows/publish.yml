@@ -20,7 +20,7 @@ on:
         type: choice
         options: [prepare, testpypi, promote]
       tag:
-        description: "Signed annotated candidate tag (for example v0.8.1)"
+        description: "Signed annotated candidate tag (for example v0.8.2)"
         required: true
         type: string
       prepare_run_id:
@@ -123,8 +123,8 @@ jobs:
           python scripts/verify_license_provenance.py --require-approved
           python scripts/check_release_document_state.py --version "$VERSION"
           python scripts/verify_release_checklist.py \
-            --checklist release-checklists/0.8.1.md \
-            --receipts release-checklists/0.8.1-receipts \
+            --checklist release-checklists/0.8.2.md \
+            --receipts release-checklists/0.8.2-receipts \
             --candidate-sha "$SHA" \
             --require-final
           # every page: the generator requires the runs to add up to GitHub's total_count, because
@@ -208,8 +208,8 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           python -m pip install --upgrade "pip==26.1.2"
-          python -m pip install -r release-checklists/0.8.1-build-requirements.txt
-          python -m pip install -r release-checklists/0.8.1-repro-requirements.txt
+          python -m pip install -r release-checklists/0.8.2-build-requirements.txt
+          python -m pip install -r release-checklists/0.8.2-repro-requirements.txt
           export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD)"
           export MIXLE_SOURCE_COMMIT="$CANDIDATE_SHA"
           export MIXLE_SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')"
@@ -218,7 +218,7 @@ jobs:
           git archive HEAD | tar -x -C source-a
           git archive HEAD | tar -x -C source-b
           python scripts/build_environment_receipt.py \
-            --requirements release-checklists/0.8.1-build-requirements.txt \
+            --requirements release-checklists/0.8.2-build-requirements.txt \
             --out metadata/build-environment.json
           (cd source-a && python -m build --no-isolation --outdir ../dist-a)
           (cd source-b && python -m build --no-isolation --outdir ../dist-b)
@@ -268,7 +268,7 @@ jobs:
             --format cyclonedx-json -o metadata/raw-sbom.json
           python scripts/bind_sbom.py \
             --cyclonedx metadata/raw-sbom.json \
-            --wheel-metadata metadata/mixle-0.8.1-py3-none-any.whl.json \
+            --wheel-metadata metadata/mixle-0.8.2-py3-none-any.whl.json \
             --candidate-sha "$CANDIDATE_SHA" \
             --waivers metadata/accepted-waivers.json \
             --out metadata/sbom.json
@@ -295,7 +295,7 @@ jobs:
           "$RUNNER_TEMP/repro-env/bin/python" -m pip install --quiet dist/*.whl
           # the bundle pins the reproduction environment exactly; byte-identical stdout is only
           # meaningful under the arithmetic that produced it.
-          python -c 'import json,pathlib;d=json.loads(pathlib.Path("release-checklists/0.8.1-repro-environment.json").read_text());print("\n".join(f"{k}=={v}" for k,v in d["dependencies"].items()))' > "$RUNNER_TEMP/repro-pins.txt"
+          python -c 'import json,pathlib;d=json.loads(pathlib.Path("release-checklists/0.8.2-repro-environment.json").read_text());print("\n".join(f"{k}=={v}" for k,v in d["dependencies"].items()))' > "$RUNNER_TEMP/repro-pins.txt"
           "$RUNNER_TEMP/repro-env/bin/python" -m pip install --quiet -r "$RUNNER_TEMP/repro-pins.txt"
           # Each receipt is written OUTSIDE the records root and moved in only after the runner
           # exits successfully. Redirecting stdout straight to metadata/reproduction-$entry.json
@@ -321,13 +321,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_TAG: ${{ needs.verify-candidate.outputs.candidate-tag }}
+          CANDIDATE_VERSION: ${{ needs.verify-candidate.outputs.candidate-version }}
         run: |
           set -euo pipefail
           if gh release view "$CANDIDATE_TAG" --json isDraft >/dev/null 2>&1; then
             test "$(gh release view "$CANDIDATE_TAG" --json isDraft --jq .isDraft)" = "true"
           else
-            gh release create "$CANDIDATE_TAG" --verify-tag --draft \
-              --title "mixle ${{ needs.verify-candidate.outputs.candidate-version }}" \
+            # A PEP 440 pre-release (the rehearsal cut of D-0216) is flagged as one so it never becomes
+            # the repository's "latest" release and the docs site never assembles it.
+            case "$CANDIDATE_VERSION" in
+              *a[0-9]*|*b[0-9]*|*rc[0-9]*|*.dev[0-9]*) PRERELEASE_FLAG="--prerelease" ;;
+              *) PRERELEASE_FLAG="" ;;
+            esac
+            gh release create "$CANDIDATE_TAG" --verify-tag --draft $PRERELEASE_FLAG \
+              --title "mixle $CANDIDATE_VERSION" \
               --generate-notes
           fi
           gh release upload "$CANDIDATE_TAG" dist/* docs-dist/* metadata/* --clobber
@@ -431,7 +438,7 @@ jobs:
     timeout-minutes: 20
     environment: pypi
     permissions:
-      actions: read
+      actions: write # read the prepare run's artifacts; dispatch the docs deploy
       contents: write
       id-token: write
     steps:
@@ -519,9 +526,9 @@ jobs:
           # phase regenerated approval from the GitHub API minutes ago (promotion/), and the two
           # must select the same check runs
           python scripts/build_example_execution_manifest.py \
-            --bundle release-checklists/0.8.1-repro-bundle.json \
+            --bundle release-checklists/0.8.2-repro-bundle.json \
             --candidate candidate/metadata/release-candidate.json \
-            --wheel-metadata candidate/metadata/mixle-0.8.1-py3-none-any.whl.json \
+            --wheel-metadata candidate/metadata/mixle-0.8.2-py3-none-any.whl.json \
             --receipt candidate/metadata/reproduction-gallery-univariate.json \
             --receipt candidate/metadata/reproduction-gallery-structured.json \
             --receipt candidate/metadata/reproduction-production-provenance.json \
@@ -567,4 +574,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_TAG: ${{ needs.verify-candidate.outputs.candidate-tag }}
-        run: gh release edit "$CANDIDATE_TAG" --draft=false --latest
+          CANDIDATE_VERSION: ${{ needs.verify-candidate.outputs.candidate-version }}
+        run: |
+          set -euo pipefail
+          case "$CANDIDATE_VERSION" in
+            *a[0-9]*|*b[0-9]*|*rc[0-9]*|*.dev[0-9]*) LATEST_FLAGS="--prerelease --latest=false" ;;
+            *) LATEST_FLAGS="--latest" ;;
+          esac
+          gh release edit "$CANDIDATE_TAG" --draft=false $LATEST_FLAGS
+      - name: Deploy the versioned documentation site
+        # A release published with the workflow token raises no `release` event (GitHub suppresses
+        # events from GITHUB_TOKEN), so the 0.8.1 docs deploy never fired and was run by hand.
+        # `workflow_dispatch` is the one trigger the token may raise; docs.yml assembles every
+        # public non-pre-release archive, so a pre-release run only rebuilds the main-branch docs.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: gh workflow run docs.yml --repo "$REPOSITORY" --ref main

@@ -68,7 +68,7 @@ What a mismatch means
   retain both receipts; their artifact and environment blocks localize the discrepancy.
 * A **``checks`` difference across versions** is expected when a release intentionally changes behavior; it
   must correspond to a changelog entry and an entry in the release decision log
-  (``release-checklists/0.8.1-decisions.md`` in the repository; decisions D-0001..D-0211 in
+  (``release-checklists/0.8.2-decisions.md`` in the repository; decisions D-0001..D-0211 in
   ``release-checklists/0.8.0-decisions.md`` remain in force).
 
 The receipt's determinism is itself gated by ``mixle/tests/reproduce_receipt_test.py``, so the reproduction

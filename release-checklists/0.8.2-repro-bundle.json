@@ -55,10 +55,10 @@
       "metadata/release-check-evidence.sigstore.json",
       "metadata/check-runs.json",
       "metadata/SHA256SUMS",
-      "metadata/mixle-0.8.1-py3-none-any.whl.json",
+      "metadata/mixle-0.8.2-py3-none-any.whl.json",
       "metadata/reproduction-*.json"
     ],
-    "rule": "The final bundle is incomplete unless these retained records bind its source commit, approved checks, wheel SHA-256, and local entry receipts to the signed v0.8.1 tag."
+    "rule": "The final bundle is incomplete unless these retained records bind its source commit, approved checks, wheel SHA-256, and local entry receipts to the signed v0.8.2 tag."
   },
   "closure": [
     {
@@ -67,12 +67,12 @@
       "sha256": "71e6f87616cfb9876cf99fcf821fcfd924aeb1c32cd84f2f48e2ee8daf5f66db"
     },
     {
-      "path": "release-checklists/0.8.1-repro-environment.json",
+      "path": "release-checklists/0.8.2-repro-environment.json",
       "role": "bundle-closure",
       "sha256": "bc1ea3d27928da04f4ec5479b777ee9b34443b48c1f6c12b22baf26c38b6953e"
     },
     {
-      "path": "release-checklists/0.8.1-repro-requirements.txt",
+      "path": "release-checklists/0.8.2-repro-requirements.txt",
       "role": "bundle-closure",
       "sha256": "a6a43c1d3e2b88285c33c2ad238e6942dcba45a4b419efa03749efc7f2aa3979"
     },
@@ -240,6 +240,6 @@
       "timeout_seconds": 30
     }
   ],
-  "environment": "release-checklists/0.8.1-repro-environment.json",
-  "release": "0.8.1"
+  "environment": "release-checklists/0.8.2-repro-environment.json",
+  "release": "0.8.2"
 }

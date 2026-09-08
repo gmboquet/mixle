@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-BUNDLE = ROOT / "release-checklists" / "0.8.1-repro-bundle.json"
+BUNDLE = ROOT / "release-checklists" / "0.8.2-repro-bundle.json"
 
 
 def _load(path: Path, name: str):
@@ -34,7 +34,7 @@ def test_tracked_bundle_is_canonical_and_complete():
         assert runner.validate_bundle(tracked) is tracked
     except ValueError as exc:
         # validate_bundle enforces the implementer-environment pins (numpy/scipy versions in
-        # 0.8.1-repro-environment.json) and fails CLOSED anywhere else. On such hosts the precise
+        # 0.8.2-repro-environment.json) and fails CLOSED anywhere else. On such hosts the precise
         # version-mismatch refusal IS correct validator behavior, so the test accepts exactly that
         # message and still fails on any other refusal. Same class as the replay skips below;
         # first fired when the sharded full tier ran on hosted runners (numpy 2.5.1).
@@ -55,7 +55,7 @@ def test_every_local_entry_reproduces_exact_expected_output(entry_id):
     except ValueError as exc:
         if "is required; found" in str(exc):
             # The bundle pins the implementer environment exactly (numpy/scipy versions recorded in
-            # 0.8.1-repro-environment.json), and the runner fails CLOSED on any other -- byte-exact
+            # 0.8.2-repro-environment.json), and the runner fails CLOSED on any other -- byte-exact
             # stdout digests are only meaningful under the arithmetic that produced them. On a host
             # with different pins that refusal is correct behavior, not a failed reproduction, so
             # the test records it as a skip. The checklist says the same: the local bundle is a
@@ -228,7 +228,7 @@ def _attest(runner, root: Path) -> None:
 
 
 def _write_valid_records(
-    root: Path, *, commit: str = _CANDIDATE_COMMIT, release: str = "0.8.1", tree: str = "7" * 40
+    root: Path, *, commit: str = _CANDIDATE_COMMIT, release: str = "0.8.2", tree: str = "7" * 40
 ) -> dict:
     """Write a records root whose contents actually assert what their names promise.
 
@@ -245,7 +245,7 @@ def _write_valid_records(
     metadata = root / "metadata"
     metadata.mkdir(parents=True, exist_ok=True)
     (root / "dist").mkdir(exist_ok=True)
-    wheel, sdist = "mixle-0.8.1-py3-none-any.whl", "mixle-0.8.1.tar.gz"
+    wheel, sdist = "mixle-0.8.2-py3-none-any.whl", "mixle-0.8.2.tar.gz"
 
     # a minimal but structurally VALID wheel: every member the archive holds is claimed by RECORD
     # with its real digest, as real wheels do. An earlier fixture left METADATA unclaimed and was
@@ -254,18 +254,18 @@ def _write_valid_records(
         return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode("ascii").rstrip("=")
 
     module = b"VALUE = 1\n"
-    metadata_text = b"Name: mixle\nVersion: 0.8.1\n"
+    metadata_text = b"Name: mixle\nVersion: 0.8.2\n"
     module_digest = hashlib.sha256(module).hexdigest()
     record = (
         f"mixle/__init__.py,sha256={_enc(module)},{len(module)}\n"
-        f"mixle-0.8.1.dist-info/METADATA,sha256={_enc(metadata_text)},{len(metadata_text)}\n"
-        f"mixle-0.8.1.dist-info/RECORD,,\n"
+        f"mixle-0.8.2.dist-info/METADATA,sha256={_enc(metadata_text)},{len(metadata_text)}\n"
+        f"mixle-0.8.2.dist-info/RECORD,,\n"
     )
     wheel_path = root / "dist" / wheel
     with zipfile.ZipFile(wheel_path, "w") as archive:
         archive.writestr("mixle/__init__.py", module)
-        archive.writestr("mixle-0.8.1.dist-info/METADATA", metadata_text)
-        archive.writestr("mixle-0.8.1.dist-info/RECORD", record)
+        archive.writestr("mixle-0.8.2.dist-info/METADATA", metadata_text)
+        archive.writestr("mixle-0.8.2.dist-info/RECORD", record)
     wheel_digest = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
     sdist_digest = "b" * 64
 
@@ -294,7 +294,7 @@ def _write_valid_records(
     )
     return {
         "mixle/__init__.py": module_digest,
-        "mixle-0.8.1.dist-info/METADATA": hashlib.sha256(metadata_text).hexdigest(),
+        "mixle-0.8.2.dist-info/METADATA": hashlib.sha256(metadata_text).hexdigest(),
     }
 
 
@@ -371,9 +371,9 @@ def test_a_wheel_record_disagreeing_with_sha256sums_is_refused():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         hashes = _write_valid_records(root)
-        wheel_record = root / "metadata" / "mixle-0.8.1-py3-none-any.whl.json"
+        wheel_record = root / "metadata" / "mixle-0.8.2-py3-none-any.whl.json"
         wheel_record.write_text(
-            json.dumps({"filename": "mixle-0.8.1-py3-none-any.whl", "sha256": "c" * 64}), encoding="utf-8"
+            json.dumps({"filename": "mixle-0.8.2-py3-none-any.whl", "sha256": "c" * 64}), encoding="utf-8"
         )
         result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
         assert result["resolved"] is False
@@ -469,7 +469,7 @@ def test_pinned_wheel_bytes_absent_or_altered_beside_the_records_is_refused():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         hashes = _write_valid_records(root)
-        wheel_path = root / "dist" / "mixle-0.8.1-py3-none-any.whl"
+        wheel_path = root / "dist" / "mixle-0.8.2-py3-none-any.whl"
         wheel_path.write_bytes(wheel_path.read_bytes() + b"\x00")  # altered bytes, digest no longer matches
         result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
         assert result["resolved"] is False
@@ -653,7 +653,7 @@ def test_a_pinned_wheel_whose_payload_disagrees_with_its_record_is_refused():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         hashes = _write_valid_records(root)
-        wheel_path = root / "dist" / "mixle-0.8.1-py3-none-any.whl"
+        wheel_path = root / "dist" / "mixle-0.8.2-py3-none-any.whl"
         # alter the member, keep RECORD, re-pin the OUTER digest so SHA256SUMS still matches
         stale = wheel_path.with_suffix(".stale")
         with zipfile.ZipFile(wheel_path) as zi, zipfile.ZipFile(stale, "w") as zo:
@@ -670,11 +670,11 @@ def test_a_pinned_wheel_whose_payload_disagrees_with_its_record_is_refused():
             encoding="utf-8",
         ) if False else None
         lines = sums.read_text(encoding="utf-8").splitlines()
-        lines = [f"{new_digest}  mixle-0.8.1-py3-none-any.whl" if l.endswith(".whl") else l for l in lines]
+        lines = [f"{new_digest}  mixle-0.8.2-py3-none-any.whl" if l.endswith(".whl") else l for l in lines]
         sums.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        meta = root / "metadata" / "mixle-0.8.1-py3-none-any.whl.json"
+        meta = root / "metadata" / "mixle-0.8.2-py3-none-any.whl.json"
         meta.write_text(
-            json.dumps({"filename": "mixle-0.8.1-py3-none-any.whl", "sha256": new_digest}), encoding="utf-8"
+            json.dumps({"filename": "mixle-0.8.2-py3-none-any.whl", "sha256": new_digest}), encoding="utf-8"
         )
         # an installation that matches the STALE RECORD (i.e. the original bytes) must not be authorized
         result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
@@ -818,8 +818,8 @@ def test_attestation_is_verified_offline_with_gh_bound_to_repo_workflow_and_comm
         def gh_response(**overrides):
             # the shape and fields real gh returned for the fb8c02d6 candidate (retained verify.json)
             certificate = {
-                "buildSignerURI": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.1",
-                "subjectAlternativeName": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.1",
+                "buildSignerURI": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.2",
+                "subjectAlternativeName": "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.2",
                 "issuer": "https://token.actions.githubusercontent.com",
                 "sourceRepositoryURI": "https://github.com/gmboquet/mixle",
                 "sourceRepositoryDigest": _CANDIDATE_COMMIT,
@@ -874,9 +874,9 @@ def test_attestation_is_verified_offline_with_gh_bound_to_repo_workflow_and_comm
         import re as _re
 
         assert _re.match(
-            identity, "https://github.com/gmboquet/mixle/.github/workflows/tests.yml@refs/heads/release/0.8.1"
+            identity, "https://github.com/gmboquet/mixle/.github/workflows/tests.yml@refs/heads/release/0.8.2"
         )
-        assert _re.match(identity, "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.1")
+        assert _re.match(identity, "https://github.com/gmboquet/mixle/.github/workflows/publish.yml@refs/tags/v0.8.2")
         assert not _re.match(identity, "https://github.com/gmboquet/mixle/.github/workflows/docs.yml@refs/heads/main")
         assert not _re.match(
             identity, "https://github.com/gmboquet/mixle-fork/.github/workflows/tests.yml@refs/heads/x"
@@ -1006,7 +1006,7 @@ def test_a_pinned_wheel_with_a_truncated_central_directory_is_a_structured_probl
         root = Path(directory)
         hashes = _write_valid_records(root)
         _attest(runner, root)
-        wheel_path = root / "dist" / "mixle-0.8.1-py3-none-any.whl"
+        wheel_path = root / "dist" / "mixle-0.8.2-py3-none-any.whl"
         original = wheel_path.read_bytes()
         truncated = original[: len(original) - 40]  # cuts into the central directory / EOCD
         wheel_path.write_bytes(truncated)
@@ -1018,8 +1018,8 @@ def test_a_pinned_wheel_with_a_truncated_central_directory_is_a_structured_probl
             ),
             encoding="utf-8",
         )
-        (root / "metadata" / "mixle-0.8.1-py3-none-any.whl.json").write_text(
-            json.dumps({"filename": "mixle-0.8.1-py3-none-any.whl", "sha256": hashlib.sha256(truncated).hexdigest()}),
+        (root / "metadata" / "mixle-0.8.2-py3-none-any.whl.json").write_text(
+            json.dumps({"filename": "mixle-0.8.2-py3-none-any.whl", "sha256": hashlib.sha256(truncated).hexdigest()}),
             encoding="utf-8",
         )
         result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
@@ -1080,7 +1080,7 @@ def test_every_archive_read_failure_is_a_structured_problem_not_only_bad_zip_fil
         root = Path(directory)
         hashes = _write_valid_records(root)
         _attest(runner, root)
-        wheel_path = root / "dist" / "mixle-0.8.1-py3-none-any.whl"
+        wheel_path = root / "dist" / "mixle-0.8.2-py3-none-any.whl"
         # rewrite the fixture wheel with an LZMA-compressed RECORD, then corrupt that member's data
         with zipfile.ZipFile(wheel_path) as archive:
             members = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
@@ -1100,14 +1100,14 @@ def test_every_archive_read_failure_is_a_structured_problem_not_only_bad_zip_fil
         sums = root / "metadata" / "SHA256SUMS"
         sums.write_text(
             "\n".join(
-                (f"{digest}  mixle-0.8.1-py3-none-any.whl" if line.endswith("mixle-0.8.1-py3-none-any.whl") else line)
+                (f"{digest}  mixle-0.8.2-py3-none-any.whl" if line.endswith("mixle-0.8.2-py3-none-any.whl") else line)
                 for line in sums.read_text(encoding="utf-8").splitlines()
             )
             + "\n",
             encoding="utf-8",
         )
-        (root / "metadata" / "mixle-0.8.1-py3-none-any.whl.json").write_text(
-            json.dumps({"filename": "mixle-0.8.1-py3-none-any.whl", "sha256": digest}), encoding="utf-8"
+        (root / "metadata" / "mixle-0.8.2-py3-none-any.whl.json").write_text(
+            json.dumps({"filename": "mixle-0.8.2-py3-none-any.whl", "sha256": digest}), encoding="utf-8"
         )
         result = runner._resolve_candidate_records(bundle, root, _executing(record_hashes=hashes))
         assert result["resolved"] is False

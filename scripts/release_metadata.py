@@ -6,7 +6,7 @@ Python version and platform it was fingerprinted on -- the immutable fingerprint
 so the exact artifact can be verified byte for byte later (e.g. that the file on PyPI is the one that
 passed the release gates). Usage::
 
-    python scripts/release_metadata.py dist/mixle-0.8.1-py3-none-any.whl [--out artifact-metadata.json]
+    python scripts/release_metadata.py dist/mixle-0.8.2-py3-none-any.whl [--out artifact-metadata.json]
 
 The resolved dependency set (``pip freeze`` of the clean install) is captured separately by the release
 checklist; this script fingerprints the artifact file itself.

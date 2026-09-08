@@ -7,6 +7,7 @@ orphan: true
 Document ID: CORE-DOC-MIGRATIONS-001
 Owner: PRJ-CORE
 
+- [0.8.2 migration notes](0.8.2.md) (the patch release of 0.8.1: inputs that were silently dropped or mis-scored now raise)
 - [0.8.1 migration notes](0.8.1.md) (the published 0.8 release; the per-surface steps are in the 0.8.0 notes)
 - [0.8.0 development migration notes](0.8.0.md)
 

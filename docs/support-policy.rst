@@ -16,7 +16,7 @@ must be aligned with the release candidate before publication.
 Declared Runtime Floors
 -----------------------
 
-Core 0.8.1 declares this runtime floor. Related projects are independently
+Core 0.8.2 declares this runtime floor. Related projects are independently
 versioned and excluded from this release's support claim:
 
 .. list-table::
@@ -31,7 +31,7 @@ versioned and excluded from this release's support claim:
        effective Python/OS matrix.
    * - Related projects
      - Independently declared
-     - Explicitly excluded from Core 0.8.1 compatibility and co-install claims.
+     - Explicitly excluded from Core 0.8.2 compatibility and co-install claims.
 
 Effective Matrix
 ----------------
@@ -47,7 +47,7 @@ support, and the surfaces being claimed:
   platform-independent stochastic test;
 * optional Torch, JAX, Spark, Dask, MPI, symbolic, data, and GPU paths should
   be claimed only when their dependency stacks are installed and tested. For
-  0.8.1 the extras resolver and optional behavior baseline is Linux
+  0.8.2 the extras resolver and optional behavior baseline is Linux
   x86_64/Python 3.12 unless a backend row records broader evidence;
 * CPU fallback status should be stated for GPU-oriented workflows;
 * Windows should not be listed as supported unless it is actually tested; and
@@ -180,7 +180,7 @@ Evidence Over Metadata
 ----------------------
 
 Package metadata can declare compatibility, but release documentation should
-claim support only from evidence. For 0.8.1, ``requires-python`` is capped below
+claim support only from evidence. For 0.8.2, ``requires-python`` is capped below
 3.13 so installer compatibility and the tested 3.11/3.12 matrix agree. If a later
 ``requires-python`` range allows an interpreter
 that was not tested with the effective dependency graph, describe it as allowed

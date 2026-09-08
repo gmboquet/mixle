@@ -165,12 +165,12 @@ jobs:
           test "${{ needs.extra.result }}" = "success"
           python scripts/environment_receipt.py verify \
             --directory extra-receipts \
-            --policy release-checklists/0.8.1-extra-profiles.json \
+            --policy release-checklists/0.8.2-extra-profiles.json \
             --candidate-sha "$CANDIDATE_SHA" \
             --out extra-profile-set-receipt.json
           python scripts/environment_receipt.py verify \
             --directory extra-floor-receipts \
-            --policy release-checklists/0.8.1-extra-profiles.json \
+            --policy release-checklists/0.8.2-extra-profiles.json \
             --candidate-sha "$CANDIDATE_SHA" \
             --out extra-floor-profile-set-receipt.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

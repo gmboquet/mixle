@@ -10,13 +10,23 @@ summarizes user-visible documentation, public API coverage, validation
 expectations, and migration guidance. Use :doc:`release-notes` for the detailed
 current-release narrative and the git history for exact implementation commits.
 
+0.8.2
+-----
+
+A patch release of 0.8.1 with the same public surface. It repairs the 99 findings the ten adversarial
+reviews of the 0.8.1 candidate deferred (``release-checklists/0.8.2-followups.md``, decision D-0213)
+and the release-process defects the 0.8.1 publication exposed. Several repairs replace a silent
+wrong result with an error -- estimators refuse observations outside their support, ``optimize``
+refuses an empty batch and ``delta=0``, a mixture refuses a likelihood-factor component -- so
+existing code can start raising where it used to fit quietly: see :doc:`migrations/0.8.2`.
+
 0.8.1
 -----
 
 The first published release of the 0.8 line: the 0.8.0 candidate tree plus the post-candidate
 fixes recorded in ``CHANGELOG.md`` (the bounded log-series series, the independent-tester
 findings, the shape-clamp disclosure, the README links, and the rehearsal fixes). 0.8.0 was never
-published; see decision D-0212 in ``release-checklists/0.8.1-decisions.md``. Migration guidance is
+published; see decision D-0212 in ``release-checklists/0.8.2-decisions.md``. Migration guidance is
 unchanged from 0.8.0: see :doc:`migrations/0.8.1`.
 
 0.8.0

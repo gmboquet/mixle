@@ -51,7 +51,7 @@
       "grade": "E1",
       "evidence": [
         ".github/workflows/tests.yml#test",
-        "release-checklists/0.8.1.md"
+        "release-checklists/0.8.2.md"
       ]
     },
     {

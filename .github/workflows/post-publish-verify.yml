@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Published version to verify from PyPI (e.g. 0.8.1)"
+        description: "Published version to verify from PyPI (e.g. 0.8.2)"
         required: true
         type: string
 
@@ -35,7 +35,7 @@ jobs:
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
         run: |
-          python -c 'import os,re,sys; v=os.environ["REQUESTED_VERSION"]; sys.exit(0 if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v) else 1)'
+          python -c 'import os,re,sys; v=os.environ["REQUESTED_VERSION"]; sys.exit(0 if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?", v) else 1)'
           printf 'version=%s\n' "$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
       - name: Download retained hashes and every public-index artifact
         env:
