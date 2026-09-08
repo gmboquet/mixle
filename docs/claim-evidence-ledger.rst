@@ -17,7 +17,7 @@ Evidence grades (from the 0.8.0 release contract):
 Stable-core claims target at least **E2**; performance and backend claims target at least **E3**.
 "Production-ready", "safe", or "frontier" claims require **E5** and are **not** made in 0.8.2. Grades
 here are the release owner's current assessment and are revised as evidence lands (several are pending
-the 0.8.1 re-run, marked below).
+the exact-tip re-run for this release, marked below).
 
 .. list-table::
    :header-rows: 1
@@ -36,10 +36,10 @@ the 0.8.1 re-run, marked below).
        there with no source-tree import path and retains JUnit evidence.
    * - "15,000+ tests"
      - E1
-     - Measured 2026-09-07: 16,538 collected (``pytest --collect-only -m ""``) on the 0.8.1 candidate
-       ``c9c5fbbb``. The tiers run in CI (``core`` on 3.11–3.12 and both platforms, ``full`` sharded on 3.12,
+     - Measured 2026-09-08: 16,849 collected (``pytest --collect-only -m ""``) on the 0.8.2 candidate.
+       The tiers run in CI (``core`` on 3.11–3.12 and both platforms, ``full`` sharded on 3.12,
        ``optional`` sharded); not yet run from the wheel for the whole suite (only the import sweep
-       is) — that remains a 0.8.1 exit criterion.
+       is) — that remains an exit criterion for this release too, unchanged from 0.8.1.
    * - One ``optimize(...)`` call fits a heterogeneous composed base model
      - E2
      - The collection-light public fit path runs from the isolated installed wheel and retains JUnit
