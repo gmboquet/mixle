@@ -1130,6 +1130,25 @@ def _attach_convergence(post, slots, arr, results) -> None:
 
 
 # ------------------------------------------------------------------- result assembly
+def _refuse_a_gradient_route_without_a_gradient(grad, *, how: str) -> None:
+    """Refuse ``how='hmc'``/``'nuts'`` by name when no gradient of the target could be built.
+
+    ``_grouped_target`` builds its gradient with torch autograd and sets it to ``None`` when torch is
+    absent. The sampler then received ``grad_log_target=None`` and raised its own internal
+    ``"nuts requires value_and_grad= or both log_target and grad_log_target"`` -- a message about
+    callable signatures, for a user whose actual situation is a base install without the optional
+    dependency, and no mention of the routes that do work here.
+    """
+    if grad is not None:
+        return
+    raise ValueError(
+        "how=%r needs the gradient of the log-target, and none could be built for this model: the "
+        "grouped/plate target differentiates through torch, which is not installed. Install it with "
+        "pip install \"mixle[torch]\", or sample this model with how='mcmc' or how='ensemble', "
+        "which are gradient-free." % how
+    )
+
+
 def _refuse_a_chain_that_never_moved(results, *, how: str, constrained: bool) -> None:
     """Refuse a "posterior" whose sampler accepted nothing.
 
@@ -1140,27 +1159,47 @@ def _refuse_a_chain_that_never_moved(results, *, how: str, constrained: bool) ->
     feasible region and are rejected wholesale, which is why the docstrings point at ``'mcmc'`` and
     ``'ensemble'`` for that case; the guard covers every sampler because the symptom, not the
     cause, is what makes the result unusable.
+
+    It is applied in ``_finalize``/``_finalize_chains`` rather than at each sampler's return, which
+    is what makes "every sampler" true: wired only into ``hmc_fit``, it left ``mcmc``, ``nuts`` and
+    ``ensemble`` returning the std-0, NaN-diagnostic point the CHANGELOG says is refused -- three
+    seeds in ten at ``draws=4``, and every seed behind a ``-inf`` potential wall. Routes with no
+    acceptance rate to report (``map``, ``laplace``, ``vi``) pass through untouched.
     """
     rates = [getattr(result, "acceptance_rate", None) for result in results]
     rates = [float(rate) for rate in rates if rate is not None]
     if not rates or max(rates) > 0.0:
         return
-    advice = (
-        " A hard constraint truncates the target, and this sampler's proposals all left the "
-        "feasible region: how='mcmc' or how='ensemble' samples a truncated posterior, and "
-        "penalty=<float> turns the constraint into a soft one every sampler can follow."
-        if constrained
-        else " Reduce step_size (or raise num_steps / draws) so the sampler can move."
-    )
+    gradient_route = how in ("hmc", "nuts")
+    if constrained:
+        advice = (
+            " A hard constraint truncates the target, and this sampler's proposals all left the "
+            "feasible region: how='mcmc' or how='ensemble' samples a truncated posterior, and "
+            "penalty=<float> turns the constraint into a soft one every sampler can follow."
+            if gradient_route
+            else " A hard constraint truncates the target and nothing this sampler proposed was "
+            "feasible: check that the constraint admits the region the prior puts its mass in, or "
+            "pass penalty=<float> to make it a soft one."
+        )
+    elif gradient_route:
+        advice = " Reduce step_size (or raise num_steps / draws) so the sampler can move."
+    else:
+        advice = (
+            " Every proposal scored worse than the start: raise draws so the adaptive scale has "
+            "iterations to shrink in, pass scale=<float> to start it narrower, or check that the "
+            "target is finite at the initial point."
+        )
     raise RuntimeError(
         "%s accepted none of its proposals: every draw is the starting point repeated, so the "
         "result is a point, not a posterior.%s" % (how, advice)
     )
 
 
-def _finalize(rv, slots, res, build) -> RandomVariable:
+def _finalize(rv, slots, res, build, *, how: str | None = None, constrained: bool = False) -> RandomVariable:
     """Convert one chain's unconstrained samples to value space, relabel mixtures, attach the
     convergence diagnostics, and build the posterior-mean distribution. Shared by RW-MCMC and HMC."""
+    if how is not None:
+        _refuse_a_chain_that_never_moved([res], how=how, constrained=constrained)
     u = np.asarray(res.samples, dtype=float).reshape(len(res.samples), -1)
     layout = _exchangeable_layout(slots)  # resolve within-chain mixture label-switching too
     if layout is not None:
@@ -1353,13 +1392,15 @@ def _run_chains(run_one, worker, worker_args, chains: int, parallel, rng):
     return [run_one(s) for s in seeds]
 
 
-def _finalize_chains(rv, slots, results, build) -> RandomVariable:
+def _finalize_chains(rv, slots, results, build, *, how: str | None = None, constrained: bool = False) -> RandomVariable:
     """Combine multiple chains: pool value-space draws, attach R-hat and combined ESS.
 
     For mixtures the chains are first relabeled (label-switching): independent chains may settle on
     different component orderings, which would smear the pooled posterior and blow up R-hat. Sorting
     each chain's components by their leading parameter aligns them so the pooled summary is correct.
     """
+    if how is not None:
+        _refuse_a_chain_that_never_moved(results, how=how, constrained=constrained)
     us_raw = [np.asarray(r.samples, dtype=float).reshape(len(r.samples), -1) for r in results]
     layout = _exchangeable_layout(slots)
     if layout is not None:
@@ -2703,10 +2744,12 @@ def ensemble_fit(
         return affine_invariant_ensemble(log_target, p0, num_samples=draws, burn_in=burn, thin=thin, rng=crng)
 
     if chains == 1:
-        return _finalize(rv, slots, run_one(int(rng.randint(1, 2**31))), build)
+        return _finalize(
+            rv, slots, run_one(int(rng.randint(1, 2**31))), build, how="ensemble", constrained=constraints is not None
+        )
     kw = {"draws": draws, "burn": burn, "thin": thin, "walkers": walkers, "missing": missing}
     results = _run_chains(run_one, _ensemble_worker, (rv, data, kw), chains, parallel, rng)
-    return _finalize_chains(rv, slots, results, build)
+    return _finalize_chains(rv, slots, results, build, how="ensemble", constrained=constraints is not None)
 
 
 def mcmc_fit(
@@ -2748,10 +2791,12 @@ def mcmc_fit(
         )
 
     if chains == 1:
-        return _finalize(rv, slots, run_one(int(rng.randint(1, 2**31))), build)
+        return _finalize(
+            rv, slots, run_one(int(rng.randint(1, 2**31))), build, how="mcmc", constrained=constraints is not None
+        )
     kw = {"draws": draws, "burn": burn, "thin": thin, "scale": scale, "missing": missing}
     results = _run_chains(run_one, _mcmc_worker, (rv, data, kw), chains, parallel, rng)
-    return _finalize_chains(rv, slots, results, build)
+    return _finalize_chains(rv, slots, results, build, how="mcmc", constrained=constraints is not None)
 
 
 def hmc_fit(
@@ -2788,6 +2833,7 @@ def hmc_fit(
     log_target, grad, slots, build, dmean, dstd, feasible = _prepare_target(
         rv, data, constraints, penalty, want_grad=True, missing=missing, potentials=potentials
     )
+    _refuse_a_gradient_route_without_a_gradient(grad, how="hmc")
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
         u0 = _project_init(u0, feasible, rng)
@@ -2813,8 +2859,7 @@ def hmc_fit(
 
     if chains == 1:
         single = run_one(int(rng.randint(1, 2**31)))
-        _refuse_a_chain_that_never_moved([single], how="hmc", constrained=constraints is not None)
-        return _finalize(rv, slots, single, build)
+        return _finalize(rv, slots, single, build, how="hmc", constrained=constraints is not None)
     kw = {
         "draws": draws,
         "burn": burn,
@@ -2824,8 +2869,7 @@ def hmc_fit(
         "missing": missing,
     }
     results = _run_chains(run_one, _hmc_worker, (rv, data, kw), chains, parallel, rng)
-    _refuse_a_chain_that_never_moved(results, how="hmc", constrained=constraints is not None)
-    return _finalize_chains(rv, slots, results, build)
+    return _finalize_chains(rv, slots, results, build, how="hmc", constrained=constraints is not None)
 
 
 def nuts_fit(
@@ -2862,6 +2906,7 @@ def nuts_fit(
     log_target, grad, slots, build, dmean, dstd, feasible = _prepare_target(
         rv, data, constraints, penalty, want_grad=True, missing=missing, potentials=potentials
     )
+    _refuse_a_gradient_route_without_a_gradient(grad, how="nuts")
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
         u0 = _project_init(u0, feasible, rng)
@@ -2884,7 +2929,9 @@ def nuts_fit(
         )
 
     if chains == 1:
-        return _finalize(rv, slots, run_one(int(rng.randint(1, 2**31))), build)
+        return _finalize(
+            rv, slots, run_one(int(rng.randint(1, 2**31))), build, how="nuts", constrained=constraints is not None
+        )
     kw = {
         "draws": draws,
         "burn": burn,
@@ -2894,7 +2941,7 @@ def nuts_fit(
         "missing": missing,
     }
     results = _run_chains(run_one, _nuts_worker, (rv, data, kw), chains, parallel, rng)
-    return _finalize_chains(rv, slots, results, build)
+    return _finalize_chains(rv, slots, results, build, how="nuts", constrained=constraints is not None)
 
 
 def sample_fit(rv: RandomVariable, data, **kw) -> RandomVariable:

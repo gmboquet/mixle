@@ -10,6 +10,7 @@ messages named the wrong precondition.
 
 from __future__ import annotations
 
+import importlib.util
 import math
 import unittest
 import warnings
@@ -19,6 +20,8 @@ import numpy as np
 import mixle.stats as S
 from mixle.stats import RandomDotProductGraphDistribution
 
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+
 
 def _quiet(callable_):
     with warnings.catch_warnings():
@@ -26,6 +29,7 @@ def _quiet(callable_):
         return callable_()
 
 
+@unittest.skipUnless(HAS_TORCH, "torch not installed; pip install mixle[torch]")
 class BayesOptSurrogateTest(unittest.TestCase):
     """P09-F03: ``minimize`` worked on the example's seed and crashed on eleven others."""
 

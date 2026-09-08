@@ -22,6 +22,7 @@ from mixle import Model, propose
 from mixle.inference import learn_bayesian_network, optimize, pit_values, seq_estimate, seq_initialize
 from mixle.stats import seq_encode
 from mixle.stats.compute.sequence import seq_estimate as _seq_estimate_core
+from mixle.utils.optional_deps import HAS_PANDAS
 
 
 def _quiet(callable_):
@@ -222,15 +223,16 @@ class FieldNamingTest(unittest.TestCase):
     """P03-F08: the multimodality note printed the raw internal path tuple."""
 
     def test_multimodal_fields_use_the_same_spelling_as_every_other_note(self):
-        import pandas as pd
-
         rng = np.random.RandomState(0)
         bimodal = np.concatenate([rng.normal(-5.0, 1.0, 150), rng.normal(5.0, 1.0, 150)])
-        cases = (
+        cases = [
             ("scalar", list(bimodal), "$"),
-            ("frame", pd.DataFrame({"height": bimodal, "count": rng.poisson(2, 300)}), "$[0]"),
             ("dict", [{"height": float(h), "uni": float(u)} for h, u in zip(bimodal, rng.normal(0, 1, 300))], "$["),
-        )
+        ]
+        if HAS_PANDAS:  # the frame route is one of three; the other two are checked on a base install
+            import pandas as pd
+
+            cases.append(("frame", pd.DataFrame({"height": bimodal, "count": rng.poisson(2, 300)}), "$[0]"))
         for label, data, expected in cases:
             with self.subTest(rows=label):
                 notes = [note for note in _quiet(lambda d=data: propose(d)).notes if "multimodal" in note]

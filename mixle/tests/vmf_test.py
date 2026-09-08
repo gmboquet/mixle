@@ -6,16 +6,23 @@ direct quadrature on the circle. The sampler is checked against the exact
 mean resultant length A_d(kappa) and the estimator against parameter recovery.
 """
 
+import importlib.util
 import unittest
 
-import mpmath
 import numpy as np
 
 from mixle.stats import VonMisesFisherDistribution, VonMisesFisherEstimator
 from mixle.stats.directional.von_mises_fisher import lniv
 
+# mpmath supplies the arbitrary-precision reference these cases are checked against. It is not a
+# mixle dependency, so a base install skips the comparisons rather than failing to import the module.
+HAS_MPMATH = importlib.util.find_spec("mpmath") is not None
+if HAS_MPMATH:
+    import mpmath
+
 
 class BesselTestCase(unittest.TestCase):
+    @unittest.skipUnless(HAS_MPMATH, "mpmath not installed; it supplies the reference values")
     def test_lniv_matches_mpmath(self):
         # spans the scaled-Bessel regime and the large-order underflow regime
         cases = [
@@ -39,6 +46,7 @@ class BesselTestCase(unittest.TestCase):
 
 
 class NormalizationTestCase(unittest.TestCase):
+    @unittest.skipUnless(HAS_MPMATH, "mpmath not installed; it supplies the reference values")
     def test_d3_closed_form(self):
         # c_3(k) = k / (4 pi sinh k)
         for k in (1e-6, 0.5, 5.0, 50.0, 700.0):
@@ -46,6 +54,7 @@ class NormalizationTestCase(unittest.TestCase):
             exact = float(mpmath.log(k / (4 * mpmath.pi * mpmath.sinh(k))))
             self.assertAlmostEqual(d.log_const, exact, places=8, msg="kappa=%g" % k)
 
+    @unittest.skipUnless(HAS_MPMATH, "mpmath not installed; it supplies the reference values")
     def test_general_dim_against_mpmath(self):
         for dim, k in [(2, 3.0), (5, 0.7), (10, 25.0), (50, 4.0)]:
             mu = np.zeros(dim)
@@ -85,6 +94,7 @@ class NormalizationTestCase(unittest.TestCase):
 
 
 class SamplerTestCase(unittest.TestCase):
+    @unittest.skipUnless(HAS_MPMATH, "mpmath not installed; it supplies the reference values")
     def test_unit_norm_and_moments(self):
         for dim, k in [(3, 5.0), (8, 10.0), (3, 0.5)]:
             mu = np.zeros(dim)

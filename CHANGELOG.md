@@ -322,6 +322,22 @@ release (`release-checklists/0.8.2-followups.md`).
 - The README's nested-HMM snippet passes `max_its` and the prose says why: `optimize`'s default of
   10 EM iterations is far too small for the model that snippet builds (P08-F02).
 
+#### What the 0.8.2 adversarial review found in the repairs themselves
+
+- The zero-acceptance refusal covers every sampler, as the CHANGELOG already claimed. Wired only
+  into `hmc_fit`, it left `mcmc`, `nuts` and `ensemble` returning the std-0, NaN-diagnostic point
+  it exists to refuse. It now runs in `_finalize`/`_finalize_chains`, which every sampler returns
+  through, and its advice names the route it is talking to rather than offering HMC's step-size
+  knob to a random walk (R02-F02).
+- `how='hmc'`/`'nuts'` on a grouped model without torch refuses by name and points at the
+  gradient-free routes, instead of raising the sampler's internal "nuts requires value_and_grad= or
+  both log_target and grad_log_target" -- a message about callable signatures for a user whose
+  situation is a missing optional dependency.
+- The test suite passes on a base install (numpy and scipy only). Nine cases in the 0.8.2 repair
+  tests imported pandas or torch unconditionally, and the arbitrary-precision reference cases in
+  `vmf_test` imported mpmath at module scope, so the minimum-versions tier failed on the repairs
+  rather than on the library.
+
 #### Identifiability the likelihood cannot see (A-02, A-03, P07-F03, P08-F09)
 
 - `mixle.utils.automatic.get_estimator` takes `unimodal_leaves=`, and `get_dpm_mixture` passes it.

@@ -19,6 +19,7 @@ import mixle
 import mixle.stats as S
 from mixle.data import as_source
 from mixle.inference import optimize
+from mixle.utils.optional_deps import HAS_PANDAS
 
 
 def _quiet(callable_):
@@ -109,6 +110,7 @@ class ContainerShapeTest(unittest.TestCase):
         self.assertIsNotNone(_quiet(lambda: optimize(raw.astype("int64").astype(float), max_its=2)))
 
 
+@unittest.skipUnless(HAS_PANDAS, "pandas not installed; pip install mixle[pandas]")
 class DataFrameLabelTest(unittest.TestCase):
     """P06-F02, F03, F09: labels read as alias pairs, and a duplicated label with no name."""
 

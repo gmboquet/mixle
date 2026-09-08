@@ -10,6 +10,7 @@ receipt reporting zero iterations beside ``success: True``.
 
 from __future__ import annotations
 
+import importlib.util
 import pickle
 import unittest
 import warnings
@@ -277,6 +278,10 @@ class SamplerControlTest(unittest.TestCase):
         self.assertIn("rng must be", str(caught.exception))
 
 
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+
+
+@unittest.skipUnless(HAS_TORCH, "the gradient MAP path needs torch; pip install mixle[torch]")
 class GroupedOptimizerReceiptTest(unittest.TestCase):
     """P04-F12: a derivative-free grouped MAP reported iterations=0 beside success=True."""
 

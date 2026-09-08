@@ -11,6 +11,7 @@ README module the library refused.
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import io
 import math
 import unittest
@@ -21,6 +22,9 @@ import numpy as np
 import mixle.stats as S
 from mixle.inference import optimize
 from mixle.ppl import Bernoulli, Beta, Field, LocalLevel, NegativeBinomial, Normal, Poisson, free
+from mixle.utils.optional_deps import HAS_PANDAS
+
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
 def _quiet(callable_):
@@ -68,7 +72,10 @@ class GroupedBernoulliTest(unittest.TestCase):
         return (self.A + self.HITS[index]) / (self.A + self.B + self.TRIALS)
 
     def test_the_gradient_and_random_walk_samplers_recover_the_conjugate_posterior(self):
-        for how, tolerance in (("nuts", 0.004), ("mcmc", 0.02)):
+        # nuts differentiates the grouped target through torch; on a base install it refuses by name
+        # and mcmc is the gradient-free route, so only the routes this install can run are compared.
+        routes = [("mcmc", 0.02)] if not HAS_TORCH else [("nuts", 0.004), ("mcmc", 0.02)]
+        for how, tolerance in routes:
             with self.subTest(how=how):
                 fitted = _quiet(
                     lambda h=how: Bernoulli(Beta(self.A, self.B).each()).fit(
@@ -94,9 +101,12 @@ class GroupedBernoulliTest(unittest.TestCase):
             self.assertAlmostEqual(summary["p[%d]" % index]["mean"], self._exact(index), delta=0.02)
 
     def test_the_rates_are_reported_as_rates_and_shrink_toward_the_prior(self):
+        # The shrinkage is a property of the posterior, not of the sampler that draws it, so the
+        # gradient-free route stands in where torch is absent and nuts refuses by name.
+        route = "nuts" if HAS_TORCH else "mcmc"
         fitted = _quiet(
             lambda: Bernoulli(Beta(self.A, self.B).each()).fit(
-                self._games(), how="nuts", draws=800, burn=400, rng=np.random.RandomState(0)
+                self._games(), how=route, draws=800, burn=400, rng=np.random.RandomState(0)
             )
         )
         summary = fitted.summary()
@@ -341,6 +351,7 @@ class TorchModuleShapeTest(unittest.TestCase):
         self.assertIn("sum(-1)", str(caught.exception))
 
 
+@unittest.skipUnless(HAS_PANDAS, "pandas not installed; pip install mixle[pandas]")
 class RegressionSurfaceTest(unittest.TestCase):
     """P08-F15: a fitted regression printed as unfitted and could not predict at new covariates."""
 
