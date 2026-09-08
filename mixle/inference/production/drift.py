@@ -246,6 +246,56 @@ def _numeric_pair(ref_values: list[Any], cur_values: list[Any]) -> tuple[np.ndar
         return ref, cur
 
 
+def validate_drift_thresholds(
+    *,
+    psi_threshold: Any = 0.25,
+    ks_threshold: Any = 0.2,
+    loglik_shift_threshold: Any = -0.5,
+    min_scorable_fraction: Any = 0.5,
+    unscorable_shift_threshold: Any = 0.1,
+) -> None:
+    """Refuse a threshold that cannot be met, or cannot fail.
+
+    Every comparison in :func:`detect_drift` is a bare ``>`` or ``<`` against one of these, so an
+    unvalidated threshold decides the verdict silently: NaN makes every comparison False and
+    suppresses drift entirely, and a negative ``psi_threshold`` flags drift on identical data, since
+    PSI is non-negative by construction (P05-F16).
+
+    Shared with :class:`~mixle.inference.production.monitor.Monitor`, which kept a weaker copy of
+    this: it accepted a positive ``loglik_shift_threshold`` and a negative ``psi_threshold`` at
+    construction and raised only from ``check()``/``update()``, one call later than the mistake and
+    on every call after (R06-F05).
+    """
+    for label, value, upper in (
+        ("psi_threshold", psi_threshold, None),
+        ("ks_threshold", ks_threshold, 1.0),
+        ("min_scorable_fraction", min_scorable_fraction, 1.0),
+        ("unscorable_shift_threshold", unscorable_shift_threshold, 1.0),
+        ("loglik_shift_threshold", loglik_shift_threshold, None),
+    ):
+        # Type as well as value: ``float('0.5')`` succeeds, so a STRING threshold passed this check
+        # and died later on "'>' not supported between float and str", from a comparison the caller
+        # never wrote (P05-F16).
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)):
+            raise TypeError(f"{label} must be a real number, got {type(value).__name__}")
+        numeric = float(value)
+        if label == "loglik_shift_threshold":
+            # A shift threshold is legitimately negative -- it is how far the mean log-likelihood
+            # may fall. A POSITIVE one, though, flags drift whenever the mean shift is below it,
+            # which identical data satisfies: the detector can then never return no-drift (P05-F16).
+            if not np.isfinite(numeric):
+                raise ValueError(f"loglik_shift_threshold must be a finite number; got {value!r}")
+            if numeric > 0.0:
+                raise ValueError(
+                    "loglik_shift_threshold is how far the mean log-likelihood may FALL, so it must "
+                    f"be <= 0; a positive value flags drift on identical data. Got {value!r}"
+                )
+            continue
+        if not np.isfinite(numeric) or numeric < 0.0 or (upper is not None and numeric > upper):
+            expected = "a finite non-negative number" if upper is None else f"a finite number in [0, {upper:g}]"
+            raise ValueError(f"{label} must be {expected}; got {value!r}")
+
+
 def detect_drift(
     model: Any,
     reference: Any,
@@ -284,38 +334,13 @@ def detect_drift(
         raise ValueError("drift detection requires a non-empty reference dataset")
     if not current:
         raise ValueError("drift detection requires a non-empty current dataset")
-    # Every comparison below is a bare `>` or `<` against one of these, so an unvalidated threshold
-    # decides the verdict silently: NaN makes every comparison False and suppresses drift entirely,
-    # and a negative psi_threshold flags drift on identical data, since PSI is non-negative by
-    # construction. A threshold that cannot be met, or cannot fail, is not a detector.
-    for label, value, upper in (
-        ("psi_threshold", psi_threshold, None),
-        ("ks_threshold", ks_threshold, 1.0),
-        ("min_scorable_fraction", min_scorable_fraction, 1.0),
-        ("unscorable_shift_threshold", unscorable_shift_threshold, 1.0),
-        ("loglik_shift_threshold", loglik_shift_threshold, None),
-    ):
-        # Type as well as value: ``float('0.5')`` succeeds, so a STRING threshold passed this check
-        # and died later on "'>' not supported between float and str", from a comparison the caller
-        # never wrote (P05-F16).
-        if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)):
-            raise TypeError(f"{label} must be a real number, got {type(value).__name__}")
-        numeric = float(value)
-        if label == "loglik_shift_threshold":
-            # A shift threshold is legitimately negative -- it is how far the mean log-likelihood
-            # may fall. A POSITIVE one, though, flags drift whenever the mean shift is below it,
-            # which identical data satisfies: the detector can then never return no-drift (P05-F16).
-            if not np.isfinite(numeric):
-                raise ValueError(f"loglik_shift_threshold must be a finite number; got {value!r}")
-            if numeric > 0.0:
-                raise ValueError(
-                    "loglik_shift_threshold is how far the mean log-likelihood may FALL, so it must "
-                    f"be <= 0; a positive value flags drift on identical data. Got {value!r}"
-                )
-            continue
-        if not np.isfinite(numeric) or numeric < 0.0 or (upper is not None and numeric > upper):
-            expected = "a finite non-negative number" if upper is None else f"a finite number in [0, {upper:g}]"
-            raise ValueError(f"{label} must be {expected}; got {value!r}")
+    validate_drift_thresholds(
+        psi_threshold=psi_threshold,
+        ks_threshold=ks_threshold,
+        loglik_shift_threshold=loglik_shift_threshold,
+        min_scorable_fraction=min_scorable_fraction,
+        unscorable_shift_threshold=unscorable_shift_threshold,
+    )
     score = score_drift(model, reference, current)
     reasons: list[str] = []
     if score["ks"] > ks_threshold:

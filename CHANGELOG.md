@@ -297,6 +297,10 @@ release (`release-checklists/0.8.2-followups.md`).
   numeric vector space, when the clusters are too unbalanced to be states, or when a split would
   leave a state carrying no weight, and a declined attempt consumes none of the caller's random
   stream, so every fallback reproduces exactly what it did before (A-01, P09-F07, P09-F11).
+  Scope, stated rather than implied: the start reaches Gaussian and vector-valued emissions. Gamma,
+  Weibull, Beta and Poisson emissions encode as a transposed block of sufficient statistics rather
+  than one value per row, and categorical emissions encode as labels, so those families decline and
+  stay bit-identical to 0.8.1 -- including the plateau, where they had one (R05-F08).
 - `mixle.ops.project` takes `init=` (the member of the target family EM starts from) and `delta=`,
   and refuses a target family with more components than the sample budget has draws (P10-F03,
   P10-F13).
@@ -332,7 +336,10 @@ release (`release-checklists/0.8.2-followups.md`).
 - `how='hmc'`/`'nuts'` on a grouped model without torch refuses by name and points at the
   gradient-free routes, instead of raising the sampler's internal "nuts requires value_and_grad= or
   both log_target and grad_log_target" -- a message about callable signatures for a user whose
-  situation is a missing optional dependency.
+  situation is a missing optional dependency. Under an active hard constraint it recommends `mcmc`
+  alone: the ensemble stretch move cannot leave a point every walker already shares, and projecting
+  walkers into a narrow feasible band is how they come to share one, so `ensemble` there is refused
+  by the zero-movement guard below. Sending a caller from one refusal to another is not advice.
 - `predict()` on a posterior restored from a pickle refuses instead of answering with the plug-in
   predictive. The `predictive` closure cannot be pickled, and `predict` fell through to sampling the
   posterior-MEAN model -- which silently drops the parameter uncertainty the posterior exists to
@@ -357,6 +364,64 @@ release (`release-checklists/0.8.2-followups.md`).
   tests imported pandas or torch unconditionally, and the arbitrary-precision reference cases in
   `vmf_test` imported mpmath at module scope, so the minimum-versions tier failed on the repairs
   rather than on the library.
+- `Model().fit`, `Model().evaluate` and `propose` read their data through the same front door the
+  fit verbs use. `optimize`/`fit`/`best_of` normalize a one-shot iterator, a structured array and a
+  mapping of columns, and refuse a masked array, a `numpy.matrix`, a 0-dimensional array and a bare
+  `str`/`bytes` by name; the lifecycle verbs handled the three tabular spellings and then fell
+  through to a bare `list(data)`, so the same inputs still reached `unhashable type:
+  'writeable void-scalar'`, a `RecursionError`, `float() argument must be ... not
+  'datetime.timedelta'`, and -- for `Model().fit('hello world hello')` -- a cheerful categorical
+  over nine characters. One table now gets one answer whichever verb reads it, and the refusals name
+  the verb that was called (R06-F03).
+- The `A-03` tie-break is exercised branch by branch (`_restart_wins`). Its round-trip test asserted
+  that the tie-break gives up no more than its own tolerance, which is also true when the rule does
+  nothing at all, so it would have passed with the branch deleted (R05-F03).
+- `terminal_log_alpha` is exported, and a terminal-state HMM's `seq_posterior` runs the restricted
+  recursion on both routes. The filtered route masked the last position to `-inf` instead of
+  restricting the forward pass, which is a different quantity (R05-F01).
+- A whole-number check shared by `PoissonEstimator`, `GeometricEstimator` and `LogSeriesEstimator`
+  (`is_whole_number`) accepts an integer typed as `int` or `numpy.integer`, not only a `float` that
+  happens to be integral -- the three families' fractional-value refusals read `2` and `2.0`
+  differently (R05-F02).
+- `numeric_feature_matrix` declines a non-floating dtype rather than an object one, so integer
+  category codes no longer reach the numeric symmetry-breaking path, and its docstring states both
+  conditions it actually applies (R05-F08).
+- A mapping of columns is materialized through `column_records`, the helper the DataFrame route
+  uses, so an ordinary row filter -- whose surviving index is 5, 9, 12, ... -- fits instead of
+  raising `KeyError: 5` from inside pandas, and a `set`/`Mapping` column is refused by name for
+  having no row order (R06-F01).
+- A closed multiprocessing handle is refused by `pysp_seq_initialize`, not only by
+  `_broadcast_collect`; the initialize path ran its own send/receive loop and skipped the check
+  (R06-F02).
+- `evidence_not_exported` names the provenance header, which does not travel in a `Model.deploy`
+  artifact (R06-F04).
+- `Monitor(...)` validates its drift thresholds at construction, through the same
+  `validate_drift_thresholds` that `detect_drift` calls. It kept a weaker local copy, so a positive
+  `loglik_shift_threshold` (which flags drift on identical data) and a negative `psi_threshold`
+  (likewise -- PSI is non-negative) constructed cleanly and then raised from every `check()` and
+  `update()`, naming a constructor argument from a method that does not take one (R06-F05).
+- The 0.8.2 migration guide's list of newly-refused inputs is the full list it claims to be:
+  `Service(keep=)`, `Registry.checkpointer(every=/resume=)`, the `Monitor` thresholds above, and a
+  bare `str`/`bytes` into any fit verb were all missing from it (R06-F06).
+- A Plackett-Luce row that is not an ordering -- `None`, a scalar, a string -- is refused by a
+  message naming the family, what an ordering is, and the row index, instead of
+  `TypeError: 'NoneType' object is not iterable` from `list(row)`, which named none of the three
+  where the sibling discrete families at least name themselves (R06-F07).
+- A calibrated-generator prompt with no canonical encoding falls back to its `repr`, as its
+  docstring always said it did. `_derive_seed` interpolated `_seed_key`'s `None` into the digest
+  input, so the key was the literal `"<base_seed>:None"` and every such prompt shared ONE seed --
+  while the warning it raises describes the opposite hazard (equal prompts seeding differently), and
+  `_seed_key` itself refuses to let a `NotImplemented` key "encode as a constant [which] would
+  silently give every such instance one shared seed" (R07-F03).
+- `LookbackHiddenMarkovModelDistribution.seq_posterior` returns the smoothing marginals
+  `P(state_t | the whole sequence)`, and takes `filtered=True` for the forward-only ones -- the
+  same flag, default and kernels as `HiddenMarkovModelDistribution.seq_posterior`, whose docstring
+  already stated that contract "matching every other `seq_posterior` in the package". It ran the
+  forward-only kernel unconditionally, so it returned the filtered probabilities under the smoothed
+  name: checked against brute-force enumeration of every state path, 0.16 off at position 0 of a
+  four-step chain and exact at the last position, which is where the two quantities coincide
+  (R05-F04). With `terminal_states` set it now refuses rather than running the unrestricted
+  recursion under the restriction.
 
 #### Identifiability the likelihood cannot see (A-02, A-03, P07-F03, P08-F09)
 
@@ -387,10 +452,14 @@ release (`release-checklists/0.8.2-followups.md`).
   fraction of the quantity it bounds and so never binds on a positive variance, which is why a
   collapsed component is caught by the mixture-level disclosure above rather than here (P08-F10).
 - `learn_mixture_structure` takes `tie_tolerance` (1 nat by default) and lets
-  `mixture_structure_health` break a likelihood tie. On a two-regime corpus the regime split and a
-  category split that absorbs both regimes sit within a nat of each other, and which one a restart
-  search returned depended on the seed. Outside the tolerance likelihood still decides -- the
-  receipt is a diagnosis, not an objective (A-03).
+  `mixture_structure_health` break a likelihood tie between two restarts. On a two-regime corpus
+  the restart search finds both a regime split and a category split that absorbs both regimes, and
+  which one it returned depended on the seed. Outside the tolerance likelihood still decides -- the
+  receipt is a diagnosis, not an objective (A-03). Measured across 48 corpus/seed pairs, the default
+  one-nat tolerance changes the returned candidate on none of them: the likelihood winner already
+  carries the clean receipt in 45, and in the other 3 the healthy candidate is 6 to 85 nats behind,
+  where the rule is meant to decline. The docstring and the ledger entry say so; a caller who wants
+  health to arbitrate a gap that wide has to ask for it.
 
 
 ## [0.8.1] — 2026-09-07

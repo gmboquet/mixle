@@ -178,6 +178,109 @@ class ZeroAcceptanceEverySamplerTest(unittest.TestCase):
                         continue  # a route this install cannot run (no gradient backend)
                     self.assertGreater(fitted.summary()["mu"]["std"], 0.0)
 
+    def test_a_hard_constraint_is_where_the_collapse_actually_happens(self):
+        """R07-F01: the first predicate was the CAUSE, and the worst case reports a healthy rate.
+
+        An ensemble behind a hard constraint projects every walker onto one feasible point; the
+        stretch move then returns the current state and is ACCEPTED, so the rate reads 0.89 while
+        all 8000 draws are one number -- reported as a posterior with a mean of 30.10 where the
+        truncated posterior sits at 20.04. The original test only ever ran the unconstrained target,
+        where nothing collapses.
+        """
+        from mixle.ppl import Normal, free
+
+        for how in ("ensemble", "hmc"):
+            with self.subTest(how=how):
+                mu = Normal(0, 10, name="mu")
+                with self.assertRaises(RuntimeError) as caught:
+                    _quiet(
+                        lambda mu=mu, how=how: Normal(mu, free).fit(
+                            self.ROWS,
+                            how=how,
+                            draws=600,
+                            burn=150,
+                            constraints=[mu > 5.30, mu < 5.35],
+                            rng=np.random.RandomState(0),
+                        )
+                    )
+                self.assertIn("a point, not a posterior", str(caught.exception))
+
+    def test_the_route_the_refusal_recommends_samples_the_truncated_posterior(self):
+        """The refusal must not swallow the route the message itself recommends.
+
+        Which, under a hard constraint, is `mcmc` alone. `nuts` is a gradient route, not one of the
+        alternatives. And `ensemble` -- named by the unconstrained message -- cannot do this model:
+        the stretch move `X_j + z(X_i - X_j)` cannot leave a point every walker already shares, and
+        projecting walkers into a 0.05-wide feasible band is how they come to share one. So the
+        recommendation drops it when constraints are active rather than sending the caller from one
+        refusal to another.
+        """
+        from mixle.ppl import Normal, free
+
+        mu = Normal(0, 10, name="mu")
+        fitted = _quiet(
+            lambda: Normal(mu, free).fit(
+                self.ROWS,
+                how="mcmc",
+                draws=600,
+                burn=150,
+                constraints=[mu > 5.30, mu < 5.35],
+                rng=np.random.RandomState(0),
+            )
+        )
+        row = fitted.summary()["mu"]
+        self.assertGreater(row["std"], 0.0)
+        self.assertGreater(row["mean"], 5.29)  # inside the band it was constrained to
+
+    def test_the_ensemble_route_on_this_model_is_refused_not_silently_wrong(self):
+        """Why the constrained recommendation names one route: the other one collapses, loudly."""
+        from mixle.ppl import Normal, free
+
+        mu = Normal(0, 10, name="mu")
+        with self.assertRaises(RuntimeError) as caught:
+            _quiet(
+                lambda: Normal(mu, free).fit(
+                    self.ROWS,
+                    how="ensemble",
+                    draws=600,
+                    burn=150,
+                    constraints=[mu > 5.30, mu < 5.35],
+                    rng=np.random.RandomState(0),
+                )
+            )
+        message = str(caught.exception)
+        self.assertIn("every retained draw is the same point", message)
+        # And it says why the acceptance rate did not give it away: a stretch move that returns the
+        # current state is accepted.
+        self.assertIn("accepted without moving", message)
+
+    def test_the_gradient_refusal_drops_the_route_that_cannot_serve_a_constrained_model(self):
+        from mixle.ppl.inference import _refuse_a_gradient_route_without_a_gradient
+
+        with self.assertRaises(ValueError) as free_form:
+            _refuse_a_gradient_route_without_a_gradient(None, how="nuts")
+        self.assertIn("how='mcmc' or how='ensemble'", str(free_form.exception))
+        self.assertIn("which are gradient-free", str(free_form.exception))
+        with self.assertRaises(ValueError) as constrained:
+            _refuse_a_gradient_route_without_a_gradient(None, how="nuts", constrained=True)
+        self.assertIn("how='mcmc', which is gradient-free", str(constrained.exception))
+        self.assertNotIn("ensemble", str(constrained.exception))
+        # A gradient that exists is not this refusal's business, constrained or not.
+        self.assertIsNone(_refuse_a_gradient_route_without_a_gradient(lambda u: u, how="nuts", constrained=True))
+
+    def test_a_constant_chain_is_refused_even_with_a_healthy_acceptance_rate(self):
+        """The predicate reads the draws, so it does not depend on how the rate was computed."""
+        from mixle.ppl.inference import _every_draw_is_one_point
+
+        class Chain:
+            def __init__(self, samples, rate):
+                self.samples = samples
+                self.acceptance_rate = rate
+
+        self.assertTrue(_every_draw_is_one_point([Chain(np.full((500, 2), 3.0), 0.9)]))
+        self.assertFalse(_every_draw_is_one_point([Chain(np.random.RandomState(0).normal(size=(500, 2)), 0.0)]))
+        self.assertFalse(_every_draw_is_one_point([Chain(np.zeros((0, 2)), 0.0)]))  # no draws is a different failure
+
     def test_the_advice_names_the_route_it_is_talking_to(self):
         from mixle.ppl import potential
 
@@ -249,5 +352,377 @@ class NetworkFromAFrameTest(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(HAS_PANDAS, "pandas not installed; pip install mixle[pandas]")
+class ColumnMappingFrontDoorTest(unittest.TestCase):
+    """R06-F01: the mapping route indexed columns by LABEL, so a filtered frame raised KeyError."""
+
+    @staticmethod
+    def _columns():
+        import pandas as pd
+
+        rng = np.random.RandomState(0)
+        frame = pd.DataFrame({"x": rng.normal(0, 1, 300), "k": rng.poisson(3, 300)})
+        return frame[frame["x"] > 0.0]  # an ordinary row filter: the surviving index is 1, 4, 7, ...
+
+    def test_every_index_shape_a_pandas_column_can_carry(self):
+        import pandas as pd
+
+        rng = np.random.RandomState(1)
+        filtered = self._columns()
+        cases = {
+            "filtered": {"x": filtered["x"], "k": filtered["k"]},
+            "string index": {
+                "x": pd.Series(rng.normal(size=60), index=["r%d" % i for i in range(60)]),
+                "k": pd.Series(rng.poisson(3, 60), index=["r%d" % i for i in range(60)]),
+            },
+            "duplicated index": {
+                "x": pd.Series(rng.normal(size=40), index=[i % 8 for i in range(40)]),
+                "k": pd.Series(rng.poisson(3, 40), index=[i % 8 for i in range(40)]),
+            },
+            "plain lists": {"x": list(rng.normal(size=60)), "k": list(rng.poisson(3, 60))},
+        }
+        for label, columns in cases.items():
+            with self.subTest(columns=label):
+                self.assertIsNotNone(_quiet(lambda columns=columns: optimize(columns, max_its=2)))
+
+    def test_the_mapping_and_frame_spellings_of_one_table_fit_the_same_model(self):
+        filtered = self._columns()
+        mapping = _quiet(
+            lambda: optimize({"x": filtered["x"], "k": filtered["k"]}, max_its=3, rng=np.random.RandomState(0))
+        )
+        frame = _quiet(lambda: optimize(filtered, max_its=3, rng=np.random.RandomState(0)))
+        self.assertEqual(str(mapping), str(frame))
+
+    def test_a_column_with_no_row_order_is_refused_by_name(self):
+        with self.assertRaises(ValueError) as caught:
+            optimize({"x": set(range(50)), "k": set(range(50, 100))}, max_its=2)
+        message = str(caught.exception)
+        self.assertIn("no row order", message)
+        self.assertIn("'x'", message)
+
+
+class ClosedParallelHandleTest(unittest.TestCase):
+    """R06-F02: P06-F04's repair shipped with no test, and missed one of the five entry points."""
+
+    @staticmethod
+    def _handle_and_estimator():
+        import mixle.stats as S
+        from mixle.utils.parallel.multiprocessing import MPEncodedData
+
+        rows = [float(v) for v in np.random.RandomState(0).normal(3, 2, 200)]
+        estimator = S.GaussianEstimator()
+        return MPEncodedData(rows, estimator=estimator, num_workers=2), estimator, rows
+
+    def test_an_open_handle_serves_every_entry_point(self):
+        from mixle.inference import seq_estimate, seq_initialize
+        from mixle.stats import GaussianDistribution
+
+        handle, estimator, _rows = self._handle_and_estimator()
+        try:
+            started = seq_initialize(handle, estimator, np.random.RandomState(0), 0.5)
+            self.assertGreater(float(started.sigma2), 0.1)  # a real fit, not the variance floor
+            fitted = seq_estimate(handle, estimator, GaussianDistribution(0.0, 1.0))
+            self.assertAlmostEqual(float(fitted.mu), 3.0, delta=0.5)
+        finally:
+            handle.close()
+
+    def test_a_closed_handle_refuses_every_entry_point_rather_than_answering(self):
+        from mixle.inference import optimize as fit_verb
+        from mixle.inference import seq_estimate, seq_initialize
+        from mixle.stats import GaussianDistribution
+
+        handle, estimator, _rows = self._handle_and_estimator()
+        handle.close()
+        routes = {
+            "seq_initialize": lambda: seq_initialize(handle, estimator, np.random.RandomState(0), 0.5),
+            "seq_estimate": lambda: seq_estimate(handle, estimator, GaussianDistribution(0.0, 1.0)),
+            "optimize": lambda: fit_verb(None, estimator, enc_data=handle, max_its=2),
+        }
+        for name, route in routes.items():
+            with self.subTest(route=name):
+                with self.assertRaises(RuntimeError) as caught:
+                    route()
+                self.assertIn("closed", str(caught.exception))
+
+    def test_closing_twice_is_still_the_documented_shutdown(self):
+        handle, _estimator, _rows = self._handle_and_estimator()
+        handle.close()
+        handle.close()  # idempotent: close() is the shutdown, not a request
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class LifecycleFrontDoorTest(unittest.TestCase):
+    """R06-F03: one table, one answer, whichever verb reads it.
+
+    ``_reusable_observations`` -- the normalization and the by-name refusals that replaced a set of
+    raw failures during the 0.8.1 campaign -- was wired into ``optimize``/``fit``/``best_of`` only.
+    ``Model().fit`` and ``propose`` read their data through ``lifecycle._tabular_records``, which
+    handled the three tabular spellings and then fell through to a bare ``list(data)``, so the same
+    inputs still reached the failures the front door exists to prevent.
+    """
+
+    HOSTILE = {
+        "numpy.matrix": (lambda: np.matrix(np.random.RandomState(0).rand(40, 2)), "numpy.matrix"),
+        "timedelta64": (lambda: np.arange(40).astype("timedelta64[s]"), "timedelta64"),
+        "masked": (lambda: np.ma.masked_array(np.arange(40.0), mask=[0] * 39 + [1]), "masked array"),
+        "bare str": (lambda: "hello world hello", "iterates as its individual characters"),
+        "0-d array": (lambda: np.array(3.0), "0-dimensional array"),
+        "ragged mapping": (lambda: {"x": [1.0, 2.0], "k": [0, 1, 0]}, "lengths differ"),
+        "set column": (lambda: {"x": {1.0, 2.0, 3.0}, "k": [0, 1, 0]}, "no row order"),
+    }
+
+    def _verbs(self):
+        from mixle import Model, propose
+
+        return (("Model.fit()", lambda d: Model().fit(d)), ("propose()", lambda d: propose(d)))
+
+    def test_every_hostile_input_is_refused_by_name_and_names_the_verb(self):
+        for name, (build, fragment) in self.HOSTILE.items():
+            for entry, call in self._verbs():
+                with self.subTest(data=name, verb=entry):
+                    with self.assertRaises(ValueError) as caught:
+                        _quiet(lambda call=call, build=build: call(build()))
+                    message = str(caught.exception)
+                    self.assertIn(fragment, message)
+                    # The message has to say which verb was called: these are the same refusals the
+                    # fit verbs raise, and "optimize() received a str" from a `Model().fit` call
+                    # sends the reader to the wrong doorway.
+                    self.assertIn(entry, message)
+
+    def test_a_single_observation_still_gets_the_lifecycle_message(self):
+        """The fallthrough's own error survives delegation -- it is about the VERB, not the data."""
+        for entry, call in self._verbs():
+            with self.subTest(verb=entry):
+                with self.assertRaises(ValueError) as caught:
+                    call(0.5)
+                self.assertIn("collection of observation records", str(caught.exception))
+
+    def test_the_normalizing_half_lands_too(self):
+        """Refusal is only half the front door; the other half fits what it silently mishandled."""
+        from mixle import Model
+
+        rows = [float(v) for v in range(50)]
+        baseline = type(_quiet(lambda: Model().fit(rows)).fitted).__name__
+        # A one-shot iterator: `list(data)` consumed it during structure inference and encoded zero
+        # rows, so the fit ran on nothing at all.
+        streamed = _quiet(lambda: Model().fit(float(v) for v in range(50)))
+        self.assertEqual(type(streamed.fitted).__name__, baseline)
+        # A structured array yields void scalars, which the profiler could not hash.
+        table = np.array([(1.0, 2), (3.0, 4)] * 20, dtype=[("x", "f8"), ("k", "i8")])
+        self.assertEqual(len(_quiet(lambda: Model().fit(table)).fitted.order), 2)
+        # A mapping of columns iterates as its field NAMES.
+        mapped = _quiet(lambda: Model().fit({"x": [1.0, 2.0, 3.0] * 10, "k": [0, 1, 0] * 10}))
+        self.assertEqual(len(mapped.fitted.dists), 2)
+
+
+class LookbackSmoothedPosteriorTest(unittest.TestCase):
+    """R05-F04: ``seq_posterior`` is the smoothing marginal on every model that defines it.
+
+    The lookback model ran the forward-only kernel unconditionally and returned the FILTERED
+    probabilities under the smoothed name -- while the plain HMM's docstring stated the smoothed
+    contract "matching every other seq_posterior in the package". Checked against brute-force
+    enumeration of all 2**T state paths, which is the definition of both quantities.
+    """
+
+    EMISSIONS = [[0.7, 0.2, 0.1], [0.1, 0.3, 0.6]]
+    START = [0.6, 0.4]
+    TRANSITIONS = [[0.8, 0.2], [0.3, 0.7]]
+    SEQUENCE = [0, 2, 2, 1]
+
+    def _model(self, **kw):
+        from mixle.stats import CategoricalDistribution, IntegerCategoricalDistribution, SequenceDistribution
+        from mixle.stats.latent.lookback_hidden_markov_model import LookbackHiddenMarkovModelDistribution
+
+        topics = [
+            SequenceDistribution(IntegerCategoricalDistribution(0, p), len_dist=CategoricalDistribution({1: 1.0}))
+            for p in self.EMISSIONS
+        ]
+        return LookbackHiddenMarkovModelDistribution(topics, w=self.START, transitions=self.TRANSITIONS, lag=0, **kw)
+
+    def _by_enumeration(self):
+        """(smoothed, filtered) marginals, summed over every state path."""
+        import itertools
+
+        w = np.asarray(self.START)
+        a = np.asarray(self.TRANSITIONS)
+        b = np.asarray(self.EMISSIONS)
+        seq = self.SEQUENCE
+        joint = np.zeros((len(seq), 2))
+        evidence = 0.0
+        for path in itertools.product(range(2), repeat=len(seq)):
+            mass = w[path[0]] * b[path[0], seq[0]]
+            for t in range(1, len(seq)):
+                mass *= a[path[t - 1], path[t]] * b[path[t], seq[t]]
+            evidence += mass
+            for t, state in enumerate(path):
+                joint[t, state] += mass
+        smoothed = joint / evidence
+
+        filtered = np.zeros((len(seq), 2))
+        step = w * b[:, seq[0]]
+        filtered[0] = step / step.sum()
+        for t in range(1, len(seq)):
+            step = (filtered[t - 1] @ a) * b[:, seq[t]]
+            filtered[t] = step / step.sum()
+        return smoothed, filtered
+
+    def test_the_default_is_the_smoothing_marginal(self):
+        model = self._model()
+        encoded = model.dist_to_encoder().seq_encode([self.SEQUENCE])
+        smoothed, filtered = self._by_enumeration()
+        np.testing.assert_allclose(model.seq_posterior(encoded)[0], smoothed, atol=1e-12)
+        # The two quantities agree at the LAST position and nowhere else, which is why returning one
+        # under the other's name reads as a plausible answer.
+        self.assertGreater(np.abs(smoothed - filtered).max(), 0.1)
+        np.testing.assert_allclose(smoothed[-1], filtered[-1], atol=1e-12)
+
+    def test_the_filtered_probabilities_are_still_reachable(self):
+        model = self._model()
+        encoded = model.dist_to_encoder().seq_encode([self.SEQUENCE])
+        _, filtered = self._by_enumeration()
+        np.testing.assert_allclose(model.seq_posterior(encoded, filtered=True)[0], filtered, atol=1e-12)
+
+    def test_a_terminal_state_restriction_is_refused_rather_than_ignored(self):
+        model = self._model(terminal_states=[1])
+        encoded = model.dist_to_encoder().seq_encode([self.SEQUENCE])
+        with self.assertRaises(NotImplementedError) as caught:
+            model.seq_posterior(encoded)
+        self.assertIn("terminal_states", str(caught.exception))
+        # The refusal has to name the route that DOES run the restricted recursion.
+        self.assertIn("HiddenMarkovModelDistribution.seq_posterior", str(caught.exception))
+
+
+class MonitorThresholdConstructionTest(unittest.TestCase):
+    """R06-F05: a threshold that cannot work is refused where it was written."""
+
+    @staticmethod
+    def _fixture():
+        from mixle.inference.production.monitor import Monitor
+
+        rows = list(np.random.RandomState(0).normal(0.0, 1.0, 200))
+        model = _quiet(lambda: optimize(rows, GaussianEstimator(), max_its=5, out=None))
+        return Monitor, model, rows
+
+    def test_a_threshold_that_can_never_pass_is_refused_at_construction(self):
+        Monitor, model, rows = self._fixture()
+        for kw, fragment in (
+            ({"loglik_shift_threshold": 1.0}, "may FALL"),
+            ({"psi_threshold": -1.0}, "non-negative"),
+            ({"ks_threshold": 2.0}, "in [0, 1]"),
+        ):
+            with self.subTest(**kw):
+                with self.assertRaises(ValueError) as caught:
+                    Monitor(model, GaussianEstimator(), rows, **kw)
+                self.assertIn(fragment, str(caught.exception))
+        with self.assertRaises(TypeError):
+            Monitor(model, GaussianEstimator(), rows, ks_threshold="0.5")
+
+    def test_a_workable_threshold_still_constructs_and_checks(self):
+        Monitor, model, rows = self._fixture()
+        monitor = Monitor(model, GaussianEstimator(), rows, loglik_shift_threshold=-0.5, psi_threshold=0.3)
+        self.assertFalse(monitor.check(rows).drift)
+        # A negative shift threshold is the meaningful direction and must stay accepted.
+        self.assertEqual(monitor.thresholds["loglik_shift_threshold"], -0.5)
+
+    def test_the_monitor_and_the_detector_share_one_rule(self):
+        """Not two copies that can drift apart -- the weaker copy is how this got through."""
+        from mixle.inference.production import drift as drift_module
+        from mixle.inference.production import monitor as monitor_module
+
+        self.assertIs(monitor_module.validate_drift_thresholds, drift_module.validate_drift_thresholds)
+
+
+class PlackettLuceRowRefusalTest(unittest.TestCase):
+    """R06-F07: a row that is not an ordering is refused by name, with its index."""
+
+    ROWS = [[0, 1, 2], [2, 0, 1], [1, 2, 0]] * 5
+
+    def _estimator(self):
+        from mixle.stats import PlackettLuceEstimator
+
+        return PlackettLuceEstimator(3)
+
+    def test_a_row_that_is_not_an_ordering_names_the_family_and_the_row(self):
+        for label, index, value in (("None", 3, None), ("a scalar", 2, 7), ("a string", 4, "abc")):
+            with self.subTest(row=label):
+                rows = list(self.ROWS)
+                rows[index] = value
+                with self.assertRaises(ValueError) as caught:
+                    _quiet(lambda rows=rows: optimize(rows, self._estimator(), max_its=2, out=None))
+                message = str(caught.exception)
+                self.assertIn("Plackett-Luce", message)
+                self.assertIn("row %d" % index, message)
+                # Not `TypeError: 'NoneType' object is not iterable`, which named neither.
+                self.assertNotIn("not iterable", message)
+
+    def test_the_partial_encoder_refuses_the_same_way(self):
+        from mixle.stats import PlackettLucePartialDataEncoder
+
+        encoder = PlackettLucePartialDataEncoder(dim=3)
+        self.assertEqual(len(encoder.seq_encode([[0, 1], [2, 0], [1, 2, 0]])), 3)
+        with self.assertRaises(ValueError) as caught:
+            encoder.seq_encode([[0, 1], None])
+        self.assertIn("row 1", str(caught.exception))
+
+    def test_well_formed_rankings_still_fit(self):
+        fitted = _quiet(lambda: optimize(self.ROWS, self._estimator(), max_its=5, out=None))
+        self.assertEqual(len(fitted.log_w), 3)
+
+
+class UnencodablePromptSeedTest(unittest.TestCase):
+    """R07-F03: every prompt without a canonical encoding shared ONE seed.
+
+    ``_derive_seed`` interpolated ``_seed_key``'s ``None`` straight into the digest input, so the
+    key was the literal ``"<base_seed>:None"`` -- while both docstrings promised a ``repr`` fallback
+    and the warning described the opposite hazard (equal prompts seeding *differently*).
+    """
+
+    class Opaque:
+        """Unencodable: defining __repr__ proves nothing about what it contains, so _seed_key declines."""
+
+        def __init__(self, tag):
+            self.tag = tag
+
+        def __repr__(self):
+            return "Opaque(%r)" % self.tag
+
+    def _derive(self, prompt, base=7):
+        from mixle.task.calibrated_generator import _derive_seed
+
+        return _quiet(lambda: _derive_seed(base, prompt))
+
+    def test_different_unencodable_prompts_get_different_seeds(self):
+        from mixle.task.calibrated_generator import _seed_key
+
+        prompts = [self.Opaque(tag) for tag in ("alpha", "beta", "gamma")]
+        for prompt in prompts:
+            self.assertIsNone(_seed_key(prompt))  # the precondition: this IS the fallback path
+        self.assertEqual(len({self._derive(p) for p in prompts}), len(prompts))
+
+    def test_the_fallback_is_the_documented_one_and_is_stable(self):
+        """`repr`, as both docstrings say -- so two prompts with the same repr still agree."""
+        import hashlib
+
+        self.assertEqual(self._derive(self.Opaque("alpha")), self._derive(self.Opaque("alpha")))
+        expected = hashlib.sha256(b"7:Opaque('alpha')").digest()
+        self.assertEqual(self._derive(self.Opaque("alpha")), int.from_bytes(expected[:8], "big") % (2**32))
+
+    def test_it_still_warns_that_the_promise_does_not_cover_this(self):
+        from mixle.task.calibrated_generator import _derive_seed
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _derive_seed(7, self.Opaque("alpha"))
+        self.assertTrue([e for e in caught if "not reproducible across processes" in str(e.message)])
+
+    def test_canonical_prompts_are_untouched(self):
+        """The repair must not move a seed that was already derived from a real encoding."""
+        self.assertEqual(self._derive(5), self._derive(5.0))  # 1 == 1.0, so one prompt
+        self.assertNotEqual(self._derive(True), self._derive(1))  # ...but a bool is its own kind
+        self.assertEqual(self._derive({"a": 1, "b": 2}), self._derive({"b": 2, "a": 1}))
+        # And `None` as a prompt is encodable, so it must not collide with the old shared value the
+        # `"<base>:None"` key produced.
+        self.assertNotEqual(self._derive(None), self._derive(self.Opaque("alpha")))

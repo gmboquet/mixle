@@ -690,17 +690,44 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
             ll = ll + backend_seq_log_density(self.len_dist, len_enc, engine)
         return ll
 
-    def seq_posterior(self, x):
-        """Compute posterior hidden state probabilities for encoded sequences x.
+    def seq_posterior(self, x, filtered: bool = False):
+        """Return per-sequence posterior state probabilities for encoded observations.
+
+        Each returned array holds the forward-backward SMOOTHING marginals
+        ``P(state_t = i | the whole sequence)``, matching every other ``seq_posterior`` in the
+        package -- including :meth:`HiddenMarkovModelDistribution.seq_posterior`, whose docstring
+        already stated that contract on behalf of both. Pass ``filtered=True`` for the forward-only
+        ``P(state_t = i | observations up to t)``.
+
+        This ran the forward-only kernel unconditionally, so it returned the FILTERED probabilities
+        under the smoothed name: a different quantity that agrees at the last position and nowhere
+        else (on a four-step categorical chain, off by 0.16 at position 0). Both are legitimate to
+        want and only one is a posterior over the observed sequence, which is what the method is
+        named for (R05-F04).
 
         Args:
             x: Encoded sequence data produced by seq_encode() / dist_to_encoder().
+            filtered: return the forward-only filtered probabilities instead of the smoothed ones.
 
         Returns:
             List[np.ndarray]: For each sequence, an array of per-position posterior state
                 probabilities with shape (num_windows, num_states).
 
+        Raises:
+            NotImplementedError: when the model restricts ``terminal_states``. The recursion below
+                is the unrestricted one, and running it under that restriction would answer for a
+                different model -- see the refusal in the body.
+
         """
+        if self.terminal_states is not None:
+            raise NotImplementedError(
+                "seq_posterior on a lookback hidden Markov model with terminal_states is not "
+                "implemented: the forward-backward recursion here is the unrestricted one, and "
+                "under a terminal-state restriction (only the LAST position may be terminal) it "
+                "would return the posterior of a different model without saying so. "
+                "HiddenMarkovModelDistribution.seq_posterior runs the restricted recursion; at "
+                "lag 0 this model's emissions can be given to it directly."
+            )
         (ids, idi, ims, imi, sz, enc_sdata, enc_idata), len_enc = x
 
         tot_cnt = len(ids) + len(idi)
@@ -731,7 +758,11 @@ class LookbackHiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribu
         alphas = np.zeros((tot_cnt, num_states), dtype=np.float64)
         xi_acc = np.zeros((seq_cnt, num_states, num_states), dtype=np.float64)
         pi_acc = np.zeros((seq_cnt, num_states), dtype=np.float64)
-        numba_baum_welch_alphas(num_states, tz, pr_obs, init_pvec, tran_mat, weights, alphas, xi_acc, pi_acc)
+        # The full Baum-Welch kernel leaves the smoothing marginals gamma in `alphas` (its backward
+        # pass rescales each row in place); the forward-only kernel leaves the filtered alphas.
+        # Same selection the plain HMM makes, on the same two kernels.
+        kernel = numba_baum_welch_alphas if filtered else numba_baum_welch2
+        kernel(num_states, tz, pr_obs, init_pvec, tran_mat, weights, alphas, xi_acc, pi_acc)
 
         return [alphas[tz[i] : tz[i + 1], :] for i in range(len(tz) - 1)]
 

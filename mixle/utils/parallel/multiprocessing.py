@@ -224,18 +224,29 @@ class MPEncodedData(EncodedDataHandle):
             raise RuntimeError("parallel worker failed:\n%s" % payload)
         return payload
 
-    def _broadcast_collect(self, msg) -> list[Any]:
-        operation = str(msg[0]) if msg else "request"
+    def _refuse_when_closed(self, operation: str) -> None:
+        """Refuse any request on a handle whose workers are gone.
+
+        After close() there are no workers to ask, and the fold over an empty payload list produced
+        nobs=0 -- so a fit through a closed handle came back as the estimator's default model (a
+        variance-floored Gaussian) and a scoring call as (0, 0), both with no error, while __len__
+        still reported the pre-close row count (P06-F04). close() is documented as the shutdown;
+        using the handle after it is a bug in the caller.
+
+        A method of its own, called by every request path, because the check originally lived inside
+        ``_broadcast_collect`` and ``pysp_seq_initialize`` writes its own send/recv loop -- so the
+        one entry point that did not share the helper was the one entry point that still answered a
+        closed handle with a default model (R06-F02).
+        """
         if not self._conns:
-            # After close() there are no workers to ask, and the fold over an empty payload list
-            # produced nobs=0 -- so a fit through a closed handle came back as the estimator's
-            # default model (a variance-floored Gaussian) and a scoring call as (0, 0), both with
-            # no error, while __len__ still reported the pre-close row count (P06-F04). close() is
-            # documented as the shutdown; using the handle after it is a bug in the caller.
             raise RuntimeError(
                 "this parallel encoded-data handle is closed: %s cannot be served. Encode the data "
                 "again (the handle is a context manager; close() shuts its workers down for good)." % operation
             )
+
+    def _broadcast_collect(self, msg) -> list[Any]:
+        operation = str(msg[0]) if msg else "request"
+        self._refuse_when_closed(operation)
         try:
             for conn in self._conns:
                 conn.send(msg)
@@ -298,6 +309,7 @@ class MPEncodedData(EncodedDataHandle):
 
     def pysp_seq_initialize(self, estimator, rng: np.random.RandomState, p: float):
         """Distributed randomized initialization (mirrors seq_initialize)."""
+        self._refuse_when_closed("init")
         p = validate_initialization_probability(p)
         seeds = rng.randint(2**31, size=self.num_workers)
         estimator_b = pickle.dumps(estimator, protocol=_PROTO)

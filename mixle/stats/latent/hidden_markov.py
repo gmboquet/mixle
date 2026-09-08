@@ -672,13 +672,14 @@ def terminal_forward_loglik(log_w: np.ndarray, log_a: np.ndarray, log_b: np.ndar
     return float(logsumexp(tf)) if tf.size else -np.inf
 
 
-def terminal_forward_backward(
-    log_w: np.ndarray, log_a: np.ndarray, log_b: np.ndarray, term_mask: np.ndarray
-) -> tuple[float, np.ndarray | None, np.ndarray | None]:
-    """Terminal-state forward-backward; returns ``(loglik, gamma (L,K), xi (L-1,K,K))`` (gamma/xi None if 0-prob).
+def terminal_log_alpha(log_w: np.ndarray, log_a: np.ndarray, log_b: np.ndarray, term_mask: np.ndarray) -> np.ndarray:
+    """Forward log-alphas under the terminal-state restriction: only the LAST position may be terminal.
 
-    The backward pass mirrors the forward: only the final position may be terminal, and only non-terminal
-    states have a future. Responsibilities are normalized by the sequence likelihood.
+    Shared by :func:`terminal_forward_backward` and the posterior readouts so there is one definition
+    of the restricted chain. Masking only the final position's emissions and then running the
+    UNRESTRICTED forward-backward is not the same recursion: it admits paths that pass through a
+    terminal state early, which this model gives probability zero, and the marginals that come back
+    are of a law the model does not score (R05-F01).
     """
     from scipy.special import logsumexp
 
@@ -689,6 +690,22 @@ def terminal_forward_backward(
     for t in range(1, length):
         prev = np.where(nonterm, la[t - 1], -np.inf)
         la[t] = log_b[t] + logsumexp(prev[:, None] + log_a, axis=0)
+    return la
+
+
+def terminal_forward_backward(
+    log_w: np.ndarray, log_a: np.ndarray, log_b: np.ndarray, term_mask: np.ndarray
+) -> tuple[float, np.ndarray | None, np.ndarray | None]:
+    """Terminal-state forward-backward; returns ``(loglik, gamma (L,K), xi (L-1,K,K))`` (gamma/xi None if 0-prob).
+
+    The backward pass mirrors the forward: only the final position may be terminal, and only non-terminal
+    states have a future. Responsibilities are normalized by the sequence likelihood.
+    """
+    from scipy.special import logsumexp
+
+    la = terminal_log_alpha(log_w, log_a, log_b, term_mask)
+    length, k = log_b.shape
+    nonterm = ~term_mask
     log_p = float(logsumexp(la[length - 1][term_mask])) if term_mask.any() else -np.inf
     if not np.isfinite(log_p):
         return log_p, None, None
@@ -1685,10 +1702,27 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
                 continue
             terminal_mask = getattr(self, "_terminal_mask", None)
             if terminal_mask is not None:
-                # Restricting the path to end in a terminal state is one more observation at the
-                # last position: log-evidence 0 on those states and -inf on the rest.
-                log_b = np.array(log_b, dtype=np.float64, copy=True)
-                log_b[-1, ~terminal_mask] = -np.inf
+                # The terminal restriction is NOT "one more observation at the last position". It is a
+                # restriction on the whole path: only the final state may be terminal. Masking the last
+                # position's emissions and then running the unrestricted chain admitted paths that pass
+                # through a terminal state early -- paths this model gives probability zero -- and
+                # returned their marginals as the posterior, wrong by up to 0.99 on a fitted model
+                # while log_density stayed correct, so nothing flagged it (R05-F01). 0.8.1 returned
+                # None here; a confident wrong number is worse than nothing. The restricted recursion
+                # below is the one the EM accumulator already uses.
+                log_alpha = terminal_log_alpha(self.log_w, self.log_transitions, log_b, terminal_mask)
+                if filtered:
+                    posteriors.append(softmax(log_alpha, axis=1))
+                    continue
+                _loglik, gamma, _xi = terminal_forward_backward(self.log_w, self.log_transitions, log_b, terminal_mask)
+                if gamma is None:
+                    raise vec.ImpossibleEvidenceError(
+                        "seq_posterior: this sequence has zero probability under the terminal-state "
+                        "restriction, so it has no state posterior. Score it with log_density to see "
+                        "the -inf, or fit without terminal_states if the data can end anywhere."
+                    )
+                posteriors.append(gamma)
+                continue
             chain = MarkovChainLatentPosterior(self.log_w, self.log_transitions, log_b)
             posteriors.append(softmax(chain._log_alpha, axis=1) if filtered else chain.marginals())
         return posteriors

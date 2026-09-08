@@ -74,8 +74,11 @@ _OPTIONAL_SERIALIZATION_MODULES = (
 # header to the model it returns, and the two other encode paths (Registry.register and
 # data.hashing.model_hash) already strip it before encoding -- but this one did not, so a plain
 # Gaussian fitted through that entry point could not be written as JSON at all, and Model.deploy
-# fell back to a code-executing pickle for it (P05-F03). The header travels beside the model in
-# the registry record and in the lifecycle artifact; it is not one of the model's parameters.
+# fell back to a code-executing pickle for it (P05-F03). The header travels beside the model in the
+# registry record (``payload["header"]``); it is not one of the model's parameters. It does NOT
+# travel in a ``Model.deploy`` artifact -- that claim was here and was wrong (R06-F04) -- so deploy
+# names it in the manifest's ``evidence_not_exported`` and ``Model.load`` reports it in ``notes``,
+# where 0.8.1 preserved it only by falling back to the pickle this exclusion exists to avoid.
 # Attributes a FIT records ON a distribution that are not part of the distribution's value: two
 # models with the same parameters are the same model whether or not one of them remembers how it was
 # produced. They are stripped before the constructor-owned schema check, which would otherwise refuse

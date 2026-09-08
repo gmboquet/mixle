@@ -354,9 +354,12 @@ def test_propose_dict_of_columns_matches_dataframe_rows():
 
 
 def test_tabular_records_rejects_ragged_and_scalar_column_mappings():
-    with pytest.raises(ValueError, match="equal-length columns"):
+    # The three refusals still fire; their wording is now the fit verbs' own, because
+    # `_tabular_records` hands everything but the tabular spellings to `_reusable_observations`
+    # (R06-F03). The messages here name the verb and the column, which the originals did not.
+    with pytest.raises(ValueError, match="lengths differ"):
         _tabular_records({"a": [1, 2, 3], "b": [1, 2]})
-    with pytest.raises(ValueError, match="not a sized"):
+    with pytest.raises(ValueError, match="not a column"):
         _tabular_records({"a": 1.5})
     with pytest.raises(ValueError, match="empty mapping"):
         _tabular_records({})

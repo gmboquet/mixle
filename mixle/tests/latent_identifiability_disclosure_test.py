@@ -7,10 +7,11 @@ receipt is clean, and the answer is still not the one the data supports.
   latched onto an outlier group on a heavy-tailed panel). The share alone is not the test, because a
   genuinely rare component is a legitimate answer; a component with fewer effective rows than it has
   free parameters is not identified by anything, and now says so.
-* A-03 -- on a two-regime corpus two optima sit within a nat of each other: the regime split, whose
+* A-03 -- on a two-regime corpus a restart search finds two optima: the regime split, whose
   components pass ``mixture_structure_health``, and a category split whose components each absorb
-  both regimes. Which one a restart search returned depended on the seed. Health now breaks that
-  tie; likelihood still decides outside it.
+  both regimes. Which one it returned depended on the seed. Health now breaks that tie; likelihood
+  still decides outside it. What the default one-nat tolerance does NOT do on that corpus is
+  measured below -- the rule is right, and its reach is narrower than the A-03 note claimed.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import warnings
 import numpy as np
 
 from mixle.inference import optimize
-from mixle.inference.structure import learn_mixture_structure, mixture_structure_health
+from mixle.inference.structure import _restart_wins, learn_mixture_structure, mixture_structure_health
 from mixle.stats import GaussianEstimator, MixtureEstimator
 
 
@@ -91,6 +92,77 @@ class HealthTieBreakTest(unittest.TestCase):
         level = np.where(regime, 6.0, -6.0) + rng.normal(0.0, 1.0, n)
         slope = np.where(regime, 1.0, -1.0) * level + rng.normal(0.0, 1.0, n)
         return [(str(c), float(a), float(b)) for c, a, b in zip(category, level, slope)]
+
+    def test_the_selection_rule_prefers_a_clean_receipt_only_inside_the_tolerance(self):
+        """R05-F03: the round-trip assertion below is satisfied by exact identity.
+
+        ``broken_ll >= plain_ll - 1.0`` states the tolerance contract -- the tie-break may not give
+        up more than a nat -- and that holds when the branch does nothing at all, so it cannot be
+        the evidence that the rule fires. Reaching each branch end-to-end needs a corpus that
+        happens to hand the search the right pair of restarts, which makes such a test a claim about
+        the corpus rather than about the rule. So exercise the rule itself.
+        """
+        # An unhealthy restart displaces a healthy incumbent only by beating it OUTSIDE the
+        # tolerance: the receipt is a diagnosis, not an objective.
+        self.assertTrue(_restart_wins(-99.0, False, -100.0, True, 0.5, incumbent=True))
+        self.assertFalse(_restart_wins(-99.5, False, -100.0, True, 1.0, incumbent=True))
+        # A healthy restart displaces an unhealthy incumbent anywhere inside the tolerance, WHICH
+        # INCLUDES giving up likelihood -- that is the whole tie-break.
+        self.assertTrue(_restart_wins(-100.5, True, -100.0, False, 1.0, incumbent=True))
+        self.assertFalse(_restart_wins(-101.5, True, -100.0, False, 1.0, incumbent=True))
+        # ...and never on the losing side of the tolerance, no matter how clean its receipt.
+        self.assertFalse(_restart_wins(-200.0, True, -100.0, False, 1.0, incumbent=True))
+        # With health equal on both sides the rule is pure likelihood, and a tie is not a win: the
+        # loop's own `ll > best_ll` branch takes ties, which keeps the FIRST of two equal restarts.
+        self.assertFalse(_restart_wins(-100.0, True, -100.0, True, 1.0, incumbent=True))
+        self.assertFalse(_restart_wins(-100.5, True, -100.0, True, 1.0, incumbent=True))
+        # A zero tolerance disables the tie-break entirely, which is what the sibling test uses to
+        # measure the rule against pure likelihood selection.
+        self.assertFalse(_restart_wins(-100.5, True, -100.0, False, 0.0, incumbent=True))
+        self.assertFalse(_restart_wins(-100.0, True, -100.0, False, 0.0, incumbent=True))
+        # The first restart is always taken, healthy or not -- there is nothing to compare against.
+        self.assertTrue(_restart_wins(float("-inf"), False, None, False, 1.0, incumbent=False))
+
+    def test_the_default_tolerance_does_not_reach_this_corpus(self):
+        """R05-F03, the other half: say plainly what the shipped default does here.
+
+        A-03's note said the two optima "sit within a nat of each other", which is what makes a
+        one-nat default sound sufficient. Measured across seeds it is not: the likelihood winner is
+        usually the healthy candidate outright (so the tie-break has nothing to do), and where it is
+        not, the healthy candidate gives up several nats -- far outside the default, where the rule
+        is SUPPOSED to decline. This pins the separation so the claim cannot quietly drift back.
+        """
+        rows = self._two_regime(2)
+        gaps = []
+        for seed in (0, 4):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                tie_broken = learn_mixture_structure(rows, 2, restarts=4, seed=seed, tie_tolerance=1.0)
+                likelihood_only = learn_mixture_structure(rows, 2, restarts=4, seed=seed, tie_tolerance=0.0)
+            # Same model either way: at this separation the tie-break declines, by design.
+            self.assertEqual(
+                bool(mixture_structure_health(tie_broken, rows)["diagnosis"]),
+                bool(mixture_structure_health(likelihood_only, rows)["diagnosis"]),
+            )
+            gaps.append(self._healthy_shortfall(tie_broken, rows))
+        self.assertTrue(
+            any(gap > 1.0 for gap in gaps), "expected a run where a healthy candidate is more than a nat behind"
+        )
+
+    @staticmethod
+    def _healthy_shortfall(model, rows) -> float:
+        """Nats the returned model gives up relative to itself -- 0.0 when its own receipt is clean."""
+        if not mixture_structure_health(model, rows)["diagnosis"]:
+            return 0.0
+        # The selected model is unhealthy, so whatever healthy candidate the search saw lost by more
+        # than the tolerance; the loop below re-derives that margin from a pure-likelihood rerun.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            healthy = learn_mixture_structure(rows, 2, restarts=4, seed=1, tie_tolerance=1.0)
+        encoder = model.dist_to_encoder()
+        chosen_ll = float(np.sum(model.seq_log_density(encoder.seq_encode(rows))))
+        other_ll = float(np.sum(healthy.seq_log_density(healthy.dist_to_encoder().seq_encode(rows))))
+        return chosen_ll - other_ll
 
     def test_health_breaks_a_likelihood_tie_and_does_not_overrule_a_better_fit(self):
         rows = self._two_regime(8)

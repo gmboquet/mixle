@@ -29,6 +29,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.univariate.continuous._observation_contracts import (
+    is_whole_number,
     refuse_unsupported_observation,
     refuse_unsupported_observations,
 )
@@ -702,7 +703,7 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         refuse_unsupported_observation(
-            isinstance(x, (int, np.integer)) or (isinstance(x, float) and math.isfinite(x) and x.is_integer()),
+            is_whole_number(x),
             weight,
             message=_POISSON_SUPPORT_MESSAGE % 1,
         )

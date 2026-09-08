@@ -26,6 +26,7 @@ from mixle.stats.compute.pdist import (
     StatisticAccumulatorFactory,
 )
 from mixle.stats.univariate.continuous._observation_contracts import (
+    is_whole_number,
     refuse_unsupported_observation,
     refuse_unsupported_observations,
 )
@@ -539,8 +540,7 @@ class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         refuse_unsupported_observation(
-            (isinstance(x, (int, np.integer)) or (isinstance(x, float) and math.isfinite(x) and x.is_integer()))
-            and x >= 1,
+            is_whole_number(x) and x >= 1,
             weight,
             message=_GEOMETRIC_SUPPORT_MESSAGE % 1,
         )

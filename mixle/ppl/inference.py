@@ -1138,7 +1138,7 @@ def _attach_convergence(post, slots, arr, results) -> None:
 
 
 # ------------------------------------------------------------------- result assembly
-def _refuse_a_gradient_route_without_a_gradient(grad, *, how: str) -> None:
+def _refuse_a_gradient_route_without_a_gradient(grad, *, how: str, constrained: bool = False) -> None:
     """Refuse ``how='hmc'``/``'nuts'`` by name when no gradient of the target could be built.
 
     ``_grouped_target`` builds its gradient with torch autograd and sets it to ``None`` when torch is
@@ -1146,15 +1146,44 @@ def _refuse_a_gradient_route_without_a_gradient(grad, *, how: str) -> None:
     ``"nuts requires value_and_grad= or both log_target and grad_log_target"`` -- a message about
     callable signatures, for a user whose actual situation is a base install without the optional
     dependency, and no mention of the routes that do work here.
+
+    ``constrained`` narrows the recommendation to ``'mcmc'``. Both gradient-free routes exist, but
+    the ensemble stretch move ``X_j + z(X_i - X_j)`` cannot leave a point every walker already
+    shares, and projecting the initial walkers into a tight feasible band is exactly how they come
+    to share one: on a two-parameter normal truncated to a 0.05-wide interval, every retained draw
+    is the same point and ``_refuse_a_chain_that_never_moved`` refuses the fit. Sending a caller
+    from one refusal to another is not advice.
     """
     if grad is not None:
         return
+    gradient_free = "how='mcmc'" if constrained else "how='mcmc' or how='ensemble'"
     raise ValueError(
         "how=%r needs the gradient of the log-target, and none could be built for this model: the "
         "grouped/plate target differentiates through torch, which is not installed. Install it with "
-        "pip install \"mixle[torch]\", or sample this model with how='mcmc' or how='ensemble', "
-        "which are gradient-free." % how
+        'pip install "mixle[torch]", or sample this model with %s, which %s gradient-free.'
+        % (how, gradient_free, "is" if constrained else "are")
     )
+
+
+def _every_draw_is_one_point(results) -> bool:
+    """Whether the retained draws of every chain are a single repeated point.
+
+    This is what makes a sampler's answer unusable, and it is visible in the draws themselves rather
+    than in the acceptance rate that was supposed to imply it. A chain with no samples is not this
+    case -- it is a different failure, and is left to the caller that produced it.
+    """
+    seen = False
+    for result in results:
+        draws = getattr(result, "samples", None)
+        if draws is None:
+            return False
+        block = np.asarray(draws, dtype=float)
+        if block.size == 0:
+            return False
+        seen = True
+        if not np.all(np.ptp(block.reshape(block.shape[0], -1), axis=0) == 0.0):
+            return False
+    return seen
 
 
 def _refuse_a_chain_that_never_moved(results, *, how: str, constrained: bool) -> None:
@@ -1172,12 +1201,23 @@ def _refuse_a_chain_that_never_moved(results, *, how: str, constrained: bool) ->
     is what makes "every sampler" true: wired only into ``hmc_fit``, it left ``mcmc``, ``nuts`` and
     ``ensemble`` returning the std-0, NaN-diagnostic point the CHANGELOG says is refused -- three
     seeds in ten at ``draws=4``, and every seed behind a ``-inf`` potential wall. Routes with no
-    acceptance rate to report (``map``, ``laplace``, ``vi``) pass through untouched.
+    draws and no acceptance rate to report (``map``, ``laplace``, ``vi``) pass through untouched.
+
+    The test is the SYMPTOM -- the retained draws hold one distinct point -- and not only the cause.
+    Keying it on a zero acceptance rate alone missed the worst case it was written for: an ensemble
+    sampler behind a hard constraint projects every walker onto the same feasible point, after which
+    the stretch move ``X_j + z(X_i - X_j)`` returns ``X_i`` unchanged and is ACCEPTED, so the rate
+    reads 0.89 while all 8000 draws are one number -- reported as a posterior with a mean of 30.10
+    where the truncated posterior sits at 20.04 (R07-F01). A rate of zero still refuses on its own,
+    because a run whose every proposal was rejected is unusable whatever its draws look like.
     """
-    rates = [getattr(result, "acceptance_rate", None) for result in results]
-    rates = [float(rate) for rate in rates if rate is not None]
-    if not rates or max(rates) > 0.0:
-        return
+    if _every_draw_is_one_point(results):
+        pass  # fall through to the message below: the draws are a point, whatever the rate says
+    else:
+        rates = [getattr(result, "acceptance_rate", None) for result in results]
+        rates = [float(rate) for rate in rates if rate is not None]
+        if not rates or max(rates) > 0.0:
+            return
     gradient_route = how in ("hmc", "nuts")
     if constrained:
         advice = (
@@ -1197,10 +1237,16 @@ def _refuse_a_chain_that_never_moved(results, *, how: str, constrained: bool) ->
             "iterations to shrink in, pass scale=<float> to start it narrower, or check that the "
             "target is finite at the initial point."
         )
-    raise RuntimeError(
-        "%s accepted none of its proposals: every draw is the starting point repeated, so the "
-        "result is a point, not a posterior.%s" % (how, advice)
+    rates = [getattr(result, "acceptance_rate", None) for result in results]
+    rates = [float(rate) for rate in rates if rate is not None]
+    moved = bool(rates) and max(rates) > 0.0
+    cause = (
+        "reported an acceptance rate of %.2f but every retained draw is the same point (a proposal "
+        "that returns the current state is accepted without moving)" % max(rates)
+        if moved
+        else "accepted none of its proposals: every draw is the starting point repeated"
     )
+    raise RuntimeError("%s %s, so the result is a point, not a posterior.%s" % (how, cause, advice))
 
 
 def _finalize(rv, slots, res, build, *, how: str | None = None, constrained: bool = False) -> RandomVariable:
@@ -2841,7 +2887,7 @@ def hmc_fit(
     log_target, grad, slots, build, dmean, dstd, feasible = _prepare_target(
         rv, data, constraints, penalty, want_grad=True, missing=missing, potentials=potentials
     )
-    _refuse_a_gradient_route_without_a_gradient(grad, how="hmc")
+    _refuse_a_gradient_route_without_a_gradient(grad, how="hmc", constrained=constraints is not None)
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
         u0 = _project_init(u0, feasible, rng)
@@ -2914,7 +2960,7 @@ def nuts_fit(
     log_target, grad, slots, build, dmean, dstd, feasible = _prepare_target(
         rv, data, constraints, penalty, want_grad=True, missing=missing, potentials=potentials
     )
-    _refuse_a_gradient_route_without_a_gradient(grad, how="nuts")
+    _refuse_a_gradient_route_without_a_gradient(grad, how="nuts", constrained=constraints is not None)
     u0 = _init_u(slots, dmean, dstd)
     if feasible is not None:
         u0 = _project_init(u0, feasible, rng)

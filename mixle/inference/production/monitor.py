@@ -9,12 +9,10 @@ drive *where to collect new data* -- space-filling by default, or active-learnin
 
 from __future__ import annotations
 
-import math
 import time
-from numbers import Real
 from typing import Any
 
-from mixle.inference.production.drift import DriftReport, detect_drift
+from mixle.inference.production.drift import DriftReport, detect_drift, validate_drift_thresholds
 from mixle.inference.production.provenance import Header, fit_with_provenance
 
 
@@ -31,22 +29,25 @@ class Monitor:
         ks_threshold: float = 0.2,
         loglik_shift_threshold: float = -0.5,
     ) -> None:
-        def threshold(value: Any, name: str, *, unit: bool = False) -> float:
-            if isinstance(value, bool) or not isinstance(value, Real):
-                raise TypeError(f"{name} must be a finite real number")
-            value = float(value)
-            if not math.isfinite(value) or (unit and not 0.0 <= value <= 1.0):
-                domain = " in [0, 1]" if unit else ""
-                raise ValueError(f"{name} must be a finite real number{domain}")
-            return value
+        # The same validation ``detect_drift`` runs, at construction rather than one call later.
+        # A local copy of it here was weaker -- it accepted a positive ``loglik_shift_threshold``
+        # (which flags drift on identical data) and a negative ``psi_threshold`` (likewise, PSI
+        # being non-negative), so a Monitor built with either constructed cleanly and then raised
+        # from every ``check()`` and ``update()`` it was ever given, naming a constructor argument
+        # from a method that does not take one (R06-F05).
+        validate_drift_thresholds(
+            psi_threshold=psi_threshold,
+            ks_threshold=ks_threshold,
+            loglik_shift_threshold=loglik_shift_threshold,
+        )
 
         self.model = model
         self.estimator = estimator
         self.reference = self._materialize(reference, "reference")
         self.thresholds = {
-            "psi_threshold": threshold(psi_threshold, "psi_threshold"),
-            "ks_threshold": threshold(ks_threshold, "ks_threshold", unit=True),
-            "loglik_shift_threshold": threshold(loglik_shift_threshold, "loglik_shift_threshold"),
+            "psi_threshold": float(psi_threshold),
+            "ks_threshold": float(ks_threshold),
+            "loglik_shift_threshold": float(loglik_shift_threshold),
         }
         self.history: list[dict] = []
         self.header: Header | None = getattr(model, "header", None)

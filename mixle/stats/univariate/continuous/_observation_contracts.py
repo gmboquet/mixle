@@ -840,6 +840,26 @@ def masked_chunk_second_moment(x: Any, weights: Any) -> tuple[float, float, floa
     return float(ww.sum()), float(np.dot(xx, ww)), float(chunk_sum2)
 
 
+def is_whole_number(value: Any) -> bool:
+    """Whether a scalar observation is an exact integer, whatever numeric type carries it.
+
+    ``isinstance(value, float)`` is the wrong test and was the one used: only ``np.float64``
+    subclasses Python's ``float``, so an exact-integer ``np.float32``/``np.float16`` array -- which
+    0.8.1 fitted, and which ``optimize()`` on the same array still fits -- was refused by the count
+    families as "negative, fractional, NaN, or infinite" (R05-F02). ``np.floating`` covers every
+    width, and the finiteness check stays: ``float('inf').is_integer()`` is False, but ``nan`` and
+    ``inf`` must be refused for being outside the support, not by accident of the predicate.
+    """
+    if isinstance(value, bool):
+        return False  # a bool is an int in Python; a count family should not silently fit True as 1
+    if isinstance(value, (int, np.integer)):
+        return True
+    if isinstance(value, (float, np.floating)):
+        numeric = float(value)
+        return math.isfinite(numeric) and numeric.is_integer()
+    return False
+
+
 def refuse_unsupported_observation(admissible: bool, weight: float, *, message: str) -> None:
     """Raise ``message`` when an inadmissible scalar observation carries weight.
 

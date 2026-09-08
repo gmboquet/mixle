@@ -28,15 +28,26 @@ def numeric_feature_matrix(encoded: Any, rows: int | None = None) -> np.ndarray 
     ``None`` is the signal to fall back to the random start: a composite or ragged encoding, a
     non-numeric dtype, or a non-finite value has no vector space for k-means to work in.
 
-    FLOATING dtypes only, and that is the whole point rather than an incidental strictness. k-means
-    needs the distance between two encoded values to mean something, and for a categorical family the
-    encoded value is a LABEL: ``IntegerCategoricalDistribution`` writes symbol codes as ``int64``, and
-    the distance between code 3 and code 4 says nothing about the symbols. Clustering them anyway
-    handed each state a contiguous slice of the alphabet, so an eight-state HMM over twelve symbols
-    came back with one or two symbols in each state's support where 0.8.1 kept ten to twelve -- and a
-    streaming re-estimate then met evidence no state could score. Every family whose values carry
-    metric meaning encodes as float, counts included (``PoissonDistribution`` encodes ``float64``),
-    so this keeps the start exactly where it belongs.
+    Two conditions, and both are narrow on purpose.
+
+    FLOATING dtypes only. k-means needs the distance between two encoded values to mean something,
+    and for a categorical family the encoded value is a LABEL: ``IntegerCategoricalDistribution``
+    writes symbol codes as ``int64``, and the distance between code 3 and code 4 says nothing about
+    the symbols. Clustering them anyway handed each state a contiguous slice of the alphabet, so an
+    eight-state HMM over twelve symbols came back with one or two symbols in each state's support
+    where 0.8.1 kept ten to twelve -- and a streaming re-estimate then met evidence no state could
+    score.
+
+    An ``(n,)`` or ``(n, d)`` block whose leading axis IS the row count. What reaches here is an
+    ENCODED batch, and most families do not encode as one value per row: ``Gamma``, ``Weibull``,
+    ``Beta`` and ``Poisson`` all emit a transposed block of precomputed sufficient statistics
+    (``(k, n)``), which this rejects on the shape check. So the symmetry-breaking start reaches
+    Gaussian and vector-valued emissions and declines for everything else -- including counts, whose
+    encoding is float but the wrong shape. An earlier version of this docstring claimed the opposite
+    ("counts included") and was wrong about the very batch the gate inspects (R05-F08). Widening it
+    to read a family's statistic block is a real opportunity and a measurement this release has not
+    made; a declined start costs only the plateau it would have skipped, and is bit-identical to
+    0.8.1.
     """
     try:
         arr = np.asarray(encoded)

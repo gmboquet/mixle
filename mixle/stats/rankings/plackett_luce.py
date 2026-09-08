@@ -464,6 +464,26 @@ class PlackettLuceEstimator(ParameterEstimator):
         return PlackettLuceDistribution(log_w, name=self.name, keys=self.keys)
 
 
+def _ordering_rows(x: Any) -> list[list]:
+    """Every row of ``x`` as a list, refusing a row that is not an ordering at all.
+
+    ``[list(row) for row in x]`` met a ``None`` row -- the ordinary spelling of a missing ranking --
+    as ``TypeError: 'NoneType' object is not iterable``: no family, no expectation, and no row
+    number, where the sibling discrete families refuse by name. The index is in hand here, so this
+    reports it (R06-F07).
+    """
+    rows = []
+    for index, row in enumerate(x):
+        if isinstance(row, (str, bytes)) or not hasattr(row, "__iter__"):
+            raise ValueError(
+                "Plackett-Luce observations are orderings -- sequences of distinct item indices, "
+                "best first -- but row %d is %s. Drop the incomplete rows, or supply the ranking "
+                "that row was meant to carry." % (index, "None" if row is None else repr(row))
+            )
+        rows.append(list(row))
+    return rows
+
+
 class PlackettLuceDataEncoder(DataSequenceEncoder):
     """Encode a sequence of full or partial/top-m orderings over ``dim`` items.
 
@@ -503,7 +523,7 @@ class PlackettLuceDataEncoder(DataSequenceEncoder):
                 :class:`PlackettLucePartialDataEncoder`) a short/ragged row is malformed.
 
         """
-        rows = [list(row) for row in x]
+        rows = _ordering_rows(x)
         if not rows:
             raise ValueError("PlackettLuceDistribution requires a non-empty sequence of orderings.")
         if self.dim is not None and any(len(row) != self.dim for row in rows):
@@ -551,8 +571,8 @@ class PlackettLucePartialDataEncoder(DataSequenceEncoder):
 
         """
         rows = []
-        for row in x:
-            raw = np.asarray(list(row), dtype=float)
+        for row in _ordering_rows(x):
+            raw = np.asarray(row, dtype=float)
             r = raw.astype(int)
             if (
                 r.ndim != 1

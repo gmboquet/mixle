@@ -250,7 +250,10 @@ def _records_from_columns(columns: Mapping, entry: str) -> list:
             "%s received an empty mapping. Pass records (a sequence of observations) or a mapping "
             "of equal-length columns keyed by field name." % entry
         )
+    from mixle.data.sources.pandas_source import column_records
+
     lengths = set()
+    materialized: dict[Any, list] = {}
     for name, column in columns.items():
         if isinstance(column, (str, bytes)) or not hasattr(column, "__len__"):
             raise ValueError(
@@ -258,7 +261,23 @@ def _records_from_columns(columns: Mapping, entry: str) -> list:
                 "column (a sized sequence of values). Pass records instead if this is one "
                 "observation." % (entry, name)
             )
-        lengths.add(len(column))
+        if isinstance(column, (set, frozenset, Mapping)):
+            # Sized, but with no row order: which value is row 0 of a set is not a question the
+            # container answers, so pairing it with another column is meaningless. Refused by name
+            # rather than reaching pandas or a subscript and failing as "not subscriptable".
+            raise ValueError(
+                "%s received a mapping whose column %r is a %s, which has no row order. A column "
+                "must be an ordered sequence (list, tuple, ndarray, Series) so that row i of every "
+                "column belongs to the same record." % (entry, name, type(column).__name__)
+            )
+        # Positional, via the same helper the DataFrame route uses. Indexing a column directly
+        # (``column[index]``) is a LABEL lookup on a pandas Series, so an ordinary row filter --
+        # whose surviving index is 5, 9, 12, ... -- raised a bare ``KeyError: 5`` from inside pandas
+        # on the mapping route while the identical object fitted through every other entry point
+        # (R06-F01). Going through ``column_records`` also collapses the gap spellings the same way
+        # the frame route does, so the two spellings of one table fit the same model.
+        materialized[name] = column_records(column)
+        lengths.add(len(materialized[name]))
     if len(lengths) != 1:
         raise ValueError(
             "%s received a mapping of columns whose lengths differ (%s). Every column must have "
@@ -267,8 +286,8 @@ def _records_from_columns(columns: Mapping, entry: str) -> list:
     names = list(columns)
     rows = int(next(iter(lengths)))
     if len(names) == 1:
-        return list(columns[names[0]])
-    return [tuple(columns[name][index] for name in names) for index in range(rows)]
+        return materialized[names[0]]
+    return [tuple(materialized[name][index] for name in names) for index in range(rows)]
 
 
 def _coerce_estimator(estimator: Any, data: Any, fields: Any = None) -> ParameterEstimator:

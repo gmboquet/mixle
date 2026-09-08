@@ -50,7 +50,16 @@ def _derive_seed(base_seed: int, prompt: Any) -> int:
     A prompt this cannot encode -- including one that merely defines its own ``__repr__``, which proves
     nothing about what that repr contains -- warns and falls back to ``repr``, so a recorded run keeps
     reproducing while the caller learns the promise does not cover it."""
-    if not _is_canonically_representable(prompt):
+    key = _seed_key(prompt)
+    if key is None:
+        # The documented fallback, which this used to skip: interpolating `_seed_key`'s ``None``
+        # into the digest input made the key the literal string "<base_seed>:None", so EVERY prompt
+        # without a canonical encoding shared one seed (2**32 collapsed to 1523943581 at base 7).
+        # The warning below describes the opposite hazard -- equal prompts seeding differently --
+        # and `_seed_key` itself refuses to let a `NotImplemented` key "encode as a constant [which]
+        # would silently give every such instance one shared seed", which is what happened here
+        # anyway one function up (R07-F03).
+        key = repr(prompt)
         warnings.warn(
             f"seed derivation for a {type(prompt).__name__} prompt is not reproducible across processes: "
             "its repr is not a canonical encoding of its value, so equal prompts can seed differently. "
@@ -58,7 +67,7 @@ def _derive_seed(base_seed: int, prompt: Any) -> int:
             "reproduce (MXR-080-1848).",
             stacklevel=3,
         )
-    digest = hashlib.sha256(f"{base_seed}:{_seed_key(prompt)}".encode()).digest()
+    digest = hashlib.sha256(f"{base_seed}:{key}".encode()).digest()
     return int.from_bytes(digest[:8], "big") % (2**32)
 
 

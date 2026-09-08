@@ -762,12 +762,20 @@ def learn_mixture_structure(
     must separate into different components to score well.
 
     ``tie_tolerance`` (nats) is how close two restarts' log-likelihoods have to be before
-    :func:`mixture_structure_health` breaks the tie. On a two-regime corpus two optima sit within a
-    nat of each other -- the regime split, whose components pass the receipt, and a category split
-    whose components each absorb both regimes -- and which one the search returned depended on the
-    seed (A-03). Inside the tolerance the healthy candidate wins; outside it likelihood decides,
-    because the receipt is a diagnosis and must not overrule a materially better fit. Set it to
-    ``0.0`` for pure likelihood selection.
+    :func:`mixture_structure_health` breaks the tie. On a two-regime corpus a restart search finds
+    two optima -- the regime split, whose components pass the receipt, and a category split whose
+    components each absorb both regimes -- and which one it returned depended on the seed (A-03).
+    Inside the tolerance the healthy candidate wins; outside it likelihood decides, because the
+    receipt is a diagnosis and must not overrule a materially better fit. Set it to ``0.0`` for pure
+    likelihood selection.
+
+    The default of one nat is deliberately narrow, and on the two-regime corpus that motivated the
+    rule it does not reach: measured over 48 (corpus, seed) pairs, the likelihood winner is the
+    healthy candidate outright in most runs, and in the three where it is not, the healthy candidate
+    gives up 6.0, 6.4 and 84.8 nats -- so the tie-break correctly declines and the receipt reports
+    the difference, exactly as it did before the rule existed. A caller who wants health to arbitrate
+    a gap that wide has to say so with a larger ``tie_tolerance``; the default will not do it
+    silently, because at six nats the two candidates are no longer tied on anything.
     """
     if (
         isinstance(n_components, (bool, np.bool_))
@@ -849,19 +857,9 @@ def learn_mixture_structure(
         if not np.isfinite(ll):
             continue
         healthy = not mixture_structure_health(model, data)["diagnosis"]
-        # Likelihood first, health as the TIE-BREAK. On a two-regime corpus two optima sit within a
-        # nat of each other: the regime split, whose components each pass the health receipt, and a
-        # category split whose components each absorb both regimes through an inner per-field
-        # mixture. Which one a restart search returned depended on the seed, and the receipt was
-        # left to report the difference after the fact (A-03). Within ``tie_tolerance`` nats the two
-        # candidates are not distinguishable by likelihood, so the one whose components do not hide
-        # a regime split wins. Outside it, likelihood decides -- the receipt is a diagnosis, not an
-        # objective, and must not overrule a materially better fit.
-        if best is None or ll > best_ll + tie_tolerance:
+        if _restart_wins(ll, healthy, best_ll, best_healthy, tie_tolerance, incumbent=best is not None):
             best_ll, best, best_healthy = ll, model, healthy
-        elif healthy and not best_healthy and ll > best_ll - tie_tolerance:
-            best_ll, best, best_healthy = ll, model, healthy
-        elif ll > best_ll and healthy == best_healthy:
+        elif best is not None and ll > best_ll and healthy == best_healthy:
             best_ll, best = ll, model
     if best is None:
         # Was `assert best is not None`, which `python -O` strips: under -O this returned None to a
@@ -874,6 +872,39 @@ def learn_mixture_structure(
             "means the data cannot be represented by the requested component structure."
         )
     return best
+
+
+def _restart_wins(
+    ll: float,
+    healthy: bool,
+    best_ll: float | None,
+    best_healthy: bool,
+    tie_tolerance: float,
+    *,
+    incumbent: bool,
+) -> bool:
+    """Does this restart displace the incumbent as the selected candidate?
+
+    Likelihood first, health as the TIE-BREAK. A restart search on a two-regime corpus finds two
+    optima: the regime split, whose components each pass the health receipt, and a category split
+    whose components each absorb both regimes through an inner per-field mixture. Which one it
+    returned depended on the seed, and the receipt was left to report the difference after the fact
+    (A-03). Within ``tie_tolerance`` nats the two candidates are not distinguishable by likelihood,
+    so the one whose components do not hide a regime split wins. Outside it, likelihood decides --
+    the receipt is a diagnosis, not an objective, and must not overrule a materially better fit.
+
+    See ``learn_mixture_structure``'s ``tie_tolerance`` note for what the default one nat does and
+    does not reach on that corpus.
+
+    Lifted out of the restart loop so the rule can be exercised on its own (R05-F03): reaching every
+    branch end-to-end needs a corpus that happens to produce the right pair of restarts, which makes
+    a round-trip test a statement about the corpus rather than about the rule.
+    """
+    if not incumbent:
+        return True
+    if ll > best_ll + tie_tolerance:
+        return True
+    return healthy and not best_healthy and ll > best_ll - tie_tolerance
 
 
 def _split_separation(values: np.ndarray) -> tuple[float, float]:

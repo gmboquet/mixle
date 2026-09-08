@@ -33,7 +33,6 @@ import pickle
 import tempfile
 import time
 import warnings
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -151,7 +150,7 @@ class DeployedArtifact(str):
         return self
 
 
-def _tabular_records(data: Any) -> list:
+def _tabular_records(data: Any, entry: str = "fit()") -> list:
     """``data`` as a list of observation records -- always one record per ROW, never per column.
 
     A pandas ``DataFrame`` iterates as its column labels and a mapping iterates as its keys, so a bare
@@ -159,40 +158,26 @@ def _tabular_records(data: Any) -> list:
     ``n_rows=5``) while :func:`mixle.inference.optimize` handled the same frame correctly. Convert the
     tabular inputs into the row records the estimation path expects (DataFrame -> one record per row
     via :func:`mixle.data.sources.pandas_source.dataframe_records`, exactly the shape ``optimize``'s
-    ``fields`` path produces; DataSource -> ``records()``; mapping-of-columns expanded here), and
-    leave already-row-shaped sequences byte-identical to the historical ``list(data)``.
+    ``fields`` path produces; DataSource -> ``records()``), and leave already-row-shaped sequences
+    byte-identical to the historical ``list(data)``.
+
+    Everything the three tabular spellings above do not cover is handed to
+    :func:`mixle.inference.estimation._reusable_observations`, the fit verbs' own front door, so
+    that one table gets one answer whichever verb reads it. It had been reached only through
+    ``optimize``/``fit``/``best_of``, which left the lifecycle verbs to meet the raw failures it
+    exists to replace: a structured array died on ``unhashable type: 'writeable void-scalar'``, a
+    ``numpy.matrix`` on ``RecursionError``, a ``timedelta64`` column on ``float() argument must be
+    ... not 'datetime.timedelta'``, and ``Model().fit('hello world hello')`` cheerfully returned a
+    categorical over nine characters (R06-F03).
     """
+    from mixle.inference.estimation import _reusable_observations
+
     if hasattr(data, "records") and callable(data.records) and hasattr(data, "structure"):
         return list(data.records())  # a mixle DataSource
     if hasattr(data, "columns") and hasattr(data, "itertuples"):  # a pandas DataFrame (duck-typed)
         from mixle.data.sources.pandas_source import dataframe_records
 
         return dataframe_records(data)
-    if isinstance(data, Mapping):
-        # {field: column}: iterating the mapping would model the field-name strings. Build one
-        # record per row across the columns (scalar for a single column, tuple otherwise) --
-        # the same shape a DataFrame of those columns produces.
-        if not data:
-            raise ValueError(
-                "received an empty mapping; pass records (a list of observations) or a mapping of "
-                "equal-length columns keyed by field name"
-            )
-        lengths: dict[Any, int] = {}
-        columns: list[list[Any]] = []
-        for name, column in data.items():
-            if isinstance(column, (str, bytes)) or not hasattr(column, "__len__"):
-                raise ValueError(
-                    f"a mapping is read as {{field: column}}, but field {name!r} is not a sized "
-                    f"column (got {type(column).__name__}); for row-shaped data pass a list of "
-                    "records instead of a single mapping"
-                )
-            from mixle.data.sources.pandas_source import column_records
-
-            columns.append(column_records(column))
-            lengths[name] = len(columns[-1])
-        if len(set(lengths.values())) > 1:
-            raise ValueError(f"mapping-of-columns input needs equal-length columns, got lengths {lengths}")
-        return columns[0] if len(columns) == 1 else [tuple(row) for row in zip(*columns, strict=True)]
     if type(data).__name__ == "Series" and type(data).__module__.startswith("pandas"):
         # A bare Series carries pandas' own missing-value convention rather than the row-shaped
         # sentinel Model.fit/evaluate/propose expect, and the generic list(data) fallthrough below
@@ -202,7 +187,7 @@ def _tabular_records(data: Any) -> list:
 
         return column_records(data)
     try:
-        return list(data)
+        return list(_reusable_observations(data, entry))
     except TypeError as exc:
         # A single observation (m.fit(0.5), m.evaluate(0.5)) died here as a bare
         # "TypeError: 'float' object is not iterable" that named neither the expectation nor the
@@ -341,7 +326,7 @@ class Model:
         # disclosed below via the fit-provenance receipt.
         optimize_kw.setdefault("max_its", 500)
         source = data.records() if hasattr(data, "records") and callable(data.records) else data
-        rows = _tabular_records(source)
+        rows = _tabular_records(source, "Model.fit()")
         if not rows:
             raise ValueError("fit requires at least one training record")
         if restarts not in ("auto", None) and (
@@ -541,7 +526,7 @@ class Model:
         but does not raise, unlike ``NaN``/``+inf``, both of which are unconditionally scorer bugs.
         """
         d = self._require_fitted()
-        rows = _tabular_records(data)
+        rows = _tabular_records(data, "Model.evaluate()")
         if not rows:
             raise ValueError("evaluate requires at least one held-out record")
         enc = d.dist_to_encoder().seq_encode(rows)
@@ -711,6 +696,13 @@ class Model:
                 ("certificate", self.certificate is not None),
                 ("calibration", self.calibration is not None),
                 ("frontier", self.frontier is not None),
+                # A ``fit_with_provenance`` header is recorded ON the distribution, and the JSON
+                # codec excludes it from serialized state because it describes the RUN rather than
+                # the model's value. That is right for serialization and wrong to leave unsaid here:
+                # 0.8.1 fell back to a pickle and warned, so the header survived; 0.8.2 writes clean
+                # JSON and the header simply vanished, with `evidence_not_exported` empty (R06-F04).
+                # Naming it is what this list is for, and what deploy's docstring promises.
+                ("provenance header", getattr(d, "header", None) is not None),
             )
             if present
         ]
@@ -1510,7 +1502,7 @@ def propose(
     if isinstance(max_its, (bool, np.bool_)) or not isinstance(max_its, (int, np.integer)) or max_its < 1:
         raise ValueError(f"max_its must be a positive integer, got {max_its!r}")
 
-    rows = _tabular_records(data)
+    rows = _tabular_records(data, "propose()")
     if len(rows) < 3:
         raise ValueError("propose requires at least three records for a non-empty train/holdout split")
     # STAT-RR18-01: the outer split happens BEFORE any candidate generation, and every proposer
