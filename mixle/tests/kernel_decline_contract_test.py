@@ -10,6 +10,7 @@ from mixle.engines import NUMPY_ENGINE, NumpyEngine
 from mixle.stats.compute.capability_decline import KernelCapabilityDeclinedError
 from mixle.stats.compute.kernel import GeneratedNumbaKernel, GeneratedNumbaKernelFactory
 from mixle.stats.compute.stacked import StackedMixtureKernelFactory
+from mixle.utils.optional_deps import HAS_NUMBA
 
 
 def _gaussian_mixture():
@@ -23,6 +24,7 @@ def _gaussian_mixture():
 
 
 class KernelDeclineContractTest(unittest.TestCase):
+    @unittest.skipUnless(HAS_NUMBA, "GeneratedNumbaKernel declines without numba (P07-F15)")
     def test_generated_accumulation_does_not_catch_runtime_value_error(self):
         model = _gaussian_mixture()
         estimator = model.estimator()
@@ -36,6 +38,7 @@ class KernelDeclineContractTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "malformed generated statistic"):
                 kernel.accumulate(enc, np.ones(3))
 
+    @unittest.skipUnless(HAS_NUMBA, "GeneratedNumbaKernel declines without numba (P07-F15)")
     def test_static_resident_decline_selects_host_before_execution(self):
         model = _gaussian_mixture()
         estimator = model.estimator()
@@ -84,6 +87,7 @@ class KernelDeclineContractTest(unittest.TestCase):
             self.assertIs(factory.build(model, engine), fallback.result)
         self.assertEqual(fallback.calls, 1)
 
+    @unittest.skipUnless(HAS_NUMBA, "GeneratedNumbaKernel declines without numba (P07-F15)")
     def test_generated_factory_does_not_hide_constructor_value_error(self):
         model = _gaussian_mixture()
         factory = GeneratedNumbaKernelFactory()

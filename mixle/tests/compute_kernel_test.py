@@ -42,6 +42,7 @@ from mixle.stats import (
 )
 from mixle.stats.compute.kernel import GenericKernel, KernelFactory
 from mixle.stats.compute.stacked import StackedMixtureKernel, estimate_component_shard_value, tie_component_shard_values
+from mixle.utils.optional_deps import HAS_NUMBA
 
 # The hard-budget core CI tier installs no optional extras, so this failed there as a bare
 # ModuleNotFoundError rather than skipping -- which reads as a broken candidate instead of an
@@ -251,6 +252,7 @@ class ComputeKernelTestCase(unittest.TestCase):
         with self.assertRaises(EngineNotSupportedError):
             dist.kernel(engine=self.FakeTorchEngine())
 
+    @unittest.skipUnless(HAS_NUMBA, "GeneratedNumbaKernel declines without numba (P07-F15)")
     def test_kernel_dispatch_is_capability_based_not_name_based(self):
         # A brand-new backend routes purely by its capability flags -- no name special-casing, no core
         # edits. Same engine name, opposite flags => opposite kernel choice for a numba-capable family.

@@ -1620,7 +1620,9 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         ``latent_posterior`` uses, with the terminal-state restriction folded into the last
         position's emissions.
         """
-        if not self.use_numba or self.terminal_states is not None:
+        if not self.use_numba or self.terminal_states is not None or x[1] is None:
+            # The third case is a batch encoded by a non-numba encoder (no numba layout in it):
+            # the kernel route would fail unpacking it, and the exact route reads any encoding.
             return self._seq_posterior_by_chain(x, filtered=filtered)
 
         vec.require_possible_log_evidence(
