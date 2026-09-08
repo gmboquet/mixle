@@ -232,13 +232,17 @@ class SkewNormalAccumulator(SequenceEncodableStatisticAccumulator):
             return
         delta = mean_b - mean_a
         # mean_a stays correct when c_b == 0; otherwise shift toward the merged mean.
-        self.mean = mean_a + delta * (c_b / count)
-        self.m2 = m2_a + m2_b + delta * delta * (c_a * c_b / count)
+        # Every product of two weights is written as weight * (weight / count): the responsibilities
+        # EM hands a component it is switching off sit around 1e-170, where c_a * c_b underflows to
+        # 0.0 (dropping the cross terms) and count * count underflowed to a ZeroDivisionError.
+        frac_b = c_b / count
+        self.mean = mean_a + delta * frac_b
+        self.m2 = m2_a + m2_b + delta * delta * (c_a * frac_b)
         self.m3 = (
             m3_a
             + m3_b
-            + delta**3 * (c_a * c_b * (c_a - c_b) / (count * count))
-            + 3.0 * delta * (c_a * m2_b - c_b * m2_a) / count
+            + delta**3 * (c_a * frac_b) * ((c_a - c_b) / count)
+            + 3.0 * delta * ((c_a / count) * m2_b - frac_b * m2_a)
         )
         self.count = count
 
