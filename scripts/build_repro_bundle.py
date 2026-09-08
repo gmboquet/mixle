@@ -109,11 +109,18 @@ _ENTRIES = (
             # transition map, the heterogeneous-mixture component reprs, and the record fits printed
             # raw floats that differ by ULPs per CPU/BLAS; the example now rounds them to 6 significant
             # figures. The structural/rounded `contains` lines already matched on x86_64 CI.
-            "stdout_sha256": "a2d89983e4df1707aa85327a8cec0f33f060cc9c6a325402a1271988095d2858",
+            # 0.8.2: repinned because the OUTPUT legitimately changed. P09-F11 raised the
+            # SegmentalHiddenMarkov section's iteration budget (it was capped at max_its=10 and
+            # printed a held-out -19.79 where -16.36 is reachable, against a truth of -16.35), and
+            # both sections now print the true model's value beside the fitted one. Measured on the
+            # 0.8.1 tree and on this one: -17.965 -> -15.180 (true -15.071) and -19.791 -> -16.359
+            # (true -16.347). The old numbers are the under-budgeted fit the repair removed, so
+            # keeping them would pin the defect.
+            "stdout_sha256": "691caecdd76bbd23f45043a6b108539b3ab3ed0f55bc3a862807133950178748",
             "contains": [
                 "learned parents: [None, 0, 0]",
-                "held-out mean log-density: -17.965",
-                "held-out mean log-density: -19.791",
+                "held-out mean log-density: -15.180 (true model -15.071)",
+                "held-out mean log-density: -16.359 (true model -16.347)",
             ],
         },
     },
@@ -152,7 +159,13 @@ _ENTRIES = (
             # the checkpoint demo now fits overlapping components that are still climbing at
             # iteration 9. Digest measured identical on macOS arm64 and emulated x86_64 Linux with
             # the pinned numpy/scipy; the model hash remains the one declared-volatile span.
-            "stdout_sha256": "aa6e4d987ca9245e44c0730d68103479d62e4ad2cce7c0a87559e572d03faa9b",  # 0.8.1: the provenance line prints the version
+            # 0.8.2: repinned because the recorded digest was never right for this entry's own
+            # volatile rules. The example's output normalizes to the same bytes on the 0.8.1 tree
+            # (release/0.8.1) and on this one -- d4f80090... both times, verified by applying the
+            # two rules below by hand -- and neither is aa6e4d98..., so the old value could not have
+            # been produced by a run through this normalization. Nothing in 0.8.2 changed this
+            # example's behaviour; the pin was stale before 0.8.2 opened.
+            "stdout_sha256": "d4f800900718c2d3729788103a63ec71b891b6cf40e32c33dd6f0df56e73565c",
             "contains": [
                 "# lineage verified: True",
                 "drift on shifted batch: True",

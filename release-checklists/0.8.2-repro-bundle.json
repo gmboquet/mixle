@@ -64,32 +64,32 @@
     {
       "path": "pyproject.toml",
       "role": "bundle-closure",
-      "sha256": "71e6f87616cfb9876cf99fcf821fcfd924aeb1c32cd84f2f48e2ee8daf5f66db"
+      "sha256": "2934e87b386ed2c1a0ecdfbae9881a69a377404f66e9902e036dcef74f5fa541"
     },
     {
       "path": "release-checklists/0.8.2-repro-environment.json",
       "role": "bundle-closure",
-      "sha256": "bc1ea3d27928da04f4ec5479b777ee9b34443b48c1f6c12b22baf26c38b6953e"
+      "sha256": "3fcd4107497f98ab6a50cb6c7ce7a4f43d873e2685fafeab4cb00e1c7f1d0845"
     },
     {
       "path": "release-checklists/0.8.2-repro-requirements.txt",
       "role": "bundle-closure",
-      "sha256": "a6a43c1d3e2b88285c33c2ad238e6942dcba45a4b419efa03749efc7f2aa3979"
+      "sha256": "16b16e4d2783b52975a46b5cee28e8d89ef4fa585901b76f189fce235bc77254"
     },
     {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "309961fb8edde9e38e0a4719ca11386944a34bd082c0b9a655c2968d251ea6a1"
+      "sha256": "e048684aa6b122f98984b0a0fae29f056a7a5e4dfe7b2f9a9892b336c87d49de"
     },
     {
       "path": "scripts/run_repro_entry.py",
       "role": "bundle-closure",
-      "sha256": "4f6d5670559abbf3890bb823aa1aba0b53298e8c14d75cc866f59a70b97a122f"
+      "sha256": "ceb259be0016d2447c997fa20375d83c5da3efddd82fa46700bf5aa8eacc6440"
     },
     {
       "path": ".github/release-required-checks.txt",
       "role": "bundle-closure",
-      "sha256": "e257a7db23dfa1d608f6282989089ced96c16035e8ec8dc315a552b4c0a1f1bd"
+      "sha256": "829b9936cdfbe0dad17831a792fc2fdf1fd28dea783b73b850e8f375f9db378e"
     },
     {
       "path": "scripts/verify_required_checks.py",
@@ -99,7 +99,7 @@
     {
       "path": "scripts/release_candidate_record.py",
       "role": "bundle-closure",
-      "sha256": "2d59506c7bcbe487eb786e85b523ec5b841ce7f923421e7aad0dffc8702e3f33"
+      "sha256": "73542530ed81ba5a2607eb4261e0b540c2a0d2ac147753cff194515b35ce1083"
     }
   ],
   "code_license": {
@@ -151,18 +151,18 @@
       "expected": {
         "contains": [
           "learned parents: [None, 0, 0]",
-          "held-out mean log-density: -17.965",
-          "held-out mean log-density: -19.791"
+          "held-out mean log-density: -15.180 (true model -15.071)",
+          "held-out mean log-density: -16.359 (true model -16.347)"
         ],
         "format": "text",
-        "stdout_sha256": "a2d89983e4df1707aa85327a8cec0f33f060cc9c6a325402a1271988095d2858"
+        "stdout_sha256": "691caecdd76bbd23f45043a6b108539b3ab3ed0f55bc3a862807133950178748"
       },
       "id": "gallery-structured",
       "inputs": [
         {
           "path": "examples/gallery_structured_example.py",
           "role": "executable",
-          "sha256": "cdd8e6547f8bee9049898741b611bf6318ccc73e302af62d8fd12e20e6569e58"
+          "sha256": "c5355f60df61ea5afda821c76b90b61fad2e93a273a1f844851f0d5037a073ec"
         }
       ],
       "kind": "self-contained",
@@ -185,7 +185,7 @@
           "chain intact: True"
         ],
         "format": "text",
-        "stdout_sha256": "aa6e4d987ca9245e44c0730d68103479d62e4ad2cce7c0a87559e572d03faa9b",
+        "stdout_sha256": "d4f800900718c2d3729788103a63ec71b891b6cf40e32c33dd6f0df56e73565c",
         "volatile": [
           {
             "pattern": "git / mixle  : (?:[0-9a-f]{7,40}|unknown) / ",
