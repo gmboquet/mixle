@@ -10,6 +10,7 @@ README module the library refused.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import math
 import unittest
@@ -230,31 +231,75 @@ class AffineMomentTest(unittest.TestCase):
 
 
 class PrintIterTest(unittest.TestCase):
-    """P08-F04: print_iter is inert without out=, which nine tutorial cells rely on."""
+    """P08-F04: print_iter was inert without out=, which nine tutorial cells relied on.
+
+    The first repair only WARNED, and gated the warning on ``print_iter not in (0, 1)`` -- so
+    ``print_iter=1``, the exact spelling those cells use and the one the finding was about, got
+    neither output nor a note, while the CHANGELOG said it printed. An argument whose only
+    documented purpose is to produce output now produces it.
+    """
 
     DATA = [float(value) for value in np.random.RandomState(0).normal(size=200)]
 
     def _fit(self, **kwargs):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            optimize(
-                self.DATA,
-                S.MixtureEstimator([S.GaussianEstimator()] * 2),
-                max_its=3,
-                rng=np.random.RandomState(0),
-                **kwargs,
-            )
-        return [str(item.message) for item in caught if "print_iter" in str(item.message)]
+        """Return ``(stdout_lines, print_iter_warnings)`` for one optimize call."""
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                optimize(
+                    self.DATA,
+                    S.MixtureEstimator([S.GaussianEstimator()] * 2),
+                    max_its=3,
+                    rng=np.random.RandomState(0),
+                    **kwargs,
+                )
+        lines = [line for line in captured.getvalue().splitlines() if line.strip()]
+        return lines, [str(item.message) for item in caught if "print_iter" in str(item.message)]
 
-    def test_print_iter_without_out_says_it_does_nothing(self):
-        self.assertTrue(self._fit(print_iter=2))
+    def test_the_tutorial_spelling_prints(self):
+        lines, notes = self._fit(print_iter=1)
+        self.assertEqual(len(lines), 3)  # one per iteration, the cadence that was asked for
+        self.assertEqual(notes, [])
 
-    def test_the_default_and_the_working_spelling_stay_quiet(self):
-        self.assertFalse(self._fit())
-        self.assertFalse(self._fit(print_iter=0))
+    def test_a_wider_cadence_prints_less_often(self):
+        lines, notes = self._fit(print_iter=2)
+        self.assertTrue(lines)
+        self.assertLess(len(lines), 3)
+        self.assertEqual(notes, [])
+
+    def test_an_absent_print_iter_keeps_the_library_quiet(self):
+        self.assertEqual(self._fit(), ([], []))
+
+    def test_zero_asks_for_no_lines_and_gets_none(self):
+        self.assertEqual(self._fit(print_iter=0), ([], []))
+
+    def test_an_explicit_out_is_still_where_the_lines_go(self):
         buffer = io.StringIO()
-        self.assertFalse(self._fit(print_iter=2, out=buffer))
-        self.assertTrue(buffer.getvalue().strip())
+        lines, notes = self._fit(print_iter=1, out=buffer)
+        self.assertEqual(lines, [])  # not duplicated onto stdout
+        self.assertEqual(notes, [])
+        self.assertEqual(len([line for line in buffer.getvalue().splitlines() if line.strip()]), 3)
+
+    def test_restarts_do_not_start_printing_on_their_own(self):
+        """``best_of`` forwards its own default, so the sentinel has to reach it too."""
+        from mixle.inference import best_of
+
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                best_of(
+                    self.DATA,
+                    self.DATA[:50],
+                    S.MixtureEstimator([S.GaussianEstimator()] * 2),
+                    2,
+                    3,
+                    1.0,
+                    1.0e-8,
+                    np.random.RandomState(0),
+                )
+        self.assertEqual(captured.getvalue().strip(), "")
 
 
 class TorchModuleShapeTest(unittest.TestCase):

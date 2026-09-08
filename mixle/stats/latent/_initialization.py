@@ -27,12 +27,22 @@ def numeric_feature_matrix(encoded: Any, rows: int | None = None) -> np.ndarray 
 
     ``None`` is the signal to fall back to the random start: a composite or ragged encoding, a
     non-numeric dtype, or a non-finite value has no vector space for k-means to work in.
+
+    FLOATING dtypes only, and that is the whole point rather than an incidental strictness. k-means
+    needs the distance between two encoded values to mean something, and for a categorical family the
+    encoded value is a LABEL: ``IntegerCategoricalDistribution`` writes symbol codes as ``int64``, and
+    the distance between code 3 and code 4 says nothing about the symbols. Clustering them anyway
+    handed each state a contiguous slice of the alphabet, so an eight-state HMM over twelve symbols
+    came back with one or two symbols in each state's support where 0.8.1 kept ten to twelve -- and a
+    streaming re-estimate then met evidence no state could score. Every family whose values carry
+    metric meaning encodes as float, counts included (``PoissonDistribution`` encodes ``float64``),
+    so this keeps the start exactly where it belongs.
     """
     try:
         arr = np.asarray(encoded)
     except (TypeError, ValueError):
         return None
-    if arr.dtype == object or not np.issubdtype(arr.dtype, np.number) or np.issubdtype(arr.dtype, np.complexfloating):
+    if arr.dtype == object or not np.issubdtype(arr.dtype, np.floating):
         return None
     if arr.ndim == 1:
         arr = arr[:, None]

@@ -160,7 +160,60 @@ class DegenerateInputTest(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("two_components", message)
         self.assertIn("2 observation(s)", message)
-        self.assertIn("free parameter", message)
+        self.assertIn("no prior", message)
+
+    def test_a_parameter_with_a_proper_prior_is_never_refused_for_sample_size(self):
+        """A proper prior gives a proper posterior at any n, including one observation.
+
+        The first version of this guard counted every slot against every ROW and refused ordinary
+        Bayesian updates that ``map`` fitted on the same data and that 0.8.1 fitted on every route
+        (R02-F03) -- the fail-closed-guard defect class this release exists to remove.
+        """
+        from mixle.ppl import Gamma, Normal
+
+        rows = list(np.random.RandomState(0).normal(5.0, 2.0, 400))
+        mu, sd = Normal(0.0, 10.0, name="mu"), Gamma(2.0, 2.0, name="sd")
+        for route in ("mcmc", "laplace", "map"):
+            with self.subTest(route=route):
+                fitted = _quiet(
+                    lambda route=route: Normal(mu, sd).fit(
+                        rows[:1],
+                        how=route,
+                        rng=np.random.RandomState(0),
+                        **({} if route == "map" else {"draws": 60, "burn": 20} if route == "mcmc" else {}),
+                    )
+                )
+                self.assertIsNotNone(fitted)
+
+    def test_a_row_of_a_vector_model_is_counted_as_the_scalars_it_carries(self):
+        """Three draws from a 5-dimensional model are fifteen numbers, not three."""
+        from mixle.ppl import DiagGaussian, free
+
+        rows = np.random.RandomState(0).normal(size=(3, 5)).tolist()
+        fitted = _quiet(
+            lambda: DiagGaussian(5, mean=free(5, name="a"), var=np.full(5, 0.25)).fit(
+                rows, how="laplace", rng=np.random.RandomState(0)
+            )
+        )
+        self.assertIsNotNone(fitted)
+        single = _quiet(
+            lambda: DiagGaussian(2, mean=free(2, name="b"), var=np.full(2, 0.25)).fit(
+                [[0.0, 1.0]], how="mcmc", draws=20, burn=5, rng=np.random.RandomState(0)
+            )
+        )
+        self.assertIsNotNone(single)
+
+    def test_the_refusal_names_the_parameters_that_have_no_prior(self):
+        from mixle.ppl import Mix, Normal, free
+
+        with self.assertRaises(ValueError) as caught:
+            Mix([Normal(free, free), Normal(free, free)], name="two_components").fit(
+                [-6.0, 6.0], how="mcmc", draws=200, burn=100, rng=np.random.RandomState(0)
+            )
+        message = str(caught.exception)
+        self.assertIn("no prior", message)
+        self.assertIn("2 observation(s)", message)
+        self.assertNotIn("sampler on it wanders", message)  # laplace takes this path too
 
     def test_an_identified_sampler_fit_is_untouched(self):
         from mixle.ppl import Normal, free

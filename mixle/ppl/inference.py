@@ -2520,30 +2520,64 @@ def _prepare_target(
     return log_target, grad, slots, build, dmean, dstd, feasible
 
 
+def _scalar_observation_count(data) -> int | None:
+    """How many SCALARS the data carries, or ``None`` when that cannot be counted.
+
+    Rows are not observations when a row is a vector: three draws from a 5-dimensional diagonal
+    Gaussian are fifteen numbers, and counting them as three refused a model whose every parameter
+    they determine.
+    """
+    if not hasattr(data, "__len__"):
+        return None
+    try:
+        arr = np.asarray(data)
+    except (TypeError, ValueError):
+        return len(data)
+    if arr.dtype == object or not np.issubdtype(arr.dtype, np.number):
+        return len(data)
+    return int(arr.size)
+
+
 def _refuse_fewer_observations_than_parameters(rv, data, slots) -> None:
     """Refuse a fit whose data cannot determine the parameters it is asked to estimate.
 
-    Two observations do not locate a two-component mixture's five parameters. Nothing rejected that,
-    so the sampler wandered into scales around 1e200 and the run ended in a raw
+    Two observations do not locate a two-component mixture's five FLAT parameters. Nothing rejected
+    that, so the sampler wandered into scales around 1e200 and the run ended in a raw
     ``OverflowError: (34, 'Result too large')`` from a lambda inside the lowering table -- naming no
-    parameter, no model and no cause (P10-F13). The rest of the library refuses this class of input
-    at its own front door (``propose`` wants 3 records, ``solve`` 8 inputs); this is that refusal for
-    the sampling routes, stated in terms the caller can act on.
+    parameter, no model and no cause (P10-F13).
 
-    Equality is allowed: a fit with exactly as many observations as parameters is degenerate but
+    Only flat ``free`` slots are counted, and only against the number of SCALARS in the data. The
+    first version of this guard counted every slot against every ROW and refused fits that are
+    perfectly well determined: a parameter carrying a proper prior has a proper posterior at any
+    sample size -- an ordinary one-observation Bayesian update is not a defect -- and a row of a
+    vector model is d observations, not one. Both were rejected here while ``map`` fitted the same
+    models on the same data, and 0.8.1 had fitted them too. A guard that refuses what the library
+    handles is the defect class this release exists to remove, so it now fires only where nothing at
+    all pins the parameters: no prior, and fewer numbers than unknowns.
+
+    Equality is allowed: a fit with exactly as many observations as flat parameters is degenerate but
     determined, and it is not this function's job to decide that a saturated model is uninteresting.
     """
-    if not hasattr(data, "__len__") or not slots:
+    if not slots:
         return
-    n_observations = len(data)
-    if n_observations >= len(slots):
+    flat = [slot for slot in slots if getattr(slot, "prior", None) is None]
+    if not flat:
+        return  # every parameter carries a proper prior; the posterior is proper at any sample size
+    observations = _scalar_observation_count(data)
+    if observations is None or observations >= len(flat):
         return
-    names = ", ".join(str(slot.name) for slot in slots)
+    names = ", ".join(str(slot.name) for slot in flat)
     raise ValueError(
-        "%s has %d free parameter(s) (%s) but was given %d observation(s): the posterior is not "
-        "determined by this data, and a sampler on it wanders to scales that overflow double "
-        "precision rather than converging. Fit a simpler model, or supply at least %d observations."
-        % (getattr(rv, "_name", None) or type(rv).__name__, len(slots), names, n_observations, len(slots))
+        "%s has %d parameter(s) with no prior (%s) but was given %d observation(s): nothing pins "
+        "them, and a fit will wander to scales that overflow double precision rather than converging. "
+        "Give those parameters a prior, fit a simpler model, or supply at least %d observations."
+        % (
+            getattr(rv, "_name", None) or type(rv).__name__,
+            len(flat),
+            names,
+            observations,
+            len(flat),
+        )
     )
 
 

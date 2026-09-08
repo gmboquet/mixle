@@ -224,8 +224,13 @@ release (`release-checklists/0.8.2-followups.md`).
 
 #### Reported numbers and README surfaces (pass 08)
 
-- `print_iter=` prints without `out=`: the default output stream is used instead of the argument
-  being silently inert, which is what the tutorials' stored progress output assumed (P08-F04).
+- An explicit `print_iter=` prints without `out=`. It selects how often progress is written to
+  `out`, and `out` defaults to quiet, so passing `print_iter` alone did nothing -- which is what
+  nine tutorial cells do, beside stored outputs full of the progress lines they never produced.
+  `print_iter` now defaults to `None` ("not asked for") so that passing it, at any value including
+  its old default of `1`, is distinguishable from leaving it alone: an explicit value supplies
+  `sys.stdout` when no `out` is given, `print_iter=0` asks for no lines and gets none, and a call
+  that never mentions it stays as quiet as before (P08-F04).
 - Effective sample size is clipped to the number of draws it was computed from. An autocorrelation
   estimate below one can make `n / tau` exceed `n`, and the tutorials printed "HMC ESS 3000" for
   1000 draws (P08-F08).

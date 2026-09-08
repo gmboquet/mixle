@@ -2028,10 +2028,10 @@
             "name": "out"
           },
           {
-            "annotation": "int",
+            "annotation": "int | None",
             "default": {
               "present": true,
-              "value": 1
+              "value": null
             },
             "kind": "POSITIONAL_OR_KEYWORD",
             "name": "print_iter"
@@ -2305,10 +2305,10 @@
             "name": "out"
           },
           {
-            "annotation": "int",
+            "annotation": "int | None",
             "default": {
               "present": true,
-              "value": 1
+              "value": null
             },
             "kind": "POSITIONAL_OR_KEYWORD",
             "name": "print_iter"

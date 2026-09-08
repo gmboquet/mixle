@@ -165,8 +165,12 @@ def _reject_all_zero_observation_weights(data: Any, entry: str) -> None:
 
 
 # --- estimator coercion -----------------------------------------------------
-# ``optimize``'s own default for ``print_iter``: passing it explicitly at this value is not a
-# request for output, so it never triggers the no-effect note below.
+# The cadence ``optimize`` uses when the caller did not ask for one. ``print_iter`` itself defaults
+# to ``None`` -- "not specified" -- so that PASSING it, at any value including this one, is
+# distinguishable from leaving it alone. That distinction is the whole repair: progress goes to
+# ``out``, ``out`` defaults to quiet, and so ``print_iter=1`` (the spelling nine tutorial cells use,
+# beside stored outputs full of the progress lines it never produced) did exactly nothing (P08-F04).
+# An explicit ``print_iter`` now supplies its own stream; an absent one keeps the quiet default.
 _OPTIMIZE_PRINT_ITER_DEFAULT = 1
 
 
@@ -1326,8 +1330,10 @@ def _validate_optimize_controls(
         or not 0.0 < float(init_p) <= 1.0
     ):
         raise ValueError(f"optimize(): init_p must be finite and in (0, 1], got {init_p!r}")
-    if is_bool(print_iter) or not isinstance(print_iter, (int, np.integer)) or int(print_iter) < 0:
-        raise ValueError(f"optimize(): print_iter must be a non-negative integer, got {print_iter!r}")
+    if print_iter is not None and (
+        is_bool(print_iter) or not isinstance(print_iter, (int, np.integer)) or int(print_iter) < 0
+    ):
+        raise ValueError(f"optimize(): print_iter must be a non-negative integer or None, got {print_iter!r}")
     for name, value, choices in (
         ("objective", objective, _VALID_OBJECTIVES),
         ("structure", structure, _VALID_STRUCTURES),
@@ -1513,7 +1519,7 @@ def optimize(
     enc_data: list[tuple[int, E0]] | None = None,
     enc_vdata: list[tuple[int, E0]] | None = None,
     out: IO | None = None,
-    print_iter: int = 1,
+    print_iter: int | None = None,
     num_chunks: int = 1,
     engine: Any | None = None,
     precision: Any | None = None,
@@ -1666,9 +1672,13 @@ def optimize(
         enc_vdata (Optional[List[Tuple[int, E0]]]): Optional sequence encoded validation set.
         out (IO | None): Stream for per-iteration EM progress lines. Defaults to ``None`` (quiet, so the
             library does not spam stdout in normal use); pass ``out=sys.stdout`` to watch convergence.
-        print_iter (int): Print the log-likelihood difference every print_iter iterations; the final converged
-            iteration is always reported. Pass print_iter=0 to suppress the periodic lines (keeping only the
-            converged line), or out=None to silence entirely.
+        print_iter (int | None): Print the log-likelihood difference every print_iter iterations; the final
+            converged iteration is always reported. ``None`` (the default) means the caller did not ask for
+            progress: nothing is printed unless ``out`` is given. Passing print_iter EXPLICITLY is a request
+            for progress, so it prints to ``sys.stdout`` when no ``out`` is supplied -- an argument whose only
+            documented purpose is to produce output does not silently produce none. ``print_iter=0`` asks for
+            no periodic lines and therefore supplies no stream of its own; with ``out`` it keeps the converged
+            line only.
         num_chunks (int): Number of chunks for encoded data. For exact-sufficient-statistic leaves the
             chunk statistics combine exactly, so chunking changes only float summation order.
             Chunking also changes WHICH rows the ``init_p`` initialization subsample draws, however,
@@ -1824,18 +1834,14 @@ def optimize(
     )
     rng = _resolve_rng_arg(rng, seed)
     data = _reusable_observations(data, "optimize()")
-    if out is None and print_iter not in (0, _OPTIMIZE_PRINT_ITER_DEFAULT):
-        # ``print_iter`` selects how often progress is written to ``out``, and ``out`` defaults to
-        # None (quiet), so passing print_iter alone did exactly nothing -- which is what nine
-        # tutorial cells do, beside stored outputs full of progress lines the candidate never
-        # prints (P08-F04). Documented behaviour, but a taught argument that silently does nothing
-        # is worth one line.
-        warnings.warn(
-            "optimize(print_iter=%r) has no effect without out=: progress is written to `out`, "
-            "which defaults to None (quiet). Pass out=sys.stdout to see the iteration lines." % (print_iter,),
-            UserWarning,
-            stacklevel=2,
-        )
+    # An explicit ``print_iter`` asks for progress and now supplies the stream that carries it, rather
+    # than being inert whenever ``out`` was left at its quiet default (P08-F04). ``print_iter=0`` is a
+    # request for NO periodic lines, so it brings no stream; an absent ``print_iter`` keeps the
+    # library quiet, which is why the parameter defaults to None rather than to its own cadence.
+    if print_iter is None:
+        print_iter = _OPTIMIZE_PRINT_ITER_DEFAULT
+    elif out is None and print_iter != 0:
+        out = sys.stdout
     if fused_options is not None:
         unknown = set(fused_options) - {"parallel", "lse_bits", "lse_span"}
         if unknown:
@@ -2370,7 +2376,7 @@ def best_of(
     enc_data: list[tuple[int, E0]] | None = None,
     enc_vdata: Sequence[tuple[int, E0]] | None = None,
     out: IO | None = None,
-    print_iter: int = 1,
+    print_iter: int | None = None,
     reuse_estep_ll: bool = True,
     objective: str = "auto",
     seed: int | None = None,
@@ -2395,7 +2401,9 @@ def best_of(
             provided. If None, enc_data is set from data.
         enc_vdata (Optional[List[Tuple[int, E0]]]): Optional sequence encoded validation set.
         out (I0): Text output stream.
-        print_iter (int): Print iterations (i.e. log-likelihood difference) every print_iter-iterations.
+        print_iter (int | None): Print iterations (i.e. log-likelihood difference) every print_iter
+            iterations, forwarded to :func:`optimize`. ``None`` (the default) does not ask for progress,
+            so restarts stay quiet unless ``out`` is given; an explicit value prints as it does there.
         reuse_estep_ll (bool): Default True. Forwarded to each trial's ``optimize`` call -- reuse the
             E-step likelihood for convergence instead of a separate scoring pass (see ``optimize``).
             Set False to force the exact historical per-iteration scoring behavior.
