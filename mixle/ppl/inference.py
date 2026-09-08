@@ -237,6 +237,14 @@ class Posterior:
                 "closure over the lowered program that pickling cannot carry. The draws, the raw "
                 "chain and the diagnostics survived -- summary(), the ESS/R-hat fields and the "
                 "explain_fit record all work. Re-fit the model to get %s() back." % (name, name)
+                if name != "predictive"
+                else "this posterior was restored from a pickle, so predict() cannot integrate over "
+                "its draws: the posterior predictive rebuilds the model at each draw through a "
+                "closure over the lowered program that pickling cannot carry. Answering from the "
+                "posterior-MEAN model instead would be the plug-in predictive, which drops exactly "
+                "the parameter uncertainty this posterior holds, so it is refused rather than "
+                "returned. The draws, the raw chain and the diagnostics survived -- summary(), the "
+                "ESS/R-hat fields and the explain_fit record all work. Re-fit the model to predict."
             )
 
     def pointwise_log_likelihood(self, data) -> np.ndarray:

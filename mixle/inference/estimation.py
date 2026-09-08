@@ -845,7 +845,12 @@ def _caller_stacklevel(default: int) -> int:
 
 
 def _warn_if_capped_unconverged(
-    trace: "_FitTrace", max_its: int, delta: float | None, *, requested_delta: float | None
+    trace: "_FitTrace",
+    max_its: int,
+    delta: float | None,
+    *,
+    requested_delta: float | None,
+    track_best: bool = True,
 ) -> None:
     """Disclose two distinct ways a fit can look "complete" without actually finishing its budget.
 
@@ -928,13 +933,24 @@ def _warn_if_capped_unconverged(
         # "the objective has not settled yet" and advising "raise max_its" inverted the situation:
         # more iterations of the same descent do not converge (P03-F06). The receipt is unchanged --
         # it already carries the best model's objective and the last accepted one separately.
+        # Which model comes back depends on ``track_best``, so the note has to say which selection
+        # actually ran. Claiming "the BEST iterate seen" under ``track_best=False`` described the
+        # opposite of what happened -- the LAST, worst iterate is returned there, and it pointed the
+        # reader at a ``last_accepted_objective`` that is None on that path (R02-F05).
+        selection = (
+            "the returned model is the BEST iterate seen, not the last one, and its fit_provenance() "
+            "reports converged=False with final_objective for the model returned and "
+            "last_accepted_objective for where the run ended"
+            if track_best
+            else "track_best=False, so the returned model is the LAST iterate of that descending "
+            "trajectory, not the best one seen, and its fit_provenance() reports converged=False "
+            "with final_objective for it"
+        )
         warnings.warn(
             "optimize() stopped at the max_its cap (%d) with the objective going down (last step "
-            "%.3g): the returned model is the BEST iterate seen, not the last one, and its "
-            "fit_provenance() reports converged=False with final_objective for the model returned "
-            "and last_accepted_objective for where the run ended. More iterations of the same "
-            "trajectory will not converge; a different initialization, restarts=..., or a smaller "
-            "step for the mutable leaf is what changes it." % (int(max_its), float(gain)),
+            "%.3g): %s. More iterations of the same trajectory will not converge; a different "
+            "initialization, restarts=..., or a smaller step for the mutable leaf is what changes "
+            "it." % (int(max_its), float(gain), selection),
             UserWarning,
             stacklevel=_caller_stacklevel(3),
         )
@@ -2217,7 +2233,7 @@ def optimize(
             trace=trace,
         )
 
-        _warn_if_capped_unconverged(trace, max_its, loop_delta, requested_delta=delta)
+        _warn_if_capped_unconverged(trace, max_its, loop_delta, requested_delta=delta, track_best=select_best)
         return _record_fit_provenance(
             best_model,
             trace,

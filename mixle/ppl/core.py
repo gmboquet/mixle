@@ -2594,6 +2594,13 @@ class RandomVariable:
         pred = getattr(r, "predictive", None) if r is not None else None
         if pred is not None:
             return pred(n, rng)
+        # A posterior whose `predictive` closure was dropped by pickling must SAY so rather than fall
+        # through to the line below, which draws from the posterior-MEAN model: that is the plug-in
+        # predictive, and it silently discards the parameter uncertainty the posterior exists to
+        # carry (sd 2.03 where integrating gives 2.30). `pointwise_log_likelihood` already refuses by
+        # name for the same reason; this is the same refusal for the same cause (R02-F04).
+        if r is not None and hasattr(r, "_refuse_dropped_closure"):
+            r._refuse_dropped_closure("predictive")
         seed = int(rng.randint(0, 2**31 - 1) if hasattr(rng, "randint") else rng.integers(0, 2**31 - 1))
         return self.sample(n, seed=seed)
 

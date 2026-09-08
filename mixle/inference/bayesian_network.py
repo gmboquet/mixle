@@ -720,12 +720,19 @@ class HeterogeneousBayesianNetwork(FitProvenanceCarrier):
         return total if not math.isnan(total) else -math.inf
 
     def seq_log_density(self, encoded: Any) -> np.ndarray:
-        """Evaluate joint log density for encoded records."""
+        """Evaluate joint log density for encoded records.
+
+        A record the factors cannot score is impossible here for the same reason it is impossible in
+        :meth:`log_density`, and is reported the same way: ``-inf``, not ``NaN``. The scalar route
+        already did this and the vectorized one did not, so the same NaN field read as an impossible
+        record one way and poisoned the sum, mean or comparison of a whole batch the other
+        (R02-F09). A condition disclosed differently by route is not disclosed.
+        """
         cols, n = encoded
         out = np.zeros(n, dtype=np.float64)
         for f in self.factors:
             out += f.seq_log_density(cols)
-        return out
+        return np.where(np.isnan(out), -np.inf, out)
 
     def dist_to_encoder(self) -> Any:
         """Return the encoder for record batches consumed by ``seq_log_density``."""

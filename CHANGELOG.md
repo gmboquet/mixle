@@ -333,6 +333,18 @@ release (`release-checklists/0.8.2-followups.md`).
   gradient-free routes, instead of raising the sampler's internal "nuts requires value_and_grad= or
   both log_target and grad_log_target" -- a message about callable signatures for a user whose
   situation is a missing optional dependency.
+- `predict()` on a posterior restored from a pickle refuses instead of answering with the plug-in
+  predictive. The `predictive` closure cannot be pickled, and `predict` fell through to sampling the
+  posterior-MEAN model -- which silently drops the parameter uncertainty the posterior exists to
+  carry (a predictive sd of 2.03 where integrating over the draws gives 2.30). It now refuses by
+  name, as `pointwise_log_likelihood` already did; everything the CHANGELOG says survives the round
+  trip still does (R02-F04).
+- The cap note for a downhill run names the selection actually in force. Under `track_best=False`
+  it claimed "the returned model is the BEST iterate seen" where the LAST, worst one is returned,
+  and pointed at a `last_accepted_objective` that is `None` on that path (R02-F05).
+- `HeterogeneousBayesianNetwork.seq_log_density` scores a record it cannot evaluate as `-inf`, the
+  way `log_density` already did. The same NaN field read as an impossible record on one route and
+  turned the sum or mean of a whole batch into NaN on the other (R02-F09).
 - The test suite passes on a base install (numpy and scipy only). Nine cases in the 0.8.2 repair
   tests imported pandas or torch unconditionally, and the arbitrary-precision reference cases in
   `vmf_test` imported mpmath at module scope, so the minimum-versions tier failed on the repairs
