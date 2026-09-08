@@ -190,7 +190,13 @@ class QuantileEndpointTest(unittest.TestCase):
                 self.assertEqual(PoissonDistribution(lam).quantile(q), float(ss.poisson.ppf(q, lam)), (lam, q))
 
     def test_a_huge_rate_gets_a_finite_median_where_scipy_returns_nan(self):
-        self.assertTrue(math.isnan(float(ss.poisson.ppf(0.5, 1.0e12))))
+        # scipy's behaviour here is the PREMISE, not the claim, and it is version-dependent: the
+        # generic discrete `ppf` returns NaN on scipy 1.17.1 and a finite count on 1.16.0. Asserting
+        # the NaN unconditionally failed the minimum-versions tier on the scipy that does not have
+        # the defect -- a mixle test failing because a dependency got better. What this pins is
+        # mixle's own answer, which must be finite and correct either way.
+        if not math.isnan(float(ss.poisson.ppf(0.5, 1.0e12))):
+            self.assertTrue(math.isfinite(float(ss.poisson.ppf(0.5, 1.0e12))))  # no third state
         for lam in (1.0e12, 1.0e15):
             law = PoissonDistribution(lam)
             median = law.quantile(0.5)

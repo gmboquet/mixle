@@ -188,7 +188,11 @@ class GaussianProcessRegressor:
         while extra <= ceiling:
             chol, info = torch.linalg.cholesky_ex(k + extra * eye)
             if int(info.detach().cpu().item()) == 0:
-                self._jitter_applied = float(extra)
+                # The LARGEST any factorization has needed, as the attribute's own comment says --
+                # a plain assignment let a later, smaller repair overwrite a bigger earlier one, so
+                # after ridging by 1e-2 and then by 1e-10 the receipt reported 1e-10 and understated
+                # how far the covariance had to be moved (R02-F14).
+                self._jitter_applied = max(self._jitter_applied, float(extra))
                 return chol
             extra *= 10.0
         raise ValueError(

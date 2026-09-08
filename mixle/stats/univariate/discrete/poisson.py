@@ -433,9 +433,21 @@ class PoissonDistribution(SequenceEncodableProbabilityDistribution):
         if q >= 1.0:
             return math.inf
         value = float(poisson.ppf(q, self.lam))
-        if math.isnan(value):
+        # NaN was the only symptom this checked for, and it is not the only one scipy produces.
+        # At lam=1e15 scipy 1.16.0 returns a FINITE 999999999979213.0 -- about 21000 counts below
+        # the median, with cdf 0.4997 -- while 1.17.1 returns NaN there. Trusting a finite answer
+        # broke the method's own contract ("the smallest k with P(X <= k) >= q") on whichever scipy
+        # happened to be installed. Checking the answer against this law's own CDF costs two CDF
+        # evaluations and settles it for any scipy: the bisection below is exact by construction.
+        if math.isnan(value) or not self._quantile_holds(value, q):
             return self._quantile_by_bisection(q)
         return value
+
+    def _quantile_holds(self, value: float, q: float) -> bool:
+        """Whether ``value`` really is the smallest count whose CDF reaches ``q``."""
+        if not math.isfinite(value) or value < 0.0:
+            return False
+        return bool(self.cdf(value) >= q and (value <= 0.0 or self.cdf(value - 1.0) < q))
 
     def _quantile_by_bisection(self, q: float) -> float:
         """Smallest ``k`` with ``cdf(k) >= q``, bracketed from the normal approximation."""

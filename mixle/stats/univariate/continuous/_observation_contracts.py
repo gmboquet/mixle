@@ -552,7 +552,11 @@ class AnchoredMomentTrack:
         fold keeps the historical ``np.dot`` accumulation order, so a chunk that never activates
         the anchor produces bit-identical statistics.
         """
-        chunk_sum = np.dot(x, weights)
+        # `weighted_statistic_sum`, not a bare dot: `x` here is already the encoder's transform
+        # (log(value) for the log-normal families), so an out-of-support row admitted for a
+        # mixture's benefit arrives as +/-inf and `inf * 0.0` poisoned the FIRST moment too. Only
+        # the second was guarded (R05-F05).
+        chunk_sum = weighted_statistic_sum(x, weights)
         chunk_sum2 = np.dot(x * x, weights)
         if not np.isfinite(chunk_sum2):
             # A weight of exactly 0.0 must contribute exactly zero to chunk_sum2 regardless of x's
@@ -900,3 +904,40 @@ def one_dimensional_observations(values: np.ndarray, *, label: str) -> np.ndarra
         "Flatten it with numpy.ravel(data) (a column selected as df[['x']].values is the usual "
         "source of an (n, 1) array; df['x'] gives the one-dimensional form)." % (label, array.shape)
     )
+
+
+def validated_quantile_probability(q: Any, *, label: str) -> float:
+    """Return ``q`` as a float after refusing anything outside ``[0, 1]`` (NaN included).
+
+    Shared by every family that defines ``quantile``. Four discrete families used this while eight
+    continuous ones let scipy's ``ppf`` answer NaN for an out-of-domain ``q``, and
+    ``BernoulliDistribution`` was worse still: it returned a PLAUSIBLE support point (``0.0`` for
+    ``q = -0.5``, ``1.0`` for ``q = 1.5`` and for NaN), so a caller who computed a level wrong got a
+    valid-looking answer back. One rule for all of them (R05-F07).
+    """
+    value = float(q)
+    if math.isnan(value) or not 0.0 <= value <= 1.0:
+        raise ValueError(f"{label}: q must be in [0, 1].")
+    return value
+
+
+def weighted_statistic_sum(values: Any, weights: Any) -> float:
+    """``dot(values, weights)`` in which a zero-weight row contributes exactly zero.
+
+    :func:`refuse_unsupported_observations` deliberately exempts a row whose weight is zero -- a
+    component that was handed no responsibility for an observation must not be blocked by it, which
+    is what lets a mixture encode one batch against every component (P02-F03). The arithmetic did
+    not honour that exemption: the encoders admit out-of-support rows, so ``values`` can hold
+    ``inf`` or ``-inf`` there, and ``inf * 0.0`` is NaN, not 0. One exempt row then turned the
+    running sufficient statistic into NaN for every fully-weighted observation in the same chunk,
+    and the fit failed several frames later on "requires beta > 0" (R05-F05).
+
+    The mask is applied only when the plain product is non-finite, which keeps the ordinary path at
+    its historical cost -- the same shape ``WeibullAccumulator`` and ``HalfNormalAccumulator``
+    already used for their own overflow cases.
+    """
+    total = np.dot(values, weights)
+    if np.isfinite(total):
+        return float(total)
+    exempt = np.asarray(weights) != 0.0
+    return float(np.dot(np.where(exempt, values, 0.0), weights))

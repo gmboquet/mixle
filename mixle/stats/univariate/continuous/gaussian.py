@@ -493,6 +493,11 @@ class GaussianDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="GaussianDistribution.quantile")
         from scipy.stats import norm
 
         return float(norm.ppf(q, loc=self.mu, scale=self.sigma2**0.5))

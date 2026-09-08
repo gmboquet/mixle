@@ -29,6 +29,7 @@ from mixle.stats.univariate.continuous._observation_contracts import (
     refuse_unsupported_observation,
     refuse_unsupported_observations,
     scored_observation,
+    weighted_statistic_sum,
 )
 from mixle.stats.univariate.continuous.gamma import GammaDistribution
 from mixle.utils.special import digamma
@@ -301,6 +302,11 @@ class ExponentialDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="ExponentialDistribution.quantile")
         from scipy.stats import expon as _sp
 
         return float(_sp.ppf(q, scale=self.beta))
@@ -458,7 +464,7 @@ class ExponentialAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         refuse_unsupported_observations(self.supported_rows(x), weights, message=_EXPONENTIAL_SUPPORT_MESSAGE)
-        self.sum += np.dot(x, weights)
+        self.sum += weighted_statistic_sum(x, weights)
         self.count += np.sum(weights, dtype=np.float64)
 
     def supported_rows(self, x) -> np.ndarray:

@@ -212,9 +212,8 @@ def gaussian_limit_entropy(variance: float, skewness: float, excess_kurtosis: fl
     return float(0.5 * math.log(2.0 * math.pi * math.e * variance) - skewness**2 / 12.0 - excess_kurtosis**2 / 48.0)
 
 
-def validated_quantile_probability(q: Any, *, label: str) -> float:
-    """Return ``q`` as a float after refusing anything outside ``[0, 1]`` (NaN included)."""
-    value = float(q)
-    if math.isnan(value) or not 0.0 <= value <= 1.0:
-        raise ValueError(f"{label}: q must be in [0, 1].")
-    return value
+# Re-exported: the rule now lives beside the other cross-family observation contracts, because the
+# continuous families need it too (R05-F07). The four discrete importers here are unchanged.
+from mixle.stats.univariate.continuous._observation_contracts import (  # noqa: E402
+    validated_quantile_probability as validated_quantile_probability,
+)

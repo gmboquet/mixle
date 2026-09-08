@@ -3096,8 +3096,10 @@ def map_fit(
 
     max_iter = _exact_int_control(max_iter, "max_iter", minimum=1)
     tol = _finite_control(tol, "tol", lower=0.0)
-    if rng is not None and not isinstance(rng, np.random.RandomState):
-        raise TypeError("rng must be a numpy.random.RandomState")
+    # The same spellings the four samplers and predict() take (P04-F11); `laplace`, `vi`, `map` and
+    # the indexed route kept the RandomState-only check, so one `rng=0` worked on one route and
+    # raised on the next (R02-F12).
+    rng = validated_sampler_rng(rng) if rng is not None else None
     if _is_grouped(rv):
         log_target, grad, slots, build, dmean, dstd, feasible = _prepare_target(
             rv,
@@ -3363,8 +3365,8 @@ def laplace_fit(
     tol = _finite_control(tol, "tol", lower=0.0)
     if rng is None:
         rng = np.random.RandomState()
-    elif not isinstance(rng, np.random.RandomState):
-        raise TypeError("rng must be a numpy.random.RandomState")
+    else:
+        rng = validated_sampler_rng(rng)  # R02-F12: the spellings every sampler route accepts
     hard_constraints, _soft_constraints = _constraint_policy(constraints, penalty)
     if hard_constraints:
         raise NotImplementedError(
@@ -3493,8 +3495,8 @@ def vi_fit(
         raise ValueError("pass at most one of rng and seed")
     if rng is None:
         rng = np.random.RandomState(seed)
-    elif not isinstance(rng, np.random.RandomState):
-        raise TypeError("rng must be a numpy.random.RandomState")
+    else:
+        rng = validated_sampler_rng(rng)  # R02-F12: the spellings every sampler route accepts
 
     ag = _ag.grad_target(rv, data, missing=missing)
     if ag is None and missing == "marginalize":
@@ -4386,9 +4388,7 @@ class HierarchicalPosterior:
     def samples(self, param=None, n: int = 4000, rng=None):
         """Draw group effects from the declared conditional posterior."""
         n = _exact_int_control(n, "hierarchical posterior draws", minimum=1)
-        rng = np.random.RandomState() if rng is None else rng
-        if not isinstance(rng, np.random.RandomState):
-            raise TypeError("rng must be a numpy.random.RandomState")
+        rng = np.random.RandomState() if rng is None else validated_sampler_rng(rng)  # R02-F12
         if self.posterior_family == "Normal":
             return rng.normal(self.group_means, np.sqrt(self.group_vars), size=(n, self.group_means.size))
         if self.posterior_family == "Gamma":
@@ -5014,8 +5014,7 @@ def indexed_fit(
     else:
         max_iter = _exact_int_control(max_iter, "indexed max_iter", minimum=1)
         tol = _finite_control(tol, "indexed tol", lower=0.0)
-        if rng is not None and not isinstance(rng, np.random.RandomState):
-            raise TypeError("rng must be a numpy.random.RandomState")
+        rng = validated_sampler_rng(rng) if rng is not None else None  # R02-F12
 
     log_target, slots, extract, rep, (dmean, dstd), field_layouts = _indexed_target(
         rv, data, given, jacobian=is_sampler

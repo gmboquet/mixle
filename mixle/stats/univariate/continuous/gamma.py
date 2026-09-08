@@ -30,6 +30,7 @@ from mixle.stats.compute.pdist import (
 )
 from mixle.stats.univariate.continuous._observation_contracts import (
     refuse_unsupported_observations,
+    weighted_statistic_sum,
 )
 from mixle.utils.aliasing import broadcast_pseudo_count
 from mixle.utils.special import digamma, gammaln, trigamma
@@ -367,6 +368,11 @@ class GammaDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="GammaDistribution.quantile")
         from scipy.stats import gamma as _sp
 
         return float(_sp.ppf(q, self.k, scale=self.theta))
@@ -596,8 +602,8 @@ class GammaAccumulator(SequenceEncodableStatisticAccumulator):
                 "composite)." % zero_count
             )
         refuse_unsupported_observations(self.supported_rows(x), weights, message=_GAMMA_SUPPORT_MESSAGE)
-        self.sum += np.dot(x[0], weights)
-        self.sum_of_logs += np.dot(x[1], weights)
+        self.sum += weighted_statistic_sum(x[0], weights)
+        self.sum_of_logs += weighted_statistic_sum(x[1], weights)
         self.count += np.sum(weights)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "GammaAccumulator":

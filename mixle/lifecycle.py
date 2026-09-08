@@ -1391,6 +1391,23 @@ def _refresh_frozen_identifier_leaves(estimator: Any, rows: list, field_paths: l
 _MIN_TRAINING_ROWS = 2
 
 
+def _records_for_a_trainable_split(holdout: float) -> int:
+    """The smallest record count whose train split reaches ``_MIN_TRAINING_ROWS`` at ``holdout``.
+
+    ``_MIN_TRAINING_ROWS + n_val`` was the obvious arithmetic and the wrong one: ``n_val`` is
+    ``max(2, round(n * holdout))``, so it GROWS with ``n`` and the advised count was refused in its
+    turn -- at ``holdout=0.8``, six records advised seven, seven advised eight, and only eight fit
+    (R02-F11). Solved by walking ``n`` instead, which is exact for any holdout and cheap: the answer
+    is small whenever the caller is anywhere near this refusal.
+    """
+    n = _MIN_TRAINING_ROWS + 2
+    while n - max(2, int(round(n * holdout))) < _MIN_TRAINING_ROWS:
+        n += 1
+        if n > 100_000:  # a holdout arbitrarily close to 1 has no answer; the caller must lower it
+            return 0
+    return n
+
+
 def propose(
     data: Any,
     *,
@@ -1523,11 +1540,22 @@ def propose(
         # candidate then fits a variance-floored point mass whose held-out mean log-density is around
         # -1e8 -- presented, with no note, as a comparison of verified candidates (P03-F11). The
         # degenerate-spike guard downstream looks for an implausibly HIGH score and never fires on it.
+        # The advice has to be takeable: an advised record count that is itself refused, and a
+        # "lower holdout" offered where holdout is not what binds, are both worse than no advice.
+        enough = _records_for_a_trainable_split(holdout)
+        holdout_binds = int(round(len(rows) * holdout)) > 2
+        remedies = []
+        if enough:
+            remedies.append("provide at least %d records at this holdout" % enough)
+        if holdout_binds:
+            remedies.append("lower holdout")
+        if not remedies:  # holdout so close to 1 that no record count helps
+            remedies.append("lower holdout")
         raise ValueError(
             "propose() would train every candidate on %d row(s) (%d record(s) at holdout=%g): a "
             "single-row fit is a variance-floored point mass, and comparing candidates on it "
-            "measures the floor rather than the data. Provide at least %d records, or lower "
-            "holdout." % (len(train), len(rows), holdout, _MIN_TRAINING_ROWS + n_val)
+            "measures the floor rather than the data. To fit, %s."
+            % (len(train), len(rows), holdout, " or ".join(remedies))
         )
     rec = recommend_model(train, **recommend_kw)
     candidates: list[tuple[str, Any]] = [("recommended", rec.estimator)]

@@ -379,6 +379,14 @@ release (`release-checklists/0.8.2-followups.md`).
 - `terminal_log_alpha` is exported, and a terminal-state HMM's `seq_posterior` runs the restricted
   recursion on both routes. The filtered route masked the last position to `-inf` instead of
   restricting the forward pass, which is a different quantity (R05-F01).
+- `HiddenMarkovModelDistribution.latent_posterior` and `.viterbi` honour `terminal_states` too, and
+  with `latent_posterior` so do `.marginals()`, `.mode()`, `.sample()` and `posterior_predictive`,
+  which all read the object it returns. Both ignored the restriction and answered for the
+  unrestricted model: on a four-step chain whose last observation belongs to a non-terminal state, a
+  marginal off by 0.999, and a Viterbi path that visits a terminal state twice in the middle -- a
+  path the model assigns probability zero. The restriction folds into the emissions (a terminal
+  state is impossible anywhere but the last position), which makes the ordinary recursion exactly
+  the restricted one; checked against enumeration of the admissible paths (R05-F01).
 - A whole-number check shared by `PoissonEstimator`, `GeometricEstimator` and `LogSeriesEstimator`
   (`is_whole_number`) accepts an integer typed as `int` or `numpy.integer`, not only a `float` that
   happens to be integral -- the three families' fractional-value refusals read `2` and `2.0`
@@ -407,6 +415,82 @@ release (`release-checklists/0.8.2-followups.md`).
   message naming the family, what an ordering is, and the row index, instead of
   `TypeError: 'NoneType' object is not iterable` from `list(row)`, which named none of the three
   where the sibling discrete families at least name themselves (R06-F07).
+- Every family that defines `quantile` refuses an out-of-domain `q` the same way, through one
+  shared `validated_quantile_probability`. Four discrete families raised, eight continuous ones let
+  scipy's `ppf` answer NaN, `LogSeriesDistribution` raised without naming itself, and
+  `BernoulliDistribution` answered with a plausible support point -- `0.0` at `q = -0.5`, `1.0` at
+  `q = 1.5` and at NaN -- which is a wrong answer rather than a missing one. The closed interval
+  `[0, 1]` is unchanged, endpoints included (R05-F07).
+- `PoissonDistribution.quantile` validates scipy's answer instead of only checking it for NaN. The
+  P01-F11 repair fired on NaN alone, and NaN is not the only way the generic discrete `ppf` gets
+  this wrong: at `lam=1e15` scipy 1.16.0 returns a finite `999999999979213.0` -- about 21000 counts
+  below the median, CDF 0.4997 -- where 1.17.1 returns NaN. Trusting a finite answer broke the
+  method's own contract ("the smallest k with P(X <= k) >= q") on whichever scipy happened to be
+  installed. Checking against this law's own CDF costs two evaluations and settles it for any
+  version; the shipped regression test also asserted the NaN as a PRECONDITION, so it failed on the
+  scipy that does not have the defect.
+- Five more one-spelling-works-and-its-twin-does-not defects: an encoded batch handed over as a
+  TUPLE of chunks was not counted, so `optimize(enc_data=())` returned the fabricated
+  `Gaussian(0, 1e-8)` marked converged that the list spelling refuses, and a non-empty tuple fitted
+  with `n_observations=None` (R02-F10); `how='laplace'|'vi'|'map'` kept a RandomState-only `rng`
+  check the four samplers had already dropped, so one `rng=0` worked on one route and raised on the
+  next (R02-F12); `initialize` took only a `RandomState` where `seq_initialize` takes an int, a
+  `Generator` or `None`, and the others died on a bare "'int' object has no attribute 'randint'"
+  from inside the loop (R02-F13); `pit_values` accepts a scalar-only cdf that wraps its answer in a
+  length-1 list or array, which used to die on numpy's own `TypeError` naming neither the cdf nor
+  the cause (R02-F15); and `dependency_gain` refuses ragged columns instead of letting `zip`
+  truncate to the shorter one and scoring the remainder as a gain, which is what
+  `learn_structure` and `learn_bayesian_network` already do (R02-F16).
+- The GP reports the LARGEST jitter any factorization needed, as its own comment said it did: a
+  plain assignment let a later, smaller repair overwrite a bigger earlier one, so a covariance
+  ridged by 1e-2 and then by 1e-10 was reported as 1e-10 (R02-F14).
+- `propose()`'s single-row-training refusal advises a record count that actually fits. `n_val` is
+  `max(2, round(n * holdout))`, so it grows with `n` and the advised `_MIN_TRAINING_ROWS + n_val`
+  was refused in its turn -- at `holdout=0.8`, six records advised seven, seven advised eight, and
+  only eight fit. It now solves for the smallest workable count, and offers "lower holdout" only
+  where holdout is what binds (R02-F11).
+- `BayesOptResult.numerical_repairs()` reports what the surrogate repaired during the run, in the
+  same spelling the distribution families and the GP itself use. The GP records ridging its own
+  covariance, and on an ordinary `mixle.doe.minimize` run it does: the surrogate drives its noise
+  toward zero on a well-fit objective, the acquisition loop clusters points near the optimum, and
+  the kernel matrix goes numerically singular -- measured on `(p0-1)^2 + (p1+2)^2` over `[-5, 5]^2`,
+  escalated jitter was needed on 11 of 12 seeds. `propose_next` fits the surrogate internally and
+  returns only the point, so that record died with the local surrogate and the result carried no
+  route to it: a repaired posterior guided every proposal and the caller could not learn it
+  (R07-F05).
+- A note only advises a knob the reader can actually turn. `_caller_stacklevel` already put the cap
+  notes on the reader's own line, but their text stayed written for a direct `optimize(...)`: routed
+  through `learn_structure`, `learn_bayesian_network`, `learn_mixture_structure` or `propose` they
+  still opened with "optimize()" and still advised `delta=None`, which none of those verbs accepts.
+  They now name the verb the caller invoked and drop the clauses its signature does not take; a
+  direct `optimize` call reads exactly as before (R07-F06).
+- The unidentified-component note (A-02) makes the same distinction, on the question that governs
+  it: `restarts=` and `init='dirichlet'` are knobs on the ESTIMATOR, so they are advice only when
+  the caller built one. The README's own `solve(teacher, inputs)` one-liner fits a four-component
+  mixture internally and raised the note several times, each advising two knobs the reader had no
+  object to pass them to. When the library chose the mixture the note says so and points at what is
+  reachable instead (R07-F07). This closes the open half of P08-F05.
+- A fit whose objective never becomes finite names the cause when it is knowable. "EM did not
+  produce a finite objective from its non-finite initial model" is the symptom; for the commonest
+  way to reach it -- a mixture whose components all refuse every observation, which is where an
+  exponential fit of a negative column and a beta fit outside `[0, 1]` land -- the message now adds
+  that every one of the N observations scores `-inf` and what to check. The diagnosis runs only on
+  the already-failed path, and only for a batch this process can score directly (R05-F09).
+- A zero-weight row contributes exactly zero to a sufficient statistic, on all ten continuous
+  families that exempt one. `refuse_unsupported_observations` deliberately exempts a row whose
+  weight is zero -- that is what lets a mixture encode one batch against every component (P02-F03)
+  -- but the arithmetic did not honour the exemption: the encoders admit out-of-support rows, so
+  the encoded statistic holds an infinity there and `inf * 0.0` is NaN. Seven of the ten then
+  carried NaN sufficient statistics for every fully-weighted observation in the same chunk, and the
+  fit failed several frames later on the parameter validator ("requires beta > 0") rather than
+  anywhere near the row. The masked recomputation runs only when the plain product is non-finite,
+  so the ordinary path keeps its cost -- the shape `WeibullAccumulator` and `HalfNormalAccumulator`
+  already used for their own overflow cases, now shared as `weighted_statistic_sum` and applied to
+  the first moment as well as the second (R05-F05).
+- `WeibullDistribution.seq_log_density` applies the same overflow rule as `log_density`. Past the
+  float range the two terms are `+inf` and `-inf`, so the batch route returned NaN where the scalar
+  route returned `-inf`, and one NaN turned the sum or mean of a whole batch into NaN -- an
+  impossible observation read as an unknown one (R05-F06, the shape of R02-F09).
 - A calibrated-generator prompt with no canonical encoding falls back to its `repr`, as its
   docstring always said it did. `_derive_seed` interpolated `_seed_key`'s `None` into the digest
   input, so the key was the literal `"<base_seed>:None"` and every such prompt shared ONE seed --

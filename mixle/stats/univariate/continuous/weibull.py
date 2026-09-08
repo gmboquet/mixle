@@ -21,6 +21,7 @@ from mixle.stats.compute.pdist import (
 from mixle.stats.univariate.continuous._observation_contracts import (
     LOG_FLOAT_MAX,
     refuse_unsupported_observations,
+    weighted_statistic_sum,
 )
 
 # The declared support is x >= 0, and scoring an exact zero works (density 0, 1/scale, or inf by
@@ -172,7 +173,14 @@ class WeibullDistribution(SequenceEncodableProbabilityDistribution):
         xx, lx = x
         z = xx / self.scale
         with np.errstate(divide="ignore", invalid="ignore"):
-            rv = self.log_shape - self.log_scale + (self.shape - 1.0) * (lx - self.log_scale) - np.power(z, self.shape)
+            log_z = lx - self.log_scale
+            rv = self.log_shape - self.log_scale + (self.shape - 1.0) * log_z - np.power(z, self.shape)
+            # The same overflow rule the scalar route applies (P01-F04), which this path did not:
+            # past the float range the density really is zero, and at x = +inf the two terms are
+            # `+inf` and `-inf`, whose sum is NaN. `log_density(inf)` answered -inf while this
+            # answered NaN, and one NaN turns the sum or mean of a whole batch into NaN -- an
+            # impossible observation read as an unknown one (R05-F06, the shape of R02-F09).
+            rv = np.where(self.shape * log_z > LOG_FLOAT_MAX, -np.inf, rv)
         rv = np.where(xx < 0.0, -np.inf, rv)
         if self.shape == 1.0:
             rv = np.where(xx == 0.0, -self.log_scale, rv)
@@ -241,6 +249,11 @@ class WeibullDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="WeibullDistribution.quantile")
         from scipy.stats import weibull_min as _sp
 
         return float(_sp.ppf(q, self.shape, scale=self.scale))
@@ -382,7 +395,7 @@ class WeibullAccumulator(SequenceEncodableStatisticAccumulator):
             # the ordinary path at its historical cost).
             safe_xx = np.where(np.asarray(weights) != 0.0, xx, 0.0)
             chunk_sum2 = np.dot(safe_xx * safe_xx, weights)
-        self.sum += np.dot(xx, weights)
+        self.sum += weighted_statistic_sum(xx, weights)
         self.sum2 += chunk_sum2
         self.count += np.sum(weights, dtype=np.float64)
 

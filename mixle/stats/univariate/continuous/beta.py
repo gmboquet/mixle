@@ -22,6 +22,7 @@ from mixle.stats.compute.pdist import (
 )
 from mixle.stats.univariate.continuous._observation_contracts import (
     refuse_unsupported_observations,
+    weighted_statistic_sum,
 )
 from mixle.utils.special import digamma, gammaln, trigamma
 
@@ -284,6 +285,11 @@ class BetaDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="BetaDistribution.quantile")
         from scipy.stats import beta as _sp
 
         return float(_sp.ppf(q, self.a, self.b))
@@ -430,10 +436,10 @@ class BetaAccumulator(SequenceEncodableStatisticAccumulator):
             keep = ~boundary
             lx, l1mx, xx, xx2, ww = lx[keep], l1mx[keep], xx[keep], xx2[keep], ww[keep]
         self.count += np.sum(ww, dtype=np.float64)
-        self.sum_of_logs += np.dot(lx, ww)
-        self.sum_of_log1m += np.dot(l1mx, ww)
-        self.sum += np.dot(xx, ww)
-        self.sum2 += np.dot(xx2, ww)
+        self.sum_of_logs += weighted_statistic_sum(lx, ww)
+        self.sum_of_log1m += weighted_statistic_sum(l1mx, ww)
+        self.sum += weighted_statistic_sum(xx, ww)
+        self.sum2 += weighted_statistic_sum(xx2, ww)
 
     def seq_initialize(
         self, x: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None

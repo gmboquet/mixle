@@ -17,7 +17,8 @@ posterior mean at each pick, refit, and repeat, giving a spatially diverse batch
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -302,6 +303,18 @@ class BayesOptResult(OptimizationResult):
     n_evaluations: int
     failed_evaluations: tuple[dict[str, Any], ...]
     stopped_reason: str
+    # Keyword-only so it can carry a default without displacing ConstrainedBayesOptResult's own
+    # required fields, which follow these in the generated __init__.
+    surrogate_repairs: tuple[str, ...] = field(default=(), kw_only=True)
+
+    def numerical_repairs(self) -> tuple[str, ...]:
+        """Repairs the surrogate applied during this run -- ``()`` when none were needed.
+
+        Same channel and spelling as the distribution families' and the GP's own: a covariance
+        ridged to stay factorable is a repair, and the proposals it produced are approximations
+        whether or not the run reported a best point (R07-F05).
+        """
+        return self.surrogate_repairs
 
 
 def _validate_observations(x: np.ndarray, y: np.ndarray, *, context: str) -> None:
@@ -401,6 +414,35 @@ def _require_default_surrogate() -> None:
         ) from error
 
 
+_SURROGATE_REPAIRS: ContextVar[list[str] | None] = ContextVar("mixle_doe_surrogate_repairs", default=None)
+
+
+def _record_surrogate_repairs(gp: Surrogate) -> None:
+    """Note any numerical repair the fitted surrogate applied, for the result to carry.
+
+    The GP records ridging its own covariance under `numerical_repairs()` -- and on a routine
+    `minimize` run it does: an objective the surrogate fits well drives its noise toward zero, the
+    acquisition loop then clusters points near the optimum, and the kernel matrix becomes
+    numerically singular. Measured on `(p0-1)^2 + (p1+2)^2` over `[-5, 5]^2`, escalated jitter was
+    needed on 11 of 12 seeds. `propose_next` fits the surrogate internally and returns only the
+    point, so that record died with the local `gp` and `BayesOptResult` exposed no route to it --
+    a repaired posterior guided every proposal and the caller had no way to learn it (R07-F05).
+    """
+    log = _SURROGATE_REPAIRS.get()
+    if log is None:
+        return
+    repairs = getattr(gp, "numerical_repairs", None)
+    if not callable(repairs):
+        return  # a caller-supplied surrogate need not implement the channel
+    try:
+        entries = tuple(repairs())
+    except Exception:  # noqa: BLE001 - a surrogate's own reporting must not fail the optimization
+        return
+    for entry in entries:
+        if entry not in log:
+            log.append(str(entry))
+
+
 def _fit_surrogate(x: np.ndarray, y: np.ndarray, gp: Surrogate | None, fit_kwargs: dict[str, Any] | None) -> Surrogate:
     _validate_observations(x, y, context="_fit_surrogate")
     default_surrogate = gp is None
@@ -428,6 +470,7 @@ def _fit_surrogate(x: np.ndarray, y: np.ndarray, gp: Surrogate | None, fit_kwarg
     if np.asarray(y).size == 0:
         return gp
     gp.fit(x, y, **kwargs)
+    _record_surrogate_repairs(gp)
     return gp
 
 
@@ -754,6 +797,9 @@ def minimize(
     y_values: list[float] = []
     failed_evaluations: list[dict[str, Any]] = []
     n_evaluations = 0
+    # Every surrogate fit in this run reports into here; `result()` hands the list to the caller.
+    surrogate_repairs: list[str] = []
+    _SURROGATE_REPAIRS.set(surrogate_repairs)
 
     def evaluate(point: np.ndarray) -> float | None:
         nonlocal n_evaluations
@@ -790,6 +836,7 @@ def minimize(
             n_evaluations=n_evaluations,
             failed_evaluations=tuple(failed_evaluations),
             stopped_reason=stopped_reason,
+            surrogate_repairs=tuple(surrogate_repairs),
         )
 
     for row in latin_hypercube(b, n_init, rng):

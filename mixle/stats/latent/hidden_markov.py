@@ -1759,6 +1759,12 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
         The path is recovered by backpointer backtracking (max-product / Viterbi), so it is the
         jointly most probable state SEQUENCE -- not the per-position argmax of the score matrix.
+
+        Under ``terminal_states`` the search is restricted to admissible paths, the same way
+        :meth:`latent_posterior` restricts the sum: a terminal state may occupy only the LAST
+        position. This ignored the restriction and returned the unrestricted maximizer, which on a
+        four-step chain was a path visiting a terminal state twice in the middle -- a path the model
+        assigns probability zero (R05-F01).
         """
         nn = len(x)
         num_states = self.n_states
@@ -1769,6 +1775,9 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
         emission_encoder, _ = _build_emission_encoder(_emission_encoders_from_dists(self.topics))
         pr_obs = self._state_seq_log_densities(emission_encoder.seq_encode(list(x)))
+        if self.terminal_states is not None and nn > 1:
+            pr_obs = np.array(pr_obs, dtype=float, copy=True)
+            pr_obs[:-1, self._terminal_mask] = -np.inf
 
         delta = np.zeros((nn, num_states), dtype=np.float64)
         psi = np.zeros((nn, num_states), dtype=np.int32)
@@ -1791,9 +1800,21 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         The returned :class:`~mixle.stats.compute.posterior.MarkovChainLatentPosterior` can
         ``.marginals()`` (forward-backward smoothing probabilities), ``.sample(rng)`` a full state path
         by FFBS, ``.mode()`` (the Viterbi path), or ``.entropy()`` (the exact chain entropy).
+
+        Under ``terminal_states`` the restriction is folded into the emissions rather than left to
+        the caller: a terminal state may occupy only the LAST position, so its emission is
+        impossible everywhere else, and the ordinary recursion over those emissions is then exactly
+        the restricted one (checked against enumeration of the admissible paths). This ignored
+        ``terminal_states`` entirely and returned the unrestricted model's posterior -- on a
+        four-step chain whose last observation belongs to a non-terminal state, a marginal off by
+        0.999 -- and with it ``.mode()``, ``.sample()`` and :meth:`posterior_predictive`, all of
+        which read this object (R05-F01).
         """
         emission_encoder, _ = _build_emission_encoder(_emission_encoders_from_dists(self.topics))
         log_b = self._state_seq_log_densities(emission_encoder.seq_encode(list(x)))
+        if self.terminal_states is not None and log_b.shape[0] > 1:
+            log_b = np.array(log_b, dtype=float, copy=True)
+            log_b[:-1, self._terminal_mask] = -np.inf
         return MarkovChainLatentPosterior(self.log_w, self.log_transitions, log_b)
 
     def posterior_predictive(self, x: list[T], seed: int | None = None) -> list[Any]:

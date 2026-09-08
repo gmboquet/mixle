@@ -203,6 +203,15 @@ def dependency_gain(
     ``rng`` seeds the fits' EM initializations (``None`` = a fixed seed: deterministic by default; matters when
     the child family needs a randomized init, e.g. a mixture).
     """
+    if len(parent) != len(child):
+        # `zip(parent, child)` below truncates to the shorter column, so a ragged pair returned a
+        # gain computed on a silently-dropped row -- while `learn_structure` and
+        # `learn_bayesian_network` raise on ragged records (P02-F07). One rule (R02-F16).
+        raise ValueError(
+            "dependency_gain() needs one child value per parent value, got %d parent(s) and %d "
+            "child value(s). Align the two columns first -- the pair is truncated to the shorter "
+            "one otherwise, and the gain is then computed on data neither column describes." % (len(parent), len(child))
+        )
     rng = np.random.RandomState(0) if rng is None else rng
     child = list(child)
     n = len(child)

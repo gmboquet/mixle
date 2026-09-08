@@ -35,6 +35,7 @@ from mixle.stats.compute.pdist import (
 )
 from mixle.stats.univariate.continuous._observation_contracts import (
     refuse_unsupported_observations,
+    weighted_statistic_sum,
 )
 from mixle.utils.special import digamma, gammaln, trigamma
 
@@ -280,6 +281,11 @@ class InverseGammaDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF F^{-1}(q)."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="InverseGammaDistribution.quantile")
         from scipy.special import gammainccinv
 
         return float(self.beta / gammainccinv(self.alpha, float(q)))
@@ -360,8 +366,8 @@ class InverseGammaAccumulator(SequenceEncodableStatisticAccumulator):
         refuse_unsupported_observations(self.supported_rows(x), weights, message=_INVERSE_GAMMA_SUPPORT_MESSAGE)
         log_x, inv_x = x
         self.count += np.sum(weights, dtype=np.float64)
-        self.sum_inv += np.dot(inv_x, weights)
-        self.sum_neg_log += np.dot(-log_x, weights)
+        self.sum_inv += weighted_statistic_sum(inv_x, weights)
+        self.sum_neg_log += weighted_statistic_sum(-log_x, weights)
 
     def seq_initialize(self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize statistics from encoded observations."""

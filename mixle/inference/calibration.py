@@ -437,7 +437,7 @@ def evaluate_cdf(cdf: Callable[[Any], Any], y: np.ndarray) -> np.ndarray:
     try:
         values = np.asarray(cdf(y), dtype=float)
     except TypeError:
-        return np.asarray([float(cdf(value)) for value in y], dtype=float)
+        return _elementwise(cdf, y)
     if values.shape == y.shape:
         return values
     # A callable that takes the array without raising but hands back one value is scalar-only in
@@ -445,8 +445,30 @@ def evaluate_cdf(cdf: Callable[[Any], Any], y: np.ndarray) -> np.ndarray:
     # shape mismatch of the CDF VALUES sent the caller after the wrong cause -- the misattribution
     # FU-04 was about, still standing for this spelling of it (P03-F12).
     if values.ndim == 0 or values.size == 1:
-        return np.asarray([float(cdf(value)) for value in y], dtype=float)
+        return _elementwise(cdf, y)
     return values
+
+
+def _elementwise(cdf: Callable[[Any], Any], y: np.ndarray) -> np.ndarray:
+    """``cdf`` applied one value at a time, naming the callable when a result is not a number.
+
+    ``float(cdf(value))`` was the whole body, and a callable returning a length-1 list or array per
+    call -- the same shape the caller above is already accommodating for the whole vector -- died on
+    numpy's or Python's own ``TypeError``, which names neither the cdf nor what was wrong with it
+    (R02-F15). A one-element container IS a number for this purpose; anything else is not, and says
+    so.
+    """
+    out = np.empty(len(y), dtype=float)
+    for index, value in enumerate(y):
+        scored = np.asarray(cdf(value), dtype=float)
+        if scored.size != 1:
+            raise TypeError(
+                "cdf returned %d value(s) for the single observation %r; a scalar-only cdf must "
+                "return one number per call. Pass a vectorized cdf, or one that returns a scalar."
+                % (int(scored.size), value)
+            )
+        out[index] = float(scored.reshape(()))
+    return out
 
 
 def pit_values(y: np.ndarray, cdf: np.ndarray | Callable[[np.ndarray], np.ndarray]) -> np.ndarray:

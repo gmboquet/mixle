@@ -23,6 +23,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import validated_quantile_probability
 from mixle.stats.univariate.continuous.beta import BetaDistribution
 from mixle.utils.special import digamma
 
@@ -292,7 +293,12 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF F^{-1}(q) over {0, 1}."""
-        return 0.0 if float(q) <= 1.0 - self.p else 1.0
+        # `float(q) <= 1 - p` answered every q, so an out-of-domain one got a PLAUSIBLE support
+        # point back -- 0.0 at q = -0.5, 1.0 at q = 1.5 and at NaN -- rather than an error. Of the
+        # thirteen families that define `quantile`, this was the only one whose answer was a lie
+        # rather than a NaN (R05-F07).
+        q = validated_quantile_probability(q, label="BernoulliDistribution.quantile")
+        return 0.0 if q <= 1.0 - self.p else 1.0
 
     def entropy(self) -> float:
         """Shannon entropy -p log p - (1-p) log(1-p) (nats)."""

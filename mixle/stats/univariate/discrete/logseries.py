@@ -36,6 +36,7 @@ from mixle.stats.univariate.continuous._observation_contracts import (
     is_whole_number,
     refuse_unsupported_observation,
     refuse_unsupported_observations,
+    validated_quantile_probability,
 )
 from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations
 from mixle.utils.special import valid_integer
@@ -399,9 +400,10 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
         """
         import math
 
-        q = float(q)
-        if not 0.0 <= q <= 1.0 or math.isnan(q):
-            raise ValueError("q must be in [0, 1].")
+        # Same rule as every other family, and the same message: this one raised without naming
+        # itself, so a level computed wrong somewhere up a composite fit said only "q must be in
+        # [0, 1]" with nothing to say which law was asked (R05-F07).
+        q = validated_quantile_probability(q, label="LogSeriesDistribution.quantile")
         if q <= 0.0:
             return 1.0
         if q >= 1.0:

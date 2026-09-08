@@ -2091,7 +2091,7 @@ def _disclosing_component_support(fitted: MixtureDistribution, counts: np.ndarra
     if unidentified:
         # Attributed to the caller's own line rather than to the EM driver's: imported here, not at
         # module scope, because ``estimation`` imports this module.
-        from mixle.inference.estimation import _caller_stacklevel
+        from mixle.inference.estimation import _caller_stacklevel, _calling_verb
 
         # The message names the components and their parameter counts, not the fractional row mass:
         # ``estimate`` runs once per EM iteration, and a mass that drifts by a hundredth would defeat
@@ -2100,13 +2100,29 @@ def _disclosing_component_support(fitted: MixtureDistribution, counts: np.ndarra
         detail = ", ".join(
             "component %d (%d free parameter(s))" % (index, count) for index, _mass, count in unidentified
         )
+        # `restarts=` and `init='dirichlet'` are knobs on the ESTIMATOR the caller built, so the
+        # remedy is only addressable when the caller built one. The README's own
+        # `solve(teacher, inputs)` one-liner fits a four-component mixture internally and raised
+        # this note seven times, each advising two knobs the reader had no object to pass them to
+        # (R07-F07). When the library chose the mixture, say that instead: it is the difference
+        # between "you configured this badly" and "we did, and here is what you can still do".
+        verb, accepted = _calling_verb()
+        caller_built_the_mixture = bool(accepted & {"estimator", "estimators", "estimate"})
+        remedy = (
+            " A component this small is either a genuinely rare regime that needs more data, or an "
+            "initialization that latched onto a small group, and restarts= or "
+            "MixtureEstimator(..., init='dirichlet') distinguishes the two."
+            if caller_built_the_mixture
+            else " A component this small is either a genuinely rare regime that needs more data, or "
+            "an initialization that latched onto a small group. %s built this mixture itself, so "
+            "neither is set here: more data, or fitting the mixture directly with "
+            "MixtureEstimator(..., init='dirichlet'), is what distinguishes them." % verb
+        )
         warnings.warn(
             "this mixture fit left %d of %d component(s) with less data than they have parameters: "
             "%s -- see component_row_mass for the effective rows each won. The fit may still report "
-            "converged=True; EM converges to such a solution rather than failing at it. A component "
-            "this small is either a genuinely rare regime that needs more data, or an initialization "
-            "that latched onto a small group, and restarts= or init='dirichlet' distinguishes the "
-            "two." % (len(unidentified), len(fitted.components), detail),
+            "converged=True; EM converges to such a solution rather than failing at it.%s"
+            % (len(unidentified), len(fitted.components), detail, remedy),
             UserWarning,
             stacklevel=_caller_stacklevel(3),
         )

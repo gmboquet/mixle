@@ -174,6 +174,37 @@ def _reject_all_zero_observation_weights(data: Any, entry: str) -> None:
 _OPTIMIZE_PRINT_ITER_DEFAULT = 1
 
 
+def _non_finite_objective_error(enc_data: Any, model: Any, *, route: str) -> ValueError:
+    """The error for a fit whose objective never became finite, naming the cause when it is knowable.
+
+    "EM did not produce a finite objective from its non-finite initial model" is the symptom, and
+    for the commonest way to reach it the cause is one line away: EVERY observation scores -inf,
+    because none of them is in any component's support. The caller then had a message about EM
+    internals for what is a data/model mismatch they can see and fix (R05-F09).
+
+    Diagnosis runs only on this already-failed path, and only when the encoded batch is one this
+    process can score directly -- a Spark RDD or a parallel handle keeps the general message.
+    """
+    detail = ""
+    try:
+        scored = 0
+        finite = 0
+        for _size, chunk in enc_data:
+            block = np.asarray(model.seq_log_density(chunk), dtype=float)
+            scored += int(block.size)
+            finite += int(np.count_nonzero(np.isfinite(block)))
+        if scored and finite == 0:
+            detail = (
+                " Every one of the %d observation(s) scores -inf under it: none of them is in the"
+                " support of any component. Check the sign, units or support of the column against"
+                " the family you asked for -- an exponential or gamma fit of a column holding"
+                " negative values reaches here, and so does a beta fit outside [0, 1]." % scored
+            )
+    except Exception:  # noqa: BLE001 - the diagnosis is a courtesy; the failure below is the answer
+        detail = ""
+    return ValueError("%s did not produce a finite objective from its non-finite initial model.%s" % (route, detail))
+
+
 def _reusable_observations(data: Any, entry: str = "optimize()") -> Any:
     """Normalize what a fit entry point was handed into a reusable record sequence.
 
@@ -784,9 +815,16 @@ def _initialize_with_support_fallback(
 
 
 def _encoded_row_count(enc_data: Any) -> int | None:
-    """Rows behind an encoded dataset, or ``None`` when the encoding does not report a count."""
+    """Rows behind an encoded dataset, or ``None`` when the encoding does not report a count.
+
+    A chunk SEQUENCE, not a list specifically: an encoded batch handed over as a tuple counted as
+    "no reportable count", so the zero-row refusal never fired for it and `optimize(enc_data=())`
+    returned a model made entirely of a variance floor, stamped converged over zero observations --
+    the exact P03-F03 answer the list spelling refuses. A non-empty tuple fitted normally and
+    reported `n_observations=None` for the same reason (R02-F10).
+    """
     try:
-        if isinstance(enc_data, list):
+        if isinstance(enc_data, (list, tuple)):
             return int(sum(int(chunk[0]) for chunk in enc_data))
         count = getattr(enc_data, "num_records", None)
         return None if count is None else int(count)
@@ -841,6 +879,9 @@ def _record_fit_provenance(
     return model
 
 
+_EVERY_FIT_KNOB = frozenset({"delta", "max_its", "restarts", "init", "print_iter", "track_best", "rng"})
+
+
 def _caller_stacklevel(default: int) -> int:
     """The ``stacklevel`` that lands on the first frame OUTSIDE the library.
 
@@ -861,6 +902,58 @@ def _caller_stacklevel(default: int) -> int:
         frame = frame.f_back
         level += 1
     return default
+
+
+def _calling_verb() -> tuple[str, frozenset[str]]:
+    """The public mixle verb the caller actually invoked, and the parameters it accepts.
+
+    ``_caller_stacklevel`` already walks out to the reader's own frame so a note lands on the line
+    they wrote. The note's TEXT stayed written for a direct ``optimize(...)`` all the same: routed
+    through a structure verb it still opened with "optimize()" and still advised ``delta=None``,
+    which ``learn_structure``, ``learn_bayesian_network``, ``learn_mixture_structure`` and
+    ``propose`` do not accept -- advice the reader cannot take, about a call they did not make
+    (R07-F06). The same walk names the outermost public mixle frame instead, and its signature says
+    which knobs the advice may mention.
+
+    Falls back to ``("optimize()", every knob)`` when the walk finds nothing public, which keeps a
+    direct call and any unrecognized route exactly as they read before.
+    """
+    import inspect
+
+    verb = None
+    frame = sys._getframe(1)
+    while frame is not None:
+        module = frame.f_globals.get("__name__", "")
+        if not (module == "mixle" or module.startswith("mixle.")) or module.startswith("mixle.tests"):
+            break
+        name = frame.f_code.co_name
+        if not name.startswith("_"):
+            function = frame.f_globals.get(name)
+            if callable(function):
+                verb = (name, function)
+        frame = frame.f_back
+    if verb is None:
+        return "optimize()", _EVERY_FIT_KNOB
+    name, function = verb
+    try:
+        accepted = frozenset(inspect.signature(function).parameters)
+    except (TypeError, ValueError):  # a builtin or C function has no readable signature
+        accepted = _EVERY_FIT_KNOB
+    return name + "()", accepted
+
+
+def _knob_clause(accepted: frozenset[str], *options: tuple[str, str]) -> str:
+    """The advice clauses whose knob the calling verb actually takes, as one trailing sentence.
+
+    Empty when the verb takes none of them, so the note ends after what it observed rather than on
+    a remedy the reader cannot apply.
+    """
+    usable = [text.strip() for knob, text in options if knob in accepted]
+    if not usable:
+        return ""
+    if len(usable) > 1:
+        usable = [", ".join(usable[:-1]), usable[-1]]
+    return " " + ", or ".join(usable) + "."
 
 
 def _warn_if_capped_unconverged(
@@ -907,15 +1000,16 @@ def _warn_if_capped_unconverged(
     a surrogate estimator forces to ``None`` internally) -- so a surrogate fit whose loop delta was
     forced off is never blamed on a ``delta=None`` the caller never actually passed.
     """
+    verb, accepted = _calling_verb()
     if requested_delta is None and int(trace.iterations) < int(max_its):
         warnings.warn(
-            'optimize() was called with delta=None (documented as "a fixed iteration count": run '
+            '%s was called with delta=None (documented as "a fixed iteration count": run '
             "max_its=%d iterations) but only %d of them ran: a proposed update was rejected (a "
             "non-improving or non-finite step), which still ends the loop even when delta=None. This "
             "is not a converged fit -- more of the SAME update would not help, though a different "
             "restart/initialization might -- and fit_provenance() reports iterations=%d, "
             "max_iterations=%d, converged=False; compare the two to see the shortfall."
-            % (int(max_its), int(trace.iterations), int(trace.iterations), int(max_its)),
+            % (verb, int(max_its), int(trace.iterations), int(trace.iterations), int(max_its)),
             UserWarning,
             stacklevel=_caller_stacklevel(3),
         )
@@ -936,12 +1030,19 @@ def _warn_if_capped_unconverged(
         rejected = getattr(trace, "rejected_decrease", None)
         if rejected is not None and int(trace.iterations) >= 2 and gain is not None and float(gain) > float(delta):
             warnings.warn(
-                "optimize() stopped at iteration %d of max_its=%d on a rejected update: the proposal fell "
+                "%s stopped at iteration %d of max_its=%d on a rejected update: the proposal fell "
                 "%.3g below the last accepted objective while the last accepted step still gained %.3g > "
                 "delta=%g. The returned model is the last accepted one, an unconverged fit, and its "
-                "fit_provenance() reports converged=False. More of the same update would not help; a "
-                "different initialization or restarts=... may get past it."
-                % (int(trace.iterations), int(max_its), float(rejected), float(gain), float(delta)),
+                "fit_provenance() reports converged=False. More of the same update would not help.%s"
+                % (
+                    verb,
+                    int(trace.iterations),
+                    int(max_its),
+                    float(rejected),
+                    float(gain),
+                    float(delta),
+                    _knob_clause(accepted, ("restarts", " A different initialization or restarts=... may get past it")),
+                ),
                 UserWarning,
                 stacklevel=_caller_stacklevel(3),
             )
@@ -965,21 +1066,31 @@ def _warn_if_capped_unconverged(
             "trajectory, not the best one seen, and its fit_provenance() reports converged=False "
             "with final_objective for it"
         )
+        remedy = _knob_clause(
+            accepted,
+            (
+                "restarts",
+                " A different initialization, restarts=..., or a smaller step for the mutable leaf is what changes it",
+            ),
+        )
         warnings.warn(
-            "optimize() stopped at the max_its cap (%d) with the objective going down (last step "
-            "%.3g): %s. More iterations of the same trajectory will not converge; a different "
-            "initialization, restarts=..., or a smaller step for the mutable leaf is what changes "
-            "it." % (int(max_its), float(gain), selection),
+            "%s stopped at the max_its cap (%d) with the objective going down (last step "
+            "%.3g): %s. More iterations of the same trajectory will not converge.%s"
+            % (verb, int(max_its), float(gain), selection, remedy),
             UserWarning,
             stacklevel=_caller_stacklevel(3),
         )
         return
     gain_text = ("last objective gain %.3g" % gain) if gain is not None else "final gain unknown"
+    remedy = _knob_clause(
+        accepted,
+        ("max_its", " Raise max_its to fit to convergence"),
+        ("delta", " pass delta=None to request a fixed iteration count without this note"),
+    )
     warnings.warn(
-        "optimize() stopped at the max_its cap (%d) before the objective settled (%s, delta=%g): the "
-        "returned model is an unconverged fit, and its fit_provenance() reports converged=False. "
-        "Raise max_its to fit to convergence, or pass delta=None to request a fixed iteration count "
-        "without this note." % (int(max_its), gain_text, float(delta)),
+        "%s stopped at the max_its cap (%d) before the objective settled (%s, delta=%g): the "
+        "returned model is an unconverged fit, and its fit_provenance() reports converged=False.%s"
+        % (verb, int(max_its), gain_text, float(delta), remedy),
         UserWarning,
         stacklevel=_caller_stacklevel(3),
     )
@@ -1158,7 +1269,7 @@ def _em_loop(
             break
 
     if not current_is_finite:
-        raise ValueError("EM did not produce a finite objective from its non-finite initial model.")
+        raise _non_finite_objective_error(enc_data, model, route="EM")
     if track_best:
         if best_model is None or best_state is None:
             raise ValueError("EM did not produce a model with a finite validation objective.")
@@ -1280,7 +1391,7 @@ def _fused_em_loop(
                     trace.objective_gain = float(final_ll - prev_ll)
 
     if accepted_model is None:
-        raise ValueError("fused EM did not produce a finite objective from its non-finite initial model.")
+        raise _non_finite_objective_error(enc_data, model, route="fused EM")
     if track_best and best_model is None:
         raise ValueError("fused EM did not produce a model with a finite validation objective.")
     chosen = best_model if track_best else accepted_model

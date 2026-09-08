@@ -39,6 +39,7 @@ from mixle.stats.compute.pdist import (
 )
 from mixle.stats.univariate.continuous._observation_contracts import (
     refuse_unsupported_observations,
+    weighted_statistic_sum,
 )
 
 _MIN_IG_PARAM = 1.0e-12
@@ -397,8 +398,8 @@ class InverseGaussianAccumulator(SequenceEncodableStatisticAccumulator):
         """Accumulate transformed sufficient statistics from encoded data."""
         refuse_unsupported_observations(self.supported_rows(x), weights, message=_INVERSE_GAUSSIAN_SUPPORT_MESSAGE)
         vals, inv_vals, _ = x
-        self.sum += np.dot(vals, weights)
-        self.sum_inv += np.dot(inv_vals, weights)
+        self.sum += weighted_statistic_sum(vals, weights)
+        self.sum_inv += weighted_statistic_sum(inv_vals, weights)
         self.count += np.sum(weights, dtype=np.float64)
 
     def seq_initialize(

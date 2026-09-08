@@ -658,7 +658,7 @@ def initialize(
     Args:
         data (Union[Sequence[T], pyspark.rdd.RDD]): Set of iid observations compatible with 'estimator'.
         estimator (ParameterEstimator): ParameterEstimator object for desired model to be estimated from data.
-        rng (RandomState): RandomState object for setting seed.
+        rng (RandomState): RandomState object for setting seed; an integer seed or ``None`` works too.
         p (float): Proportion of data to randomly sample for initializing model.
 
     Returns:
@@ -667,6 +667,11 @@ def initialize(
     """
     validate_estimator_keys(estimator)
     p = validate_initialization_probability(p)
+    # The spellings `seq_initialize` accepts. This route took only a RandomState, and an int, a
+    # Generator or `None` died on a bare "AttributeError: 'int' object has no attribute 'randint'"
+    # from inside the initialization loop -- naming neither the argument nor what works. `None`
+    # failing is the sharper half: it is what an unpassed argument looks like (R02-F13).
+    rng = validated_random_state(rng, "initialize()")
 
     if isinstance(data, RDD_TYPES):
         factory = estimator.accumulator_factory()

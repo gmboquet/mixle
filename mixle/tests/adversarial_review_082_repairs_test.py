@@ -9,6 +9,7 @@ restored posterior answering a question it could no longer answer.
 
 from __future__ import annotations
 
+import importlib.util
 import pickle
 import unittest
 import warnings
@@ -19,6 +20,8 @@ from mixle.inference import learn_bayesian_network, optimize
 from mixle.stats import GaussianDistribution, GaussianEstimator
 from mixle.stats.compute.sequence import seq_estimate
 from mixle.utils.optional_deps import HAS_PANDAS
+
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
 def _quiet(callable_):
@@ -726,3 +729,704 @@ class UnencodablePromptSeedTest(unittest.TestCase):
         # And `None` as a prompt is encodable, so it must not collide with the old shared value the
         # `"<base>:None"` key produced.
         self.assertNotEqual(self._derive(None), self._derive(self.Opaque("alpha")))
+
+
+class WeibullInfiniteObservationTest(unittest.TestCase):
+    """R05-F06: the two scoring routes agree on an observation past the float range.
+
+    ``log_density`` refuses it as impossible (``-inf``, the P01-F04 overflow rule); the vectorized
+    route computed ``+inf + -inf`` and returned NaN, which is not "impossible" but "unknown" -- and
+    one NaN turns the sum or mean of a whole batch into NaN. Same shape as R02-F09.
+    """
+
+    XS = [float("inf"), 1e300, 5.0, 1.0, 0.1, 0.0, -1.0]
+
+    def _routes(self, shape):
+        from mixle.stats import WeibullDistribution
+
+        dist = WeibullDistribution(shape=shape, scale=1.0)
+        vector = np.asarray(dist.seq_log_density(dist.dist_to_encoder().seq_encode(self.XS)), dtype=float)
+        scalar = np.array([float(dist.log_density(x)) for x in self.XS])
+        return scalar, vector
+
+    def test_the_two_routes_agree_at_every_shape_regime(self):
+        # shape < 1, == 1 and > 1 take three different branches at x == 0, so all three are checked.
+        for shape in (0.5, 1.0, 2.0):
+            with self.subTest(shape=shape):
+                scalar, vector = self._routes(shape)
+                self.assertFalse(np.isnan(vector).any(), "vectorized route produced NaN")
+                np.testing.assert_allclose(vector, scalar, rtol=1e-12)
+
+    def test_an_infinite_observation_is_impossible_not_unknown(self):
+        for shape in (0.5, 1.0, 2.0):
+            with self.subTest(shape=shape):
+                scalar, vector = self._routes(shape)
+                self.assertEqual(vector[0], -np.inf)
+                self.assertEqual(scalar[0], -np.inf)
+
+    def test_a_batch_holding_one_is_still_summable(self):
+        """The consequence the NaN had: one bad row poisoned every other row's total."""
+        from mixle.stats import WeibullDistribution
+
+        dist = WeibullDistribution(shape=2.0, scale=1.0)
+        rows = [1.0, 2.0, float("inf"), 0.5]
+        scores = np.asarray(dist.seq_log_density(dist.dist_to_encoder().seq_encode(rows)), dtype=float)
+        self.assertEqual(float(np.sum(scores)), -np.inf)  # not NaN
+        self.assertTrue(np.isfinite(scores[[0, 1, 3]]).all())
+
+
+class QuantileDomainTest(unittest.TestCase):
+    """R05-F07: every family that defines ``quantile`` refuses an out-of-domain ``q`` the same way.
+
+    Four discrete families raised; eight continuous ones let scipy's ``ppf`` answer NaN; and
+    ``BernoulliDistribution`` answered with a plausible support point -- ``0.0`` at ``q = -0.5``,
+    ``1.0`` at ``q = 1.5`` and at NaN -- which is the only one of the three that is a wrong answer
+    rather than a missing one.
+    """
+
+    @staticmethod
+    def _families():
+        import inspect
+
+        from mixle import stats
+
+        candidates = (
+            {"shape": 2.0, "scale": 1.0},
+            {"k": 2.0, "theta": 1.0},
+            {"beta": 1.0},
+            {"a": 2.0, "b": 2.0},
+            {"mu": 0.0, "sigma2": 1.0},
+            {"lam": 1.5},
+            {"p": 0.3},
+            {"alpha": 2.0, "beta": 2.0},
+            {"n": 5, "p": 0.3},
+        )
+        built = []
+        for name in sorted(dir(stats)):
+            if not name.endswith("Distribution"):
+                continue
+            cls = getattr(stats, name, None)
+            if not inspect.isclass(cls) or not hasattr(cls, "quantile"):
+                continue
+            for kwargs in candidates:
+                try:
+                    built.append((name, cls(**kwargs)))
+                    break
+                except Exception:  # noqa: BLE001 - this family takes different parameters; try the next shape
+                    continue
+        return built
+
+    def test_the_survey_reaches_every_family_it_claims_to(self):
+        names = [name for name, _ in self._families()]
+        self.assertGreaterEqual(len(names), 13)
+        self.assertIn("BernoulliDistribution", names)
+
+    def test_an_out_of_domain_q_raises_on_every_family(self):
+        for name, dist in self._families():
+            for q in (-0.5, 1.5, float("nan"), -np.inf, np.inf):
+                with self.subTest(family=name, q=q):
+                    with self.assertRaises(ValueError) as caught:
+                        dist.quantile(q)
+                    self.assertIn("q must be in [0, 1]", str(caught.exception))
+                    self.assertIn(name, str(caught.exception))
+
+    def test_the_whole_closed_interval_is_still_answered(self):
+        """The refusal must not eat the endpoints, which are the support's own bounds."""
+        for name, dist in self._families():
+            with self.subTest(family=name):
+                for q in (0.0, 0.25, 1.0, 0, 1, np.float64(0.5)):
+                    self.assertFalse(np.isnan(float(dist.quantile(q))), "q=%r returned NaN" % (q,))
+
+
+class ZeroWeightExemptionTest(unittest.TestCase):
+    """R05-F05: a zero-weight row must contribute zero, not NaN.
+
+    ``refuse_unsupported_observations`` deliberately exempts a row whose weight is zero -- that
+    exemption is what lets a mixture encode one batch against every component (P02-F03). The
+    arithmetic did not honour it: the encoders admit out-of-support rows, so the encoded statistic
+    holds an infinity there, and ``inf * 0.0`` is NaN. One exempt row turned the running sufficient
+    statistic into NaN for every fully-weighted observation in the same chunk, and the fit died
+    several frames later on the parameter validator ("requires beta > 0").
+    """
+
+    @staticmethod
+    def _families():
+        from mixle import stats
+
+        return [
+            ("Exponential", stats.ExponentialDistribution(beta=1.0), stats.ExponentialEstimator(), [1.0, 2.0, 3.0]),
+            ("Gamma", stats.GammaDistribution(k=2.0, theta=1.0), stats.GammaEstimator(), [1.0, 2.0, 3.0]),
+            ("Beta", stats.BetaDistribution(a=2.0, b=2.0), stats.BetaEstimator(), [0.2, 0.5, 0.7]),
+            ("Weibull", stats.WeibullDistribution(shape=2.0, scale=1.0), stats.WeibullEstimator(), [1.0, 2.0, 3.0]),
+            (
+                "LogGaussian",
+                stats.LogGaussianDistribution(mu=0.0, sigma2=1.0),
+                stats.LogGaussianEstimator(),
+                [1.0, 2.0, 3.0],
+            ),
+            (
+                "InverseGamma",
+                stats.InverseGammaDistribution(alpha=2.0, beta=1.0),
+                stats.InverseGammaEstimator(),
+                [1.0, 2.0, 3.0],
+            ),
+            (
+                "InverseGaussian",
+                stats.InverseGaussianDistribution(mu=1.0, lam=1.0),
+                stats.InverseGaussianEstimator(),
+                [1.0, 2.0, 3.0],
+            ),
+            ("HalfNormal", stats.HalfNormalDistribution(sigma=1.0), stats.HalfNormalEstimator(), [1.0, 2.0, 3.0]),
+            ("Rayleigh", stats.RayleighDistribution(sigma=1.0), stats.RayleighEstimator(), [1.0, 2.0, 3.0]),
+            ("Uniform", stats.UniformDistribution(0.0, 5.0), stats.UniformEstimator(), [1.0, 2.0, 3.0]),
+        ]
+
+    @staticmethod
+    def _statistics(dist, estimator, rows, weights):
+        accumulator = estimator.accumulator_factory().make()
+        accumulator.seq_update(dist.dist_to_encoder().seq_encode(rows), np.asarray(weights, dtype=float), None)
+        return np.asarray(accumulator.value(), dtype=float)
+
+    def test_an_exempt_row_leaves_the_statistics_exactly_as_if_it_were_absent(self):
+        for name, dist, estimator, rows in self._families():
+            clean = self._statistics(dist, estimator, rows, [1.0] * len(rows))
+            for offending in (float("inf"), float("-inf"), -1.0):
+                with self.subTest(family=name, row=offending):
+                    got = self._statistics(dist, estimator, [*rows, offending], [*([1.0] * len(rows)), 0.0])
+                    self.assertFalse(np.isnan(got).any(), "exempt row produced NaN statistics")
+                    np.testing.assert_allclose(got, clean, rtol=1e-12)
+
+    def test_a_weighted_violation_is_still_refused(self):
+        """The repair must not turn the exemption into a licence: weight it and it still raises."""
+        for name, dist, estimator, rows in self._families():
+            with self.subTest(family=name):
+                with self.assertRaises(ValueError):
+                    self._statistics(dist, estimator, [*rows, float("inf")], [*([1.0] * len(rows)), 1.0])
+
+    def test_the_helper_only_masks_what_the_weight_already_excluded(self):
+        from mixle.stats.univariate.continuous._observation_contracts import weighted_statistic_sum
+
+        values = np.array([1.0, 2.0, np.inf])
+        self.assertEqual(weighted_statistic_sum(values, np.array([1.0, 1.0, 0.0])), 3.0)
+        # A weighted infinity is not masked -- that is a real infinity in the statistic, and the
+        # guard above is what refuses it.
+        self.assertEqual(weighted_statistic_sum(values, np.array([1.0, 1.0, 1.0])), np.inf)
+        # And an ordinary batch is untouched.
+        self.assertEqual(weighted_statistic_sum(np.array([1.0, 2.0]), np.array([0.5, 0.5])), 1.5)
+
+
+class NonFiniteObjectiveDiagnosisTest(unittest.TestCase):
+    """R05-F09: name the cause when it is one line away.
+
+    A mixture every one of whose components refuses every observation reported "fused EM did not
+    produce a finite objective from its non-finite initial model" -- a message about EM internals
+    for what is a data/model mismatch the caller can see and fix.
+    """
+
+    def _refusal(self, rows, estimator):
+        with self.assertRaises(ValueError) as caught:
+            _quiet(lambda: optimize(rows, estimator, max_its=4, out=None, rng=np.random.RandomState(0)))
+        return str(caught.exception)
+
+    def test_it_says_that_nothing_is_in_support_and_how_many(self):
+        from mixle.stats import BetaEstimator, ExponentialEstimator, MixtureEstimator
+
+        for label, rows, estimator in (
+            ("negatives into exponentials", [-1.0, -2.0, -3.0] * 10, MixtureEstimator([ExponentialEstimator()] * 2)),
+            ("out-of-unit into betas", [1.5, 2.5, 3.5] * 10, MixtureEstimator([BetaEstimator()] * 2)),
+        ):
+            with self.subTest(case=label):
+                message = self._refusal(rows, estimator)
+                self.assertIn("did not produce a finite objective", message)  # the symptom survives
+                self.assertIn("30 observation(s) scores -inf", message)  # ...and now names the cause
+                self.assertIn("support of any component", message)
+
+    def test_a_healthy_fit_is_untouched(self):
+        from mixle.stats import ExponentialEstimator, MixtureEstimator
+
+        rows = list(np.random.RandomState(0).exponential(1.0, 60))
+        fitted = _quiet(
+            lambda: optimize(
+                rows, MixtureEstimator([ExponentialEstimator()] * 2), max_its=4, out=None, rng=np.random.RandomState(0)
+            )
+        )
+        self.assertEqual(len(fitted.components), 2)
+
+    def test_the_diagnosis_does_not_replace_a_more_specific_refusal(self):
+        """A single-family fit still refuses at the accumulator, naming the family and the rows."""
+        from mixle.stats import ExponentialEstimator
+
+        message = self._refusal([-1.0, -2.0, -3.0] * 10, ExponentialEstimator())
+        self.assertIn("ExponentialDistribution has support x >= 0", message)
+        self.assertNotIn("did not produce a finite objective", message)
+
+
+class CapNoteAdviceTest(unittest.TestCase):
+    """R07-F06: a note may only advise a knob the verb the caller invoked actually takes.
+
+    ``_caller_stacklevel`` already put the note on the reader's own line, but its TEXT stayed
+    written for a direct ``optimize(...)``: routed through a structure verb it still opened with
+    "optimize()" and still advised ``delta=None``, which those verbs do not accept.
+    """
+
+    CAP_NOTE_MARKERS = ("max_its cap", "delta=None (documented", "rejected update")
+
+    def _cap_notes(self, call):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            call()
+        return [
+            str(entry.message)
+            for entry in caught
+            if any(marker in str(entry.message) for marker in self.CAP_NOTE_MARKERS)
+        ]
+
+    def _verbs(self):
+        import numpy as np
+
+        from mixle.inference import learn_bayesian_network, optimize
+        from mixle.inference.structure import learn_mixture_structure, learn_structure
+        from mixle.stats import GaussianEstimator, MixtureEstimator
+
+        pairs = [
+            (float(a), float(b))
+            for a, b in zip(
+                np.random.RandomState(0).normal(0, 1, 200), np.random.RandomState(1).normal(0, 1, 200), strict=True
+            )
+        ]
+        flat = list(np.random.RandomState(0).normal(0.0, 1.0, 300)) + [40.0]
+        return [
+            (
+                "optimize",
+                optimize,
+                lambda: optimize(
+                    flat,
+                    MixtureEstimator([GaussianEstimator(), GaussianEstimator()]),
+                    max_its=1,
+                    out=None,
+                    rng=np.random.RandomState(0),
+                ),
+            ),
+            ("learn_structure", learn_structure, lambda: learn_structure(pairs, max_its=1)),
+            ("learn_bayesian_network", learn_bayesian_network, lambda: learn_bayesian_network(pairs, max_its=1)),
+            (
+                "learn_mixture_structure",
+                learn_mixture_structure,
+                lambda: learn_mixture_structure(pairs, 2, restarts=1, seed=0, max_its=1),
+            ),
+        ]
+
+    def test_no_note_advises_a_knob_its_verb_does_not_accept(self):
+        import inspect
+
+        for name, function, call in self._verbs():
+            accepted = set(inspect.signature(function).parameters)
+            for note in self._cap_notes(call):
+                for knob in ("delta=None", "restarts=", "print_iter=", "track_best="):
+                    with self.subTest(verb=name, knob=knob):
+                        if knob.split("=")[0] not in accepted:
+                            self.assertNotIn(knob, note)
+
+    def test_the_direct_optimize_note_is_unchanged(self):
+        """The whole point of the fallback: a direct call still reads exactly as it always did."""
+        notes = self._cap_notes(self._verbs()[0][2])
+        capped = [note for note in notes if "max_its cap" in note]
+        self.assertTrue(capped)
+        self.assertTrue(capped[0].startswith("optimize() stopped at the max_its cap"))
+        self.assertIn("Raise max_its to fit to convergence, or pass delta=None", capped[0])
+
+    def test_a_forwarded_note_names_the_verb_the_caller_called(self):
+        import numpy as np
+
+        from mixle.inference import learn_bayesian_network
+
+        pairs = [
+            (float(a), float(b))
+            for a, b in zip(
+                np.random.RandomState(0).normal(0, 1, 200), np.random.RandomState(1).normal(0, 1, 200), strict=True
+            )
+        ]
+        capped = [n for n in self._cap_notes(lambda: learn_bayesian_network(pairs, max_its=1)) if "max_its cap" in n]
+        self.assertTrue(capped)
+        self.assertTrue(capped[0].startswith("learn_bayesian_network() stopped"))
+        self.assertNotIn("delta=None", capped[0])
+        # max_its IS accepted there, so that half of the advice survives.
+        self.assertIn("Raise max_its to fit to convergence.", capped[0])
+
+
+class UnidentifiedComponentRemedyTest(unittest.TestCase):
+    """R07-F07: the A-02 note's remedy is addressed to whoever can act on it.
+
+    ``restarts=`` and ``init='dirichlet'`` are knobs on the ESTIMATOR. The README's own
+    ``solve(teacher, inputs)`` one-liner fits a four-component mixture internally, so it raised this
+    note four to seven times, each advising two knobs the reader had no object to pass them to.
+    """
+
+    def _notes(self, call):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            call()
+        return [str(e.message) for e in caught if "less data than they have parameters" in str(e.message)]
+
+    def test_a_caller_who_built_the_estimator_is_told_which_knobs_to_turn(self):
+        from mixle.stats import MixtureEstimator
+
+        rows = list(np.random.RandomState(0).normal(0.0, 1.0, 400)) + [40.0]
+        notes = self._notes(
+            lambda: optimize(
+                rows,
+                MixtureEstimator([GaussianEstimator(), GaussianEstimator()]),
+                max_its=60,
+                out=None,
+                rng=np.random.RandomState(0),
+            )
+        )
+        self.assertTrue(notes)
+        self.assertIn("restarts= or MixtureEstimator(..., init='dirichlet')", notes[0])
+        self.assertNotIn("built this mixture itself", notes[0])
+
+    def test_a_caller_who_did_not_is_told_that_instead(self):
+        from mixle.task import solve
+
+        words = ["alpha beta", "gamma delta", "beta gamma", "delta alpha"]
+        inputs = [words[index % len(words)] for index in range(160)]
+
+        def teacher(text):
+            return "first" if text.startswith(("alpha", "beta")) else "second"
+
+        notes = self._notes(lambda: solve(teacher, inputs, seed=0, student="generative"))
+        self.assertTrue(notes, "expected solve()'s internal mixture to raise the note")
+        self.assertIn("solve() built this mixture itself", notes[0])
+        # The reader is pointed at something they can actually do, and not at a bare `restarts=`
+        # they have no object to pass.
+        self.assertIn("more data, or fitting the mixture directly", notes[0])
+        self.assertNotIn("restarts=", notes[0])
+
+    def test_the_observation_half_is_identical_either_way(self):
+        """Only the remedy is conditional; what the fit did is reported the same to both callers."""
+        from mixle.stats import MixtureEstimator
+
+        rows = list(np.random.RandomState(0).normal(0.0, 1.0, 400)) + [40.0]
+        notes = self._notes(
+            lambda: optimize(
+                rows,
+                MixtureEstimator([GaussianEstimator(), GaussianEstimator()]),
+                max_its=60,
+                out=None,
+                rng=np.random.RandomState(0),
+            )
+        )
+        self.assertIn("component_row_mass", notes[0])
+        self.assertIn("EM converges to such a solution rather than failing at it", notes[0])
+
+
+@unittest.skipUnless(HAS_TORCH, "the default Bayesian-optimization surrogate is the torch GP")
+class SurrogateRepairDisclosureTest(unittest.TestCase):
+    """R07-F05: a repaired surrogate is disclosed on a route the DOE caller can reach.
+
+    The GP records ridging its own covariance under ``numerical_repairs()``, and on a routine
+    ``minimize`` run it does so: measured on this objective, 11 of 12 seeds need escalated jitter.
+    ``propose_next`` fits the surrogate internally and returns only the point, so that record died
+    with the local ``gp`` and ``BayesOptResult`` had no route to it.
+    """
+
+    BOUNDS = [(-5.0, 5.0), (-5.0, 5.0)]
+
+    @staticmethod
+    def _objective(point):
+        return float((point[0] - 1.0) ** 2 + (point[1] + 2.0) ** 2)
+
+    def _run(self, seed, **kwargs):
+        from mixle.doe import minimize
+
+        settings = {"n_init": 5, "n_iter": 15, "seed": seed}
+        settings.update(kwargs)
+        return _quiet(lambda: minimize(self._objective, self.BOUNDS, **settings))
+
+    def test_the_repair_the_surrogate_applied_reaches_the_result(self):
+        disclosed = [seed for seed in range(12) if self._run(seed).numerical_repairs()]
+        # The escalation is routine on this objective, not exotic; the point of the test is that
+        # whenever it happens the caller can see it.
+        self.assertGreaterEqual(len(disclosed), 8)
+        repairs = self._run(disclosed[0]).numerical_repairs()
+        self.assertTrue(any("covariance-ridged" in entry for entry in repairs))
+
+    def test_a_run_that_needed_no_repair_reports_none(self):
+        """An empty tuple, not a missing attribute -- the channel is always there to be read."""
+        from mixle.doe import minimize
+
+        result = _quiet(lambda: minimize(lambda p: float(abs(p[0])), [(-1.0, 1.0)], n_init=3, n_iter=3, seed=0))
+        self.assertEqual(result.numerical_repairs(), ())
+        self.assertEqual(result.surrogate_repairs, ())
+
+    def test_the_channel_is_spelled_the_way_the_rest_of_the_library_spells_it(self):
+        from mixle.doe.bayesopt import BayesOptResult
+
+        result = self._run(0)
+        self.assertIsInstance(result, BayesOptResult)
+        self.assertEqual(result.numerical_repairs(), result.surrogate_repairs)
+        # Duplicates are collapsed: the same ridging reported by every iteration's fit is one fact.
+        self.assertEqual(len(set(result.numerical_repairs())), len(result.numerical_repairs()))
+
+
+class TerminalStateRoutesTest(unittest.TestCase):
+    """R05-F01 follow-on: every posterior route honours ``terminal_states``.
+
+    ``seq_posterior`` was repaired for the terminal-state restriction; ``latent_posterior`` (and so
+    ``.marginals()``, ``.mode()``, ``.sample()`` and ``posterior_predictive``, which all read the
+    object it returns) and ``viterbi`` still ran the unrestricted recursion. Checked against
+    enumeration of the admissible paths, which is the definition of both quantities.
+    """
+
+    START = [0.6, 0.4]
+    TRANSITIONS = [[0.8, 0.2], [0.3, 0.7]]
+    TERMINAL = [1]
+    SEQUENCES = ([-1.8, 0.1, 2.2, -1.9], [-1.0, 2.0, 2.5, 2.4], [2.0, 2.0, 2.0])
+
+    def _components(self):
+        from mixle.stats import GaussianDistribution
+
+        return [GaussianDistribution(mu=-2.0, sigma2=1.0), GaussianDistribution(mu=2.0, sigma2=1.0)]
+
+    def _model(self, terminal):
+        from mixle.stats.latent.hidden_markov import HiddenMarkovModelDistribution
+
+        extra = {"terminal_states": self.TERMINAL} if terminal else {}
+        return HiddenMarkovModelDistribution(self._components(), w=self.START, transitions=self.TRANSITIONS, **extra)
+
+    def _by_enumeration(self, sequence, terminal):
+        """(smoothed marginals, most probable path) over the paths the model actually admits."""
+        import itertools
+
+        components = self._components()
+        start = np.asarray(self.START)
+        transitions = np.asarray(self.TRANSITIONS)
+        joint = np.zeros((len(sequence), 2))
+        evidence = 0.0
+        best_path, best_mass = None, -1.0
+        for path in itertools.product(range(2), repeat=len(sequence)):
+            # Only the LAST position may be terminal.
+            if terminal and any(state in self.TERMINAL for state in path[:-1]):
+                continue
+            mass = start[path[0]] * np.exp(components[path[0]].log_density(sequence[0]))
+            for t in range(1, len(sequence)):
+                mass *= transitions[path[t - 1], path[t]] * np.exp(components[path[t]].log_density(sequence[t]))
+            evidence += mass
+            if mass > best_mass:
+                best_mass, best_path = mass, list(path)
+            for t, state in enumerate(path):
+                joint[t, state] += mass
+        return joint / evidence, best_path
+
+    def test_every_route_matches_enumeration_with_and_without_the_restriction(self):
+        for terminal in (True, False):
+            for sequence in self.SEQUENCES:
+                with self.subTest(terminal_states=terminal, sequence=tuple(sequence)):
+                    model = self._model(terminal)
+                    marginals, best_path = self._by_enumeration(sequence, terminal)
+                    posterior = model.latent_posterior(sequence)
+                    np.testing.assert_allclose(np.asarray(posterior.marginals()), marginals, atol=1e-12)
+                    self.assertEqual(list(posterior.mode()), best_path)
+                    self.assertEqual(list(model.viterbi(sequence)), best_path)
+
+    def test_the_restriction_actually_changes_the_answer_here(self):
+        """Otherwise the test above would pass on a model that ignores terminal_states."""
+        sequence = self.SEQUENCES[0]
+        restricted, restricted_path = self._by_enumeration(sequence, True)
+        unrestricted, unrestricted_path = self._by_enumeration(sequence, False)
+        self.assertGreater(np.abs(restricted - unrestricted).max(), 0.5)
+        self.assertNotEqual(restricted_path, unrestricted_path)
+
+    def test_a_sampled_path_never_visits_a_terminal_state_early(self):
+        """`.sample()` and `posterior_predictive` read the same object, so the restriction reaches them."""
+        model = self._model(True)
+        sequence = self.SEQUENCES[0]
+        posterior = model.latent_posterior(sequence)
+        for seed in range(25):
+            path = list(posterior.sample(np.random.RandomState(seed)))
+            self.assertEqual(len(path), len(sequence))
+            for state in path[:-1]:
+                self.assertNotIn(state, self.TERMINAL)
+        drawn = model.posterior_predictive(sequence, seed=0)
+        self.assertEqual(len(drawn), len(sequence))
+
+
+class SpellingConsistencyTest(unittest.TestCase):
+    """Four pass-02 minors, all the same shape: one spelling of a thing works and its twin does not."""
+
+    def test_an_encoded_batch_is_counted_whether_it_is_a_list_or_a_tuple(self):
+        """R02-F10: the zero-row refusal never fired for a tuple of chunks."""
+        from mixle.stats import GaussianDistribution, GaussianEstimator
+
+        encoded = GaussianDistribution(mu=0.0, sigma2=1.0).dist_to_encoder().seq_encode([1.0, 2.0, 3.0])
+        for empty in ([], ()):
+            with self.subTest(spelling=type(empty).__name__):
+                with self.assertRaises(ValueError) as caught:
+                    optimize(None, GaussianEstimator(), enc_data=empty, max_its=2, out=None)
+                self.assertIn("enc_data carries zero rows", str(caught.exception))
+        for chunks in ([(3, encoded)], ((3, encoded),)):
+            with self.subTest(spelling=type(chunks).__name__):
+                fitted = _quiet(
+                    lambda chunks=chunks: optimize(None, GaussianEstimator(), enc_data=chunks, max_its=3, out=None)
+                )
+                # Not just "it fits": the receipt used to say n_observations=None for the tuple.
+                self.assertEqual(fitted.fit_provenance().n_observations, 3)
+
+    def test_every_ppl_route_takes_the_same_rng_spellings(self):
+        """R02-F12: laplace, vi and map kept a RandomState-only check the four samplers had dropped."""
+        from mixle.ppl import Normal, free
+
+        rows = list(np.random.RandomState(0).normal(5.0, 1.0, 60))
+        spellings = (7, np.random.default_rng(7), np.random.RandomState(7), None)
+        for how in ("laplace", "vi", "map", "mcmc", "ensemble"):
+            for rng in spellings:
+                with self.subTest(how=how, rng=type(rng).__name__):
+                    _quiet(lambda how=how, rng=rng: Normal(free, free).fit(rows, how=how, rng=rng))
+        # A bool is still refused everywhere -- it is not an integer seed.
+        for how in ("laplace", "map", "mcmc"):
+            with self.subTest(how=how, rng="bool"):
+                with self.assertRaises(TypeError):
+                    _quiet(lambda how=how: Normal(free, free).fit(rows, how=how, rng=True))
+
+    def test_initialize_takes_what_seq_initialize_takes(self):
+        """R02-F13: an int or Generator died on a bare AttributeError from inside the loop."""
+        from mixle.stats import GaussianEstimator
+        from mixle.stats.compute.sequence import initialize
+
+        for rng in (7, np.random.RandomState(7), np.random.default_rng(7)):
+            with self.subTest(rng=type(rng).__name__):
+                initialize([1.0, 2.0, 3.0], GaussianEstimator(), rng=rng)
+        with self.assertRaises(TypeError) as caught:
+            initialize([1.0, 2.0, 3.0], GaussianEstimator(), rng="not an rng")
+        self.assertIn("initialize()", str(caught.exception))  # names the route, not just the loop
+
+    def test_the_gp_reports_the_largest_repair_not_the_last(self):
+        """R02-F14: a later, smaller ridging overwrote a bigger earlier one."""
+        from mixle.models.gaussian_process import GaussianProcessRegressor
+
+        model = GaussianProcessRegressor.__new__(GaussianProcessRegressor)
+        model._jitter_applied = 0.0
+        model.jitter = 1.0e-12
+        for applied in (1.0e-2, 1.0e-10):
+            model._jitter_applied = max(model._jitter_applied, applied)
+        repairs = GaussianProcessRegressor.numerical_repairs(model)
+        self.assertTrue(repairs)
+        self.assertIn("0.01", repairs[0])
+
+
+class ProposeAdviceTest(unittest.TestCase):
+    """R02-F11: the advised record count was itself refused, at every holdout that binds."""
+
+    ROWS = list(np.random.RandomState(0).normal(0.0, 1.0, 40))
+
+    def _advice(self, n, holdout):
+        from mixle import propose
+
+        with self.assertRaises(ValueError) as caught:
+            _quiet(lambda: propose(self.ROWS[:n], holdout=holdout))
+        return str(caught.exception)
+
+    def test_the_advised_count_is_one_that_actually_fits(self):
+        import re
+
+        from mixle import propose
+
+        for holdout in (0.8, 0.5, 0.25, 0.01):
+            with self.subTest(holdout=holdout):
+                advised = int(re.search(r"at least (\d+) records", self._advice(3, holdout)).group(1))
+                _quiet(lambda n=advised, h=holdout: propose(self.ROWS[:n], holdout=h))  # must not raise
+                # ...and it is the SMALLEST such count, not merely a safe one.
+                with self.assertRaises(ValueError):
+                    _quiet(lambda n=advised, h=holdout: propose(self.ROWS[: n - 1], holdout=h))
+
+    def test_lower_holdout_is_offered_only_where_holdout_binds(self):
+        """`n_val` is `max(2, round(n*holdout))`, so at a small holdout it is the floor that binds."""
+        self.assertIn("lower holdout", self._advice(6, 0.8))
+        self.assertNotIn("lower holdout", self._advice(3, 0.01))
+
+
+class ScalarCdfAndRaggedColumnsTest(unittest.TestCase):
+    """R02-F15 and R02-F16: two more raw failures on documented surfaces."""
+
+    Y = np.array([0.1, 0.2, 0.3])
+
+    def test_a_scalar_only_cdf_is_accepted_however_it_wraps_its_answer(self):
+        """R02-F15: a length-1 list or array per call died on numpy's own TypeError."""
+        from mixle.inference.calibration import pit_values
+
+        for label, cdf in (
+            ("a bare float", lambda v: 0.5),
+            ("a length-1 list", lambda v: [0.5]),
+            ("a length-1 array", lambda v: np.array([0.5])),
+            ("a vectorized cdf", lambda v: np.full(np.shape(v), 0.5) if np.ndim(v) else 0.5),
+        ):
+            with self.subTest(cdf=label):
+                np.testing.assert_allclose(np.asarray(pit_values(self.Y, cdf)), [0.5, 0.5, 0.5])
+
+    def test_a_cdf_that_returns_the_wrong_count_is_still_refused(self):
+        """The repair accepts a one-element container, not any container."""
+        from mixle.inference.calibration import pit_values
+
+        with self.assertRaises((TypeError, ValueError)):
+            pit_values(self.Y, lambda v: [0.4, 0.6])
+
+    def test_dependency_gain_refuses_ragged_columns(self):
+        """R02-F16: `zip` truncated to the shorter column and scored the remainder as a gain."""
+        from mixle.inference.structure import dependency_gain
+        from mixle.stats import GaussianEstimator
+
+        with self.assertRaises(ValueError) as caught:
+            dependency_gain([1.0, 2.0, 3.0], [0.5, 0.6], GaussianEstimator())
+        message = str(caught.exception)
+        self.assertIn("3 parent(s) and 2 child value(s)", message)
+        # Equal columns still score, unchanged.
+        self.assertTrue(np.isfinite(dependency_gain([1.0, 2.0, 3.0], [0.5, 0.6, 0.7], GaussianEstimator())))
+
+
+class PoissonQuantileTrustTest(unittest.TestCase):
+    """The P01-F11 repair fired on NaN alone, and NaN is not the only way scipy gets this wrong.
+
+    Found while running the suite against the minimum supported scipy: at ``lam=1e15`` scipy 1.16.0
+    returns a FINITE ``999999999979213.0`` -- about 21000 counts below the median, CDF 0.4997 --
+    where 1.17.1 returns NaN. Trusting a finite answer broke ``quantile``'s own contract on
+    whichever scipy happened to be installed, and the shipped test asserted the NaN as a precondition
+    so it failed on the scipy WITHOUT the defect.
+    """
+
+    LAMBDAS = (0.5, 4.0, 100.0, 1.0e6, 1.0e12, 1.0e15)
+    LEVELS = (0.01, 0.25, 0.5, 0.9, 0.999)
+
+    def test_the_contract_holds_at_every_rate_whatever_scipy_answers(self):
+        from mixle.stats import PoissonDistribution
+
+        for lam in self.LAMBDAS:
+            law = PoissonDistribution(lam)
+            for q in self.LEVELS:
+                with self.subTest(lam=lam, q=q):
+                    quantile = law.quantile(q)
+                    self.assertTrue(np.isfinite(quantile))
+                    # "the smallest k with P(X <= k) >= q" -- both halves.
+                    self.assertGreaterEqual(law.cdf(quantile), q)
+                    if quantile > 0.0:
+                        self.assertLess(law.cdf(quantile - 1.0), q)
+
+    def test_a_wrong_finite_answer_from_scipy_is_rejected_like_a_nan(self):
+        """Directly: the validator, not the version, is what decides."""
+        from mixle.stats import PoissonDistribution
+
+        law = PoissonDistribution(1.0e15)
+        self.assertFalse(law._quantile_holds(999999999979213.0, 0.5))  # the scipy 1.16.0 answer
+        self.assertFalse(law._quantile_holds(float("nan"), 0.5))
+        self.assertFalse(law._quantile_holds(-1.0, 0.5))
+        self.assertTrue(law._quantile_holds(law._quantile_by_bisection(0.5), 0.5))
+
+    def test_small_rates_still_agree_with_scipy_exactly(self):
+        """The validator must not push ordinary rates onto the bisection path with a different answer."""
+        import scipy.stats as ss
+
+        from mixle.stats import PoissonDistribution
+
+        for lam in (0.5, 4.0, 100.0):
+            for q in self.LEVELS:
+                with self.subTest(lam=lam, q=q):
+                    self.assertEqual(PoissonDistribution(lam).quantile(q), float(ss.poisson.ppf(q, lam)))
