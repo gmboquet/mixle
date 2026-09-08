@@ -345,6 +345,14 @@ release (`release-checklists/0.8.2-followups.md`).
 - `HeterogeneousBayesianNetwork.seq_log_density` scores a record it cannot evaluate as `-inf`, the
   way `log_density` already did. The same NaN field read as an impossible record on one route and
   turned the sum or mean of a whole batch into NaN on the other (R02-F09).
+- `learn_bayesian_network` reads a DataFrame as its rows. Iterating one yields its column NAMES, so
+  the search fitted those -- a one-field categorical over two strings, with a receipt claiming
+  `n_observations=2` whatever the frame held, and an empty frame fitted as a two-record corpus
+  rather than named as an empty one. It now takes the same conversion `optimize` already applied
+  (R02-F07).
+- Printing an unfitted vector `free(d, name=...)` handle, or any model holding one, no longer raises
+  `AttributeError`: a parameter handle carries a spec rather than a family, and inspecting what you
+  built must not be the one operation that fails (R02-F06).
 - The test suite passes on a base install (numpy and scipy only). Nine cases in the 0.8.2 repair
   tests imported pandas or torch unconditionally, and the arbitrary-precision reference cases in
   `vmf_test` imported mpmath at module scope, so the minimum-versions tier failed on the repairs

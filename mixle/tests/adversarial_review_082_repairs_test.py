@@ -18,6 +18,7 @@ import numpy as np
 from mixle.inference import learn_bayesian_network, optimize
 from mixle.stats import GaussianDistribution, GaussianEstimator
 from mixle.stats.compute.sequence import seq_estimate
+from mixle.utils.optional_deps import HAS_PANDAS
 
 
 def _quiet(callable_):
@@ -187,6 +188,65 @@ class ZeroAcceptanceEverySamplerTest(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("mcmc accepted none", message)
         self.assertNotIn("step_size", message)  # HMC's knob, not a random walk's
+
+
+class UnfittedHandleReprTest(unittest.TestCase):
+    """R02-F06: printing a model is how a reader inspects it, and it raised AttributeError."""
+
+    def test_a_vector_free_handle_and_the_models_holding_it_print(self):
+        from mixle.ppl import Categorical, DiagGaussian, Normal, free
+
+        handle = free(5, name="v")
+        self.assertIn("free(5", repr(handle))
+        self.assertIn("name='v'", repr(handle))
+        self.assertIn("free(4", repr(free(4)))  # unnamed
+        for model in (
+            DiagGaussian(5, mean=handle, var=np.full(5, 0.25)),
+            Normal(free(1, name="m1"), 1.0),
+            Categorical(free(3, name="p")),
+        ):
+            with self.subTest(model=type(model).__name__):
+                text = repr(model)
+                self.assertTrue(text.startswith("RV("))
+                self.assertIn("free(", text)
+
+    def test_a_fitted_model_prints_as_it_always_did(self):
+        from mixle.ppl import DiagGaussian, free
+
+        fitted = _quiet(
+            lambda: DiagGaussian(5, mean=free(5, name="v"), var=np.full(5, 0.25)).fit([[0.0] * 5] * 10, how="map")
+        )
+        self.assertIn("RV(bound=", repr(fitted))
+
+
+@unittest.skipUnless(HAS_PANDAS, "pandas not installed; pip install mixle[pandas]")
+class NetworkFromAFrameTest(unittest.TestCase):
+    """R02-F07: a DataFrame iterates as its column NAMES, and the search fitted those."""
+
+    @staticmethod
+    def _frame(rows):
+        import pandas as pd
+
+        rng = np.random.RandomState(0)
+        return pd.DataFrame({"a": rng.randint(0, 3, rows).astype(float), "b": rng.normal(0, 1, rows)})
+
+    def test_an_empty_frame_is_named_as_an_empty_corpus(self):
+        import pandas as pd
+
+        with self.assertRaises(ValueError) as caught:
+            learn_bayesian_network(pd.DataFrame({"a": [], "b": []}))
+        self.assertIn("received no records", str(caught.exception))
+
+    def test_a_frame_is_fitted_as_its_rows_and_matches_the_same_table_as_records(self):
+        frame = self._frame(300)
+        from_frame = _quiet(lambda: learn_bayesian_network(frame))
+        rows = [tuple(row) for row in frame.itertuples(index=False, name=None)]
+        from_rows = _quiet(lambda: learn_bayesian_network(rows))
+        self.assertEqual(from_frame.fit_provenance().n_observations, 300)
+        self.assertEqual(
+            [factor.parents for factor in from_frame.factors],
+            [factor.parents for factor in from_rows.factors],
+        )
 
 
 if __name__ == "__main__":

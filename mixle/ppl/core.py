@@ -3268,6 +3268,18 @@ class RandomVariable:
             return f"RV(bound={self._dist!r})"
         inner = ", ".join("free" if _is_free(a) else repr(a) for a in self._args)
         nm = f", name={self._name!r}" if self._name else ""
+        if self._family is None:
+            # A ``free(d, name=...)`` parameter handle carries a spec, not a family, so printing one
+            # -- or any model holding one, which is every unfitted vector model -- died on
+            # ``None.name`` (R02-F06). Printing a model is how a reader inspects what they built,
+            # and it must not be the one operation that raises.
+            if self._kind == "param" and self._args:
+                spec = self._args[0]
+                width = getattr(spec, "dim", None)
+                width = getattr(spec, "n", width) if width is None else width
+                shape = "" if width is None else str(width)
+                return "free(%s%s)" % (shape, nm.replace(", name=", ", name=", 1) if self._name else "")
+            return f"RV({self._kind}({inner}){nm})"
         return f"RV({self._family.name}({inner}){nm})"
 
 
