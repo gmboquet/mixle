@@ -240,15 +240,21 @@ jobs:
     # shard 2 -- and 1124-2313 s on shard 3, whose worst green completion left the 2700 s budget only
     # 1.17x headroom while the other three had 3.4-5.2x. That is not one budget, it is one lane
     # gambling every run, and it lost twice (A-09). Two things move together: the shard split is now
-    # cost-balanced in conftest (`SHARD_OVERRIDES_4`) and this budget goes to 3600 s, still well inside
-    # the 5400 s ceiling the tier runner enforces. Measured on the first run of both changes together
-    # (34323777863, all four shards green): 1049 / 775 / 813 / 536 s, so the tightest lane now has
-    # 3.4x headroom and the loosest 6.7x, against 1.17x and 5.2x before. That is the headroom the core
-    # lane was re-baselined to on 2026-08-08, and it is now the same guard on all four shards rather
-    # than four different ones. `timeout-minutes` rises with the budget so the job deadline stays
-    # above it rather than pre-empting it.
+    # cost-balanced in conftest (`SHARD_OVERRIDES_4`) and this budget goes to 4200 s, inside the 5400 s
+    # ceiling the tier runner enforces. Two green runs of the rebalanced split (34323777863 and
+    # 34325609184) give 1049 / 775 / 813 / 536 s and 1663 / 543 / 817 / 802 s. Priced the way the core
+    # lane was on 2026-08-08 -- budget over the FASTEST observed completion, so the tripwire still
+    # trips on a real multiplicative regression -- that is 4.0x on the tightest lane and 7.8x on the
+    # loosest, against 2.40x and 8.0x before; the slowest run of the tightest lane still finished with
+    # 2.5x to spare, where the old shard 3's slowest green run had 1.17x.
+    #
+    # Those two runs also measure the variance directly, which no single run can: shard 0's log,
+    # timed at every progress decile, is a flat 1.58-1.61x slower in the second run than the first on
+    # identical work. That is a runner draw, not a regression, and it is the whole reason a lane needs
+    # multiples rather than a tight fit. `timeout-minutes` stays above the budget rather than
+    # pre-empting it.
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    timeout-minutes: 80
     strategy:
       fail-fast: false
       matrix:
@@ -273,7 +279,7 @@ jobs:
           python scripts/run_test_tier.py \
             --tier full \
             --candidate-sha "$GITHUB_SHA" \
-            --budget-seconds 3600 \
+            --budget-seconds 4200 \
             --receipt full-py3.12-shard${{ matrix.shard }}.json \
             -- -n auto --num-shards 4 --shard-id ${{ matrix.shard }} --cov --cov-report=
       - name: Upload shard coverage and receipt
