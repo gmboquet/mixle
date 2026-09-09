@@ -1,0 +1,9 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "command": "cd . && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD <venv>/bin/python -m pytest mixle/tests/public_api_manifest_test.py mixle/tests/maturity_manifest_test.py mixle/tests/maturity_registry_test.py mixle/tests/schema_manifest_test.py mixle/tests/stable_signature_manifest_test.py -p no:randomly -q -m '' -n 0 | tail -1",
+ "date": "2026-09-09",
+ "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "gate": "Public API, maturity, ownership, and serialization inventories",
+ "result": "34 passed, 2 subtests passed across public_api_manifest, maturity_manifest, maturity_registry, schema_manifest and stable_signature_manifest tests"
+}

@@ -1,0 +1,10 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "command": "git fetch -q --tags origin; echo -n 'remote v0.8.2 refs: '; git ls-remote --tags origin 'v0.8.2*' | wc -l | tr -d ' '; echo -n 'existing v0.8.* tags: '; git ls-remote --tags origin 'v0.8.*' | grep -v '\\^{}' | awk '{print $2}' | tr '\\n' ' '",
+ "date": "2026-09-09",
+ "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "gate": "No pre-existing `v0.8.0` tag",
+ "note": "The gate is named for 0.8.0 because it was written for that checklist; what it checks here is that this release's own tag does not already exist.",
+ "result": "0 refs match v0.8.2* on origin; the only v0.8.* tags are refs/tags/v0.8.0 and refs/tags/v0.8.1, from earlier release lines"
+}

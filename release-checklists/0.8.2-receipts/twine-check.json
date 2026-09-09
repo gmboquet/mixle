@@ -1,0 +1,10 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "command": "$SC/buildenv/bin/twine --version | head -1; $SC/buildenv/bin/twine check $SC/dist-a/mixle-0.8.2-py3-none-any.whl $SC/dist-a/mixle-0.8.2.tar.gz 2>&1 | sed 's#/.*/gatework/##'; echo EXIT=$?",
+ "date": "2026-09-09",
+ "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "gate": "`twine check`",
+ "note": "LOCAL, NOT HOSTED: twine check appears once in CI, in publish.yml, which has not run for this candidate.",
+ "result": "twine 7.0.0 (readme-renderer 45.0): 2 artifacts checked, both PASSED, exit 0"
+}

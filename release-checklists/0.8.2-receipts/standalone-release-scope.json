@@ -1,0 +1,9 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "command": "cd $SC/whlx && unzip -oq $SC/dist-a/mixle-0.8.2-py3-none-any.whl && echo -n 'top_level: ' && tr '\\n' ' ' < mixle-0.8.2.dist-info/top_level.txt && echo && echo -n 'Requires-Dist lines: ' && grep -c '^Requires-Dist' mixle-0.8.2.dist-info/METADATA && echo -n 'sibling mixle-* deps: ' && grep -icE '^Requires-Dist.*(mixle-|mixle_)' mixle-0.8.2.dist-info/METADATA; cd . && sed -n '14,17p' docs/family-release.rst",
+ "date": "2026-09-09",
+ "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "gate": "Standalone release scope",
+ "result": "the 0.8.2 wheel's top_level.txt holds exactly 1 entry ('mixle'); METADATA carries 93 Requires-Dist lines, 0 of which name any sibling mixle-* project; docs/family-release.rst states the standalone scope for 0.8.2 by name"
+}

@@ -1,0 +1,10 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "command": "python3 -c \"import json;d=json.load(open('$SC/check-runs.json'));r=[x for p in d for x in p['check_runs']];sel=[x for x in r if x['name'].startswith('optional extras') and x['conclusion']!='cancelled'];print('\\n'.join('%s: %s/%s (id=%s)' % (x['name'],x['status'],x['conclusion'],x['id']) for x in sorted(sel,key=lambda z:z['name'])))\"",
+ "date": "2026-09-09",
+ "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "gate": "Independent estimator parity",
+ "note": "Shard 1 failed on the previous tip with two assertions; both were tests left pinning contracts 0.8.2 deliberately changed (P08-F17 and P02-F03), repaired in commit 564dd307. Re-obtained on the release tip by a second explicit dispatch of tests.yml, so this lane's evidence is exact-tip rather than inherited from an earlier commit.",
+ "result": "both 'optional extras / py3.12' shards are completed/success on this SHA (ids 102302521671 and 102302521505)"
+}

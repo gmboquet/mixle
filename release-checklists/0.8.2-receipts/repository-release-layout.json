@@ -1,0 +1,9 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "command": "PYTHONPATH=. <venv>/bin/python -m pytest mixle/tests/repo_hygiene_scan_test.py -p no:randomly -q -m '' -n 0",
+ "date": "2026-09-09",
+ "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "gate": "Repository release layout",
+ "result": "2 passed in 1.88s (1 test file(s): repo_hygiene_scan_test.py)"
+}

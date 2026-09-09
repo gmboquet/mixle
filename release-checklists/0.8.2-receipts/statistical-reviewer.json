@@ -1,0 +1,10 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "command": "echo -n 'audit lines: '; awk 'END{print NR}' release-checklists/inference-stats-audit-2026-08-08.md; echo -n 'pass sections: '; grep -cE '^## Pass-[0-9]+ status' release-checklists/inference-stats-audit-2026-08-08.md",
+ "date": "2026-09-09",
+ "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "gate": "Statistical reviewer",
+ "note": "The audit is retained from the 0.8.0/0.8.1 campaign; no new statistical review was commissioned for this patch release.",
+ "result": "release-checklists/inference-stats-audit-2026-08-08.md is present, 484 lines, recording 6 '## Pass-N status' sections"
+}

@@ -1,0 +1,10 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "command": "gh api repos/gmboquet/mixle/commits/f9c8bc8fe73a62153a3239cb8bf5cda14b2a758e/check-runs --paginate --jq '.check_runs[]|select(.name==\"hardware / MPI and torchrun\")|\"\\(.status)/\\(.conclusion)  id=\\(.id)\"'",
+ "date": "2026-09-09",
+ "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "gate": "Multiprocessing, Dask, and torchrun",
+ "note": "Same dispatch-only gating as the numerical lane; obtained by the same explicit dispatch on this tip. Re-obtained on the release tip by a second explicit dispatch of tests.yml, so this lane's evidence is exact-tip rather than inherited from an earlier commit.",
+ "result": "the 'hardware / MPI and torchrun' lane is completed/success on this SHA (check run 102302521365)"
+}

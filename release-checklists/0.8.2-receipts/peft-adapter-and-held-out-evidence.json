@@ -1,0 +1,9 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "command": "PYTHONPATH=. <venv>/bin/python examples/peft_lora_grad_leaf.py 2>&1 | tail -5",
+ "date": "2026-09-09",
+ "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "gate": "PEFT adapter and held-out evidence",
+ "result": "examples/peft_lora_grad_leaf.py exits 0 against peft-internal-testing/tiny-random-gpt2 at revision 2f18a2874922d4cc4777cdf9fbf66cfa057a691a: base weight drift 0.0, 10 of 10 LoRA adapter tensors moved, held-out mean log-density improves from -55.1743 to -51.2216"
+}

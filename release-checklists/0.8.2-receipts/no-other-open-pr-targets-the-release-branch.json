@@ -1,0 +1,9 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "command": "gh pr list --repo gmboquet/mixle --base release/0.8.2 --state open --json number | tr -d '\\n'; echo; echo EXIT=$?",
+ "date": "2026-09-09",
+ "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "gate": "No other open PR targets the release branch",
+ "result": "gh pr list --base release/0.8.2 --state open returns [] (0 open pull requests), exit 0"
+}
