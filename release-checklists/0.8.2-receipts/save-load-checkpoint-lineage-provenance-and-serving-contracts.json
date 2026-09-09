@@ -1,9 +1,0 @@
-{
- "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "1bcd802636b03174ab99098aa361d754c0ed5a7b",
- "command": "PYTHONPATH=. <venv>/bin/python -m pytest mixle/tests/artifact_atomic_write_test.py mixle/tests/benchmark_provenance_test.py mixle/tests/checkpoint_test.py mixle/tests/cross_version_fixtures_test.py mixle/tests/lineage_test.py mixle/tests/provenance_replay_test.py mixle/tests/provenance_test.py mixle/tests/security_test.py mixle/tests/serving_test.py -p no:randomly -q -m '' -n 0",
- "date": "2026-09-09",
- "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
- "gate": "Save/load, checkpoint, lineage, provenance, and serving contracts",
- "result": "162 passed, 3 warnings, 8 subtests passed in 10.32s (9 test file(s): artifact_atomic_write_test.py, benchmark_provenance_test.py, checkpoint_test.py, cross_version_fixtures_test.py, lineage_test.py, provenance_replay_test.py, provenance_test.py, security_test.py, serving_test.py)"
-}

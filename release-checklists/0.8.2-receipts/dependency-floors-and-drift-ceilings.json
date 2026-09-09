@@ -1,9 +1,0 @@
-{
- "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "1bcd802636b03174ab99098aa361d754c0ed5a7b",
- "command": "cd . && PYTHONPATH=. <venv>/bin/python scripts/check_dependency_bounds.py; echo EXIT=$?; <venv>/bin/python -c \"import json;print('entries:',len(json.load(open('manifests/dependency_drift_policy.json'))['dependencies']))\"",
- "date": "2026-09-09",
- "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
- "gate": "Dependency floors and drift ceilings",
- "result": "printed 'runtime dependency bounds match reviewed drift policy', exit 0; manifests/dependency_drift_policy.json holds 35 dependency entries"
-}

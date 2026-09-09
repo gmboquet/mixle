@@ -1,9 +1,0 @@
-{
- "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "1bcd802636b03174ab99098aa361d754c0ed5a7b",
- "command": "for L in 'Supported' 'Optional (CI)' 'Tested, not CI-gated' 'Hardware-gated'; do printf '%s: ' \"$L\"; grep -cF \"**$L**\" docs/backend-support.rst; done",
- "date": "2026-09-09",
- "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
- "gate": "Support levels and bounded wording",
- "result": "docs/backend-support.rst declares exactly 4 support levels, each appearing once: Supported, Optional (CI), Tested not CI-gated, Hardware-gated"
-}
