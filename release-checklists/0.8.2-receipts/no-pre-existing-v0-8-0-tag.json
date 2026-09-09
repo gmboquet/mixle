@@ -1,6 +1,6 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "73c78a3f19c91da4ce47cc99ee25727d4d57432b",
+ "candidate_commit": "1bcd802636b03174ab99098aa361d754c0ed5a7b",
  "command": "git fetch -q --tags origin; echo -n 'remote v0.8.2 refs: '; git ls-remote --tags origin 'v0.8.2*' | wc -l | tr -d ' '; echo -n 'existing v0.8.* tags: '; git ls-remote --tags origin 'v0.8.*' | grep -v '\\^{}' | awk '{print $2}' | tr '\\n' ' '",
  "date": "2026-09-09",
  "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",

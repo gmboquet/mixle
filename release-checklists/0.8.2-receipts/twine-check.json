@@ -1,7 +1,7 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "73c78a3f19c91da4ce47cc99ee25727d4d57432b",
- "command": "/private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/gatework/buildenv/bin/twine --version | head -1; /private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/gatework/buildenv/bin/twine check /private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/gatework/dist-a/mixle-0.8.2-py3-none-any.whl /private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/gatework/dist-a/mixle-0.8.2.tar.gz 2>&1 | sed 's#/.*/gatework/##'; echo EXIT=$?",
+ "candidate_commit": "1bcd802636b03174ab99098aa361d754c0ed5a7b",
+ "command": "$SC/buildenv/bin/twine --version | head -1; $SC/buildenv/bin/twine check $SC/dist-a/mixle-0.8.2-py3-none-any.whl $SC/dist-a/mixle-0.8.2.tar.gz 2>&1 | sed 's#/.*/gatework/##'; echo EXIT=$?",
  "date": "2026-09-09",
  "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
  "gate": "`twine check`",

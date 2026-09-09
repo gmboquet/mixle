@@ -1,6 +1,6 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "73c78a3f19c91da4ce47cc99ee25727d4d57432b",
+ "candidate_commit": "1bcd802636b03174ab99098aa361d754c0ed5a7b",
  "command": "line-by-line review recorded in release-checklists/0.8.2-reviews/readme-review.md; machine checks from /tmp against a venv holding the 0.8.2 wheel built from this tree: `pytest --collect-only -m \"\"`, `base_dist_test._build_dists()`, `scripts/check_optional_extras.py`, and each of the seven fenced Python blocks executed (the five fragments re-run with the context their prose declares)",
  "date": "2026-09-09",
  "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",

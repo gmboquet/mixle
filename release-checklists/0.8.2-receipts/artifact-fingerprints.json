@@ -1,7 +1,7 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "73c78a3f19c91da4ce47cc99ee25727d4d57432b",
- "command": "shasum -a 256 /private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/gatework/dist-a/mixle-0.8.2-py3-none-any.whl /private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/gatework/dist-a/mixle-0.8.2.tar.gz | awk '{print $1, substr($2, match($2, /mixle-0/))}'; echo -n 'wheel bytes: '; wc -c < /private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/gatework/dist-a/mixle-0.8.2-py3-none-any.whl; echo -n 'sdist bytes: '; wc -c < /private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/gatework/dist-a/mixle-0.8.2.tar.gz",
+ "candidate_commit": "1bcd802636b03174ab99098aa361d754c0ed5a7b",
+ "command": "shasum -a 256 $SC/dist-a/mixle-0.8.2-py3-none-any.whl $SC/dist-a/mixle-0.8.2.tar.gz | awk '{print $1, substr($2, match($2, /mixle-0/))}'; echo -n 'wheel bytes: '; wc -c < $SC/dist-a/mixle-0.8.2-py3-none-any.whl; echo -n 'sdist bytes: '; wc -c < $SC/dist-a/mixle-0.8.2.tar.gz",
  "date": "2026-09-09",
  "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
  "gate": "Artifact fingerprints",

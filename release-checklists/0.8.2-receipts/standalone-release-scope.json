@@ -1,7 +1,7 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "73c78a3f19c91da4ce47cc99ee25727d4d57432b",
- "command": "cd /private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/gatework/whlx && unzip -oq /private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/gatework/dist-a/mixle-0.8.2-py3-none-any.whl && echo -n 'top_level: ' && tr '\\n' ' ' < mixle-0.8.2.dist-info/top_level.txt && echo && echo -n 'Requires-Dist lines: ' && grep -c '^Requires-Dist' mixle-0.8.2.dist-info/METADATA && echo -n 'sibling mixle-* deps: ' && grep -icE '^Requires-Dist.*(mixle-|mixle_)' mixle-0.8.2.dist-info/METADATA; cd /Users/grantboquet/mixle/mixle/.worktrees/release-082 && sed -n '14,17p' docs/family-release.rst",
+ "candidate_commit": "1bcd802636b03174ab99098aa361d754c0ed5a7b",
+ "command": "cd $SC/whlx && unzip -oq $SC/dist-a/mixle-0.8.2-py3-none-any.whl && echo -n 'top_level: ' && tr '\\n' ' ' < mixle-0.8.2.dist-info/top_level.txt && echo && echo -n 'Requires-Dist lines: ' && grep -c '^Requires-Dist' mixle-0.8.2.dist-info/METADATA && echo -n 'sibling mixle-* deps: ' && grep -icE '^Requires-Dist.*(mixle-|mixle_)' mixle-0.8.2.dist-info/METADATA; cd . && sed -n '14,17p' docs/family-release.rst",
  "date": "2026-09-09",
  "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
  "gate": "Standalone release scope",

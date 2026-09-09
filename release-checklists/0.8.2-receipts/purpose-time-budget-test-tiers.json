@@ -1,7 +1,7 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "73c78a3f19c91da4ce47cc99ee25727d4d57432b",
- "command": "python3 -c \"import json;d=json.load(open('/private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/check-runs.json'));r=[x for p in d for x in p['check_runs']];import re;names=sorted({x['name'] for x in r if re.search(r'core /|full /|optional extras|smoke /', x['name'])});print('\\n'.join('%s: %s' % (n, sorted({y['conclusion'] for y in r if y['name']==n and y['conclusion']!='cancelled'})) for n in names))\"",
+ "candidate_commit": "1bcd802636b03174ab99098aa361d754c0ed5a7b",
+ "command": "python3 -c \"import json;d=json.load(open('$SC/check-runs.json'));r=[x for p in d for x in p['check_runs']];import re;names=sorted({x['name'] for x in r if re.search(r'core /|full /|optional extras|smoke /', x['name'])});print('\\n'.join('%s: %s' % (n, sorted({y['conclusion'] for y in r if y['name']==n and y['conclusion']!='cancelled'})) for n in names))\"",
  "date": "2026-09-09",
  "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
  "gate": "Purpose/time-budget test tiers",
