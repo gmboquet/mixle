@@ -240,11 +240,13 @@ jobs:
     # shard 2 -- and 1124-2313 s on shard 3, whose worst green completion left the 2700 s budget only
     # 1.17x headroom while the other three had 3.4-5.2x. That is not one budget, it is one lane
     # gambling every run, and it lost twice (A-09). Two things move together: the shard split is now
-    # cost-balanced in conftest (`SHARD_OVERRIDES_4`), which takes the heaviest shard from 44% of the
-    # tier to 28%, and this budget goes to 3600 s -- ~4.3x the rebalanced median and ~2.4x its worst
-    # observed green completion, the same headroom the core lane was re-baselined to on 2026-08-08
-    # and still well inside the 5400 s ceiling the tier runner enforces. `timeout-minutes` rises with
-    # it so the job deadline stays above the budget rather than pre-empting it.
+    # cost-balanced in conftest (`SHARD_OVERRIDES_4`) and this budget goes to 3600 s, still well inside
+    # the 5400 s ceiling the tier runner enforces. Measured on the first run of both changes together
+    # (34323777863, all four shards green): 1049 / 775 / 813 / 536 s, so the tightest lane now has
+    # 3.4x headroom and the loosest 6.7x, against 1.17x and 5.2x before. That is the headroom the core
+    # lane was re-baselined to on 2026-08-08, and it is now the same guard on all four shards rather
+    # than four different ones. `timeout-minutes` rises with the budget so the job deadline stays
+    # above it rather than pre-empting it.
     runs-on: ubuntu-latest
     timeout-minutes: 70
     strategy:
