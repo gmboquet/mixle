@@ -79,15 +79,31 @@ class DegenerateMixtureTest(unittest.TestCase):
         _parity(self, model, [float(v) for v in rng.randn(300)], check_estep=False)  # host path handles
         # shared-object components through its own machinery; scoring parity is the fused claim here
 
-    def test_out_of_support_data_is_refused_at_the_shared_encoder_boundary(self):
-        """Truly-invalid data (negative Exponential draws) never REACHES scoring: the encoder both
-        paths share raises a ContractError. The fused path cannot diverge on data it never sees --
-        the boundary, not the kernel, owns this case (found by this panel's first draft, which
-        wrongly expected a -inf row)."""
+    def test_out_of_support_data_is_scored_minus_inf_by_both_paths(self):
+        """Out-of-support data now REACHES scoring, and both paths must agree that it is impossible.
+
+        This test used to assert that the shared encoder refused a negative Exponential draw. P02-F03
+        deliberately removed that refusal: the encoder admits out-of-support observations so a
+        mixture can encode one batch against every component, and the accumulator's own predicate is
+        what keeps them out of the sufficient statistics. So the row reaches the kernel after all,
+        and what this panel exists to check is that the fused path agrees with the host about it.
+
+        The test was left asserting the removed refusal, and never said so locally: it carries no
+        ``fast`` marker and the default ``addopts`` filter is ``-m fast``, so only the hosted
+        optional tier ran it.
+        """
         model = MixtureDistribution([ExponentialDistribution(1.0), ExponentialDistribution(2.0)], [0.5, 0.5])
-        with self.assertRaises(Exception) as ctx:
-            model.dist_to_encoder().seq_encode([1.0, -1.0])
-        self.assertIn("x >= 0", str(ctx.exception))
+        enc = model.dist_to_encoder().seq_encode([1.0, -1.0])
+        host = model.seq_log_density(enc)
+        self.assertTrue(np.isfinite(host[0]))
+        self.assertEqual(float(host[1]), float("-inf"))
+        # The scalar route says the same thing, which is what makes -inf a verdict rather than an
+        # artifact of one path (R02-F09's shape).
+        self.assertEqual(float(model.log_density(-1.0)), float("-inf"))
+        for parallel in (False, True):
+            fused = fc.fused_seq_log_density(model, enc, parallel=parallel)
+            np.testing.assert_allclose(fused[0], host[0], rtol=1e-12)
+            self.assertEqual(float(fused[1]), float("-inf"))
 
     def test_per_component_and_all_component_minus_inf_rows_match_host(self):
         """The -inf paths that genuinely reach the scorer: a category one component lacks (its

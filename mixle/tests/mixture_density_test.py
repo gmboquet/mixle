@@ -249,19 +249,39 @@ class ConditionalContractTest(unittest.TestCase):
         )
         self.assertEqual([part.training for part in module.modules()], modes_before)
 
-        class WrongShape(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.value = torch.nn.Parameter(torch.zeros(1))
+        def _module(shape):
+            class Scored(torch.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.value = torch.nn.Parameter(torch.zeros(1))
 
-            def log_density(self, x, y):
-                return self.value + torch.zeros((len(x), 1), device=x.device)
+                def log_density(self, x, y):
+                    return self.value + torch.zeros(shape(len(x)), device=x.device)
 
-        with self.assertRaisesRegex(RuntimeError, "one score per row"):
-            NeuralConditionalDensity(WrongShape(), m_steps=1).estimator().estimate(
-                None,
-                (np.zeros((2, 1)), np.zeros((2, 1)), np.ones(2)),
+            return Scored()
+
+        def _estimate(module):
+            return (
+                NeuralConditionalDensity(module, m_steps=1)
+                .estimator()
+                .estimate(
+                    None,
+                    (np.zeros((2, 1)), np.zeros((2, 1)), np.ones(2)),
+                )
             )
+
+        # An (N, 1) column IS one score per row, and P08-F17 made it acceptable: a scalar
+        # observation arrives as an (N, 1) batch, so the obvious module broadcasts to (N, 1) and was
+        # refused against a README promising that any module exposing log_density fits in one call.
+        # This test asserted the refusal that repair removed, and never ran locally to say so --
+        # it carries no `fast` marker, and the default `addopts` filter is `-m fast`.
+        for shape in (lambda n: (n, 1), lambda n: (n,)):
+            _estimate(_module(shape))
+        # A shape that is NOT one score per row is still refused, which is the contract this test
+        # exists to pin.
+        for shape in (lambda n: (n, 2), lambda n: ()):
+            with self.assertRaises(RuntimeError):
+                _estimate(_module(shape))
 
     def test_sample_given_rejects_batched_input_instead_of_dropping_rows(self):
         sampler = NeuralConditionalDensity(build_mdn(1, 1, k=2, hidden=4)).sampler(0)
