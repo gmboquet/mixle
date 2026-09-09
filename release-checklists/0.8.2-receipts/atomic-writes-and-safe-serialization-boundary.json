@@ -1,0 +1,9 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "73c78a3f19c91da4ce47cc99ee25727d4d57432b",
+ "command": "PYTHONPATH=. /Users/grantboquet/mixle/mixle/.venv/bin/python -m pytest mixle/tests/artifact_atomic_write_test.py mixle/tests/security_test.py -p no:randomly -q -m '' -n 0",
+ "date": "2026-09-09",
+ "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
+ "gate": "Atomic writes and safe serialization boundary",
+ "result": "41 passed in 2.78s (2 test file(s): artifact_atomic_write_test.py, security_test.py)"
+}

@@ -1,0 +1,10 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "73c78a3f19c91da4ce47cc99ee25727d4d57432b",
+ "command": "unset PYTHONPATH; cd /tmp && /private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/gatework/cleanwheel/bin/python -m pip check; echo 'pip check exit='$?; echo -n 'installed: '; /private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/gatework/cleanwheel/bin/python -m pip list --format=freeze | tr '\\n' ' '; echo; cd /private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/gatework && /private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/gatework/cleanwheel/bin/python /private/tmp/claude-501/-Users-grantboquet-mixle/0a06cfea-ac4f-4e37-a483-8ebbbd591038/scratchpad/gatework/import_sweep.py; echo 'sweep exit='$?",
+ "date": "2026-09-09",
+ "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
+ "gate": "Base optional-dependency guards",
+ "note": "Run with PYTHONPATH cleared and cwd outside any checkout, so the installed distribution is what loads -- the sweep refuses outright if it detects a source/editable tree.",
+ "result": "the 0.8.2 wheel installed into a fresh venv resolves to numpy 2.5.3 + scipy 1.18.1 and nothing else; `pip check` finds no broken requirements; the import sweep imports all 810 public modules cleanly"
+}

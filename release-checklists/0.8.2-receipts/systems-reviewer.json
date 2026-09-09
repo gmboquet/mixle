@@ -1,0 +1,10 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "73c78a3f19c91da4ce47cc99ee25727d4d57432b",
+ "command": "echo -n 'systems-review decisions D-0176..D-0189: '; grep -cE '^## D-01(7[6-9]|8[0-9])\\b' release-checklists/0.8.0-decisions.md",
+ "date": "2026-09-09",
+ "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
+ "gate": "Systems reviewer",
+ "note": "The reviewer's own working archive is not retained in this repository, so the decisions are the record.",
+ "result": "release-checklists/0.8.0-decisions.md carries 14 systems-review decisions in the D-0176..D-0189 range"
+}

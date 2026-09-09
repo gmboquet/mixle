@@ -1,0 +1,9 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "73c78a3f19c91da4ce47cc99ee25727d4d57432b",
+ "command": "PYTHONPATH=. /Users/grantboquet/mixle/mixle/.venv/bin/python -m pytest mixle/tests/docs_version_aware_test.py mixle/tests/public_claim_inventory_test.py mixle/tests/readme_claims_hygiene_test.py mixle/tests/readme_claims_test.py mixle/tests/readme_quickstart_runs_test.py mixle/tests/release_claims_hygiene_test.py -p no:randomly -q -m '' -n 0",
+ "date": "2026-09-09",
+ "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
+ "gate": "README, quickstart, non-claims, versioned docs, claim ledger",
+ "result": "36 passed in 3.01s (6 test file(s): docs_version_aware_test.py, public_claim_inventory_test.py, readme_claims_hygiene_test.py, readme_claims_test.py, readme_quickstart_runs_test.py, release_claims_hygiene_test.py)"
+}

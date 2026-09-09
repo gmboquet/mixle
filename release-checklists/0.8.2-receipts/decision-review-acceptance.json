@@ -1,0 +1,9 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "73c78a3f19c91da4ce47cc99ee25727d4d57432b",
+ "command": "cd . && PYTHONPATH=$PWD /Users/grantboquet/mixle/mixle/.venv/bin/python scripts/verify_decision_reviews.py release-checklists/0.8.2-decisions.md; echo EXIT=$?",
+ "date": "2026-09-09",
+ "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
+ "gate": "Decision review acceptance",
+ "result": "scripts/verify_decision_reviews.py on release-checklists/0.8.2-decisions.md, exit 0"
+}

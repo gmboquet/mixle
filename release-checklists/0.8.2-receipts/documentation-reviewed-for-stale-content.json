@@ -1,0 +1,10 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "73c78a3f19c91da4ce47cc99ee25727d4d57432b",
+ "command": "page-by-page review recorded in release-checklists/0.8.2-reviews/documentation-review.md; `PYTHONPATH=. python -m sphinx -W -b html docs <out>`; version-reference and count audits across docs/**/*.rst and **/*.md",
+ "date": "2026-09-09",
+ "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
+ "gate": "Documentation reviewed for stale content",
+ "note": "Far less to repair than 0.8.1's review (31 items on 16 pages) because the version strings, docs-site prefix and release-facing framing moved to 0.8.2 when the branch was cut.",
+ "result": "882 source pages, 883 written; `sphinx -W` exits 0 with 0 WARNING/ERROR lines. 2 stale items found and repaired, both in claim-evidence-ledger.rst and both evidence bound to the PREVIOUS candidate: the '15,000+ tests' row cited 16,538 collected on the 0.8.1 candidate c9c5fbbb (re-measured here: 16,849) and called the wheel-run criterion 'a 0.8.1 exit criterion'; the preamble said grades were 'pending the 0.8.1 re-run'. 0 occurrences of v0.8.0/v0.8.1 as a current-release reference; the 57-example count matches the tree"
+}

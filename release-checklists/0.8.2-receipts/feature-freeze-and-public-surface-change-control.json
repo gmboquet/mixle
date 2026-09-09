@@ -1,0 +1,9 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "73c78a3f19c91da4ce47cc99ee25727d4d57432b",
+ "command": "git ls-files .github/ | grep -i template; echo -n 'unchecked checklist items: '; grep -cE '^\\s*- \\[ \\]' .github/PULL_REQUEST_TEMPLATE.md; PYTHONPATH=. /Users/grantboquet/mixle/mixle/.venv/bin/python -m pytest mixle/tests/public_api_manifest_test.py mixle/tests/maturity_manifest_test.py -p no:randomly -q -m '' -n 0 | tail -1",
+ "date": "2026-09-09",
+ "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
+ "gate": "Feature freeze and public-surface change control",
+ "result": ".github/PULL_REQUEST_TEMPLATE.md is tracked and carries 8 unchecked checklist items; the public-surface manifests hold under 18 passed tests"
+}

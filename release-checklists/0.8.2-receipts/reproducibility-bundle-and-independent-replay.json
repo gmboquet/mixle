@@ -1,0 +1,10 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "73c78a3f19c91da4ce47cc99ee25727d4d57432b",
+ "command": "for e in gallery-univariate gallery-structured production-provenance scaling-backend; do printf '%s: ' $e; PYTHONPATH=. /Users/grantboquet/mixle/mixle/.venv/bin/python scripts/run_repro_entry.py --entry $e >/dev/null 2>&1 && echo PASS || echo FAIL; done",
+ "date": "2026-09-09",
+ "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
+ "gate": "Reproducibility bundle and independent replay",
+ "note": "The bundle was regenerated on this tree. Two of its stdout pins moved: gallery-structured because P09-F11 raised an iteration budget (-19.791 -> -16.359 against a truth of -16.347), and production-provenance because its recorded digest could not have come from a run through its own volatile rules -- release/0.8.1 and this tree both normalize to d4f80090..., and the pin said aa6e4d98....",
+ "result": "all 4 entries of release-checklists/0.8.2-repro-bundle.json execute and validate: gallery-univariate, gallery-structured, production-provenance, scaling-backend"
+}

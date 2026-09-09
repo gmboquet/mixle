@@ -1,0 +1,9 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "73c78a3f19c91da4ce47cc99ee25727d4d57432b",
+ "command": "git fetch -q origin main; git merge-base --is-ancestor $(git rev-parse origin/main) HEAD; echo ANCESTOR_EXIT=$?; echo -n 'origin/main '; git rev-parse origin/main; echo -n 'HEAD '; git rev-parse HEAD",
+ "date": "2026-09-09",
+ "evidence_digest": "7ff3f581759ead9c61bea7626ff6e533fe445991ac8ca3b3bb8df4a11c573f6f",
+ "gate": "Release branch ancestry includes current `main`",
+ "result": "git merge-base --is-ancestor exits 0: origin/main 7322ca27a2f9e959c628e884416415802d98edd2 is an ancestor of release/0.8.2 at f9c8bc8fe73a62153a3239cb8bf5cda14b2a758e"
+}
