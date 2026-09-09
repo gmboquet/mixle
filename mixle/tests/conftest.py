@@ -604,6 +604,16 @@ NODEID_MARKERS: tuple[tuple[str, MarkerTuple], ...] = (
     # data_layer_test.py's cold-import timing checks re-launch a fresh interpreter (~8s each); the rest
     # of the file is subsecond and stays in the fast gate.
     ("data_layer_test.py::ColdImportTest", ("slow",)),
+    # Both of the following arrived in the 0.8.2 review cycle carrying real fits and were never
+    # triaged, so they went straight into `fast` -- and therefore into `core`, the lane that is
+    # supposed to be the quick one. Measured over the whole tier they are 302 of the fast gate's
+    # seconds between them, in eleven tests. HealthTieBreakTest scans a 48-pair two-regime corpus to
+    # show what the default tie tolerance does not reach (228 s over 8 tests; the file's other class
+    # is 0.1 s), and SurrogateRepairDisclosureTest fits the surrogate it then interrogates (74 s over
+    # 3 tests; the next-heaviest class in that file is 14.6 s and the remaining 25 are ~17 s in
+    # total). Both belong in `full`, which still runs them on every release candidate.
+    ("latent_identifiability_disclosure_test.py::HealthTieBreakTest", ("slow",)),
+    ("adversarial_review_082_repairs_test.py::SurrogateRepairDisclosureTest", ("slow",)),
 )
 
 
