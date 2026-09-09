@@ -234,8 +234,19 @@ jobs:
     # runner and the release owner set a 15-minute target for the suite. Sharding divides wall time
     # without changing what any test does; the coverage floor moves to the combine job below, since
     # a quarter of the suite cannot meaningfully satisfy a whole-suite floor.
+    #
+    # Budget re-baselined 2026-09-09 against the retained tier receipts of the last eleven green runs
+    # (n=44 shard jobs). Completions were 338-520 s on shard 0, 377-790 s on shard 1, 499-799 s on
+    # shard 2 -- and 1124-2313 s on shard 3, whose worst green completion left the 2700 s budget only
+    # 1.17x headroom while the other three had 3.4-5.2x. That is not one budget, it is one lane
+    # gambling every run, and it lost twice (A-09). Two things move together: the shard split is now
+    # cost-balanced in conftest (`SHARD_OVERRIDES_4`), which takes the heaviest shard from 44% of the
+    # tier to 28%, and this budget goes to 3600 s -- ~4.3x the rebalanced median and ~2.4x its worst
+    # observed green completion, the same headroom the core lane was re-baselined to on 2026-08-08
+    # and still well inside the 5400 s ceiling the tier runner enforces. `timeout-minutes` rises with
+    # it so the job deadline stays above the budget rather than pre-empting it.
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 70
     strategy:
       fail-fast: false
       matrix:
@@ -260,7 +271,7 @@ jobs:
           python scripts/run_test_tier.py \
             --tier full \
             --candidate-sha "$GITHUB_SHA" \
-            --budget-seconds 2700 \
+            --budget-seconds 3600 \
             --receipt full-py3.12-shard${{ matrix.shard }}.json \
             -- -n auto --num-shards 4 --shard-id ${{ matrix.shard }} --cov --cov-report=
       - name: Upload shard coverage and receipt

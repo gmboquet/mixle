@@ -13,6 +13,7 @@ T3.1 redesigns the suite around named tiers with time budgets instead of one bro
 
 from __future__ import annotations
 
+import hashlib
 import re
 import tomllib
 from pathlib import Path
@@ -117,16 +118,38 @@ def test_shard_partition_is_deterministic_disjoint_and_exhaustive() -> None:
     """
     conftest = CONFTEST.read_text(encoding="utf-8")
     assert "--num-shards" in conftest and "--shard-id" in conftest
-    import hashlib
-
-    def shard_of(name: str, num: int) -> int:
-        return int(hashlib.sha256(name.encode("utf-8")).hexdigest(), 16) % num
+    # Exercise the hook's own function rather than a copy of its formula: a re-implementation here
+    # passes unchanged when the real one is edited, which is the one drift this test exists to catch.
+    from mixle.tests.conftest import _shard_of
 
     names = sorted(path.name for path in (ROOT / "mixle" / "tests").glob("*_test.py"))
     assert len(names) > 200
     for num in (2, 4):
-        buckets = [shard_of(name, num) for name in names]
+        buckets = [_shard_of(name, num) for name in names]
         assert set(buckets) <= set(range(num))
         assert len(set(buckets)) == num, "some shard would be empty"
         # every file lands in exactly one shard by construction; determinism across calls:
-        assert buckets == [shard_of(name, num) for name in names]
+        assert buckets == [_shard_of(name, num) for name in names]
+
+
+def test_shard_cost_overrides_name_real_files_and_actually_move_them() -> None:
+    """The hand-placed shard entries must stay attached to files that exist and to a real move.
+
+    The overrides exist to keep one shard from carrying 2.7x its share of the tier's wall time. A
+    stale entry -- a renamed or deleted file, or one the hash has since drifted onto the same shard
+    anyway -- silently stops balancing anything while still reading as a deliberate placement.
+    """
+    from mixle.tests.conftest import SHARD_OVERRIDES_4, _shard_of
+
+    present = {path.name for path in (ROOT / "mixle" / "tests").glob("*_test.py")}
+    for name, shard in SHARD_OVERRIDES_4.items():
+        assert name in present, f"shard override names a file that no longer exists: {name}"
+        assert shard in range(4), f"shard override for {name} is out of range: {shard}"
+        assert _shard_of(name, 4) == shard, f"override for {name} is not applied"
+        unbalanced = int(hashlib.sha256(name.encode("utf-8")).hexdigest(), 16) % 4
+        assert unbalanced != shard, f"override for {name} is a no-op: the hash already yields {shard}"
+    # The overrides are priced for the 4-way split CI runs; every other shard count is plain hash.
+    for name in SHARD_OVERRIDES_4:
+        for num in (2, 3, 5, 8):
+            expected = int(hashlib.sha256(name.encode("utf-8")).hexdigest(), 16) % num
+            assert _shard_of(name, num) == expected, f"override leaked into a {num}-way split"
