@@ -15,6 +15,7 @@ allowlisted by exact value; anything else matching these shapes is a finding.
 
 import re
 import subprocess
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -57,8 +58,27 @@ _REVIEWED_PATH_OCCURRENCES = {
 }
 _HOME_PATH = re.compile(r"/(?:Users|home)/([A-Za-z0-9_.-]+)")
 
-# Deliberately-fake fixtures the secret-redaction feature is tested against (examples/ + tests/).
-_ALLOWED_SECRETS = {"sk-abcdefghij1234567890XYZ", "AKIA1234567890ABCDEF"}
+
+def _gitleaks_fixture_allowlist() -> tuple[re.Pattern, ...]:
+    """The fixture values the release secret scan allows, read from that scan's own config.
+
+    Two scanners cover the same fixtures: this fast tracked-file check and Gitleaks over full
+    history. Until 2026-09-10 each kept its own copy of the list, and the drift that guarantees is
+    not hypothetical -- this test failed on the very commit that repaired the Gitleaks config,
+    because that repair added two fixture values here and nothing told this list about them. One
+    source, read at run time.
+
+    Entries are Gitleaks allowlist regexes, so they are compared as regexes (``fullmatch``) rather
+    than as strings; every current entry happens to be a literal, and a future one need not be.
+    """
+    config = REPO_ROOT / ".gitleaks.toml"
+    if not config.is_file():  # an sdist tree ships no CI config
+        return ()
+    allowlist = tomllib.loads(config.read_text(encoding="utf-8")).get("allowlist", {})
+    return tuple(re.compile(pattern) for pattern in allowlist.get("regexes", ()))
+
+
+_ALLOWED_SECRETS = _gitleaks_fixture_allowlist()
 # Credential shapes, kept conservative so the gate stays low-noise. ERE for git grep; Python re extracts
 # the full match via group(0), so the capturing groups here do not disturb allowlisting.
 _SECRET_ERE = (
@@ -96,7 +116,7 @@ class RepoHygieneScanTest(unittest.TestCase):
         for path, lineno, text in _git_grep_lines(_SECRET_ERE):
             for m in _SECRET_RE.finditer(text):
                 token = m.group(0)
-                if token not in _ALLOWED_SECRETS:
+                if not any(pattern.fullmatch(token) for pattern in _ALLOWED_SECRETS):
                     findings.append(f"{path}:{lineno}: credential-shaped string not on the allowlist")
         self.assertEqual(
             findings,
