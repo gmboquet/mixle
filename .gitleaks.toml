@@ -3,10 +3,31 @@ title = "Mixle release secret policy"
 [extend]
 useDefault = true
 
-[[allowlists]]
-description = "Exact synthetic credentials used by redaction tests"
-regexTarget = "match"
+# This block MUST stay `[allowlist]` (singular table), not `[[allowlists]]` (array of tables).
+# gitleaks 8.24.3 -- the build gitleaks-action pins -- parses the plural form without error and then
+# ignores it entirely when the config also extends the default rules. Measured on this repository's
+# own history with that exact binary: the plural form reports 34 findings whether its regexes match
+# nothing or match every line; the singular form with the identical two regexes reports 6. So the
+# allowlist below had never suppressed anything, and the gate had been failing on its own fixtures.
+#
+# Nobody noticed because gitleaks-action scans only the pushed commits on a `push` event and the
+# whole history otherwise: every push run was green while the weekly scheduled run and every
+# release dispatch failed. A required check that is green on the event you watch and red on the
+# event that gates the release is worse than one that is simply red.
+#
+# Everything listed here is a fixture, verified against the blob it was found in:
+#   * the four credential-shaped constants the redaction tests feed to the scanner, which must stay
+#     literal in the tests -- redaction cannot be tested against a value that is not there;
+#   * `secret_policy=`, which is this library's own keyword argument, matched by the generic-api-key
+#     rule where `mixle/substrate/core.py` documents `secret_policy="reject"` in prose.
+# Values are allowlisted, not paths: a real credential committed into a test file still fails.
+[allowlist]
+description = "Synthetic credentials owned by the redaction tests, and one prose parameter name"
+regexTarget = "line"
 regexes = [
   '''sk-abcdefghij1234567890XYZ''',
   '''AKIA1234567890ABCDEF''',
+  '''api_key=abcdefghijklmnop''',
+  '''ghp_abcdefghijklmnopqrstuvwxyz0123456789''',
+  '''secret_policy=''',
 ]

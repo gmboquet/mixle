@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -168,6 +169,50 @@ class DecisionReviewTest(unittest.TestCase):
         decisions = (ROOT / "release-checklists" / "0.8.0-decisions.md").read_text(encoding="utf-8")
         self.assertIn("## Review record · 2026-08-04 resolution campaign", decisions)
         self.assertIn("reviewed by the release owner, who approved it", decisions)
+
+
+class SecretScanConfigTest(unittest.TestCase):
+    """The secret-scan allowlist has to be in the shape the pinned scanner actually reads."""
+
+    def test_the_allowlist_is_the_singular_table_the_scanner_honours(self):
+        """gitleaks 8.24.3 silently ignores a top-level ``[[allowlists]]`` array when extending.
+
+        Measured against this repository's own history with that exact binary: the plural form
+        reports the same 34 findings whether its regexes match nothing or match every line, and the
+        singular form with identical regexes reports 6. The config parses either way, so nothing
+        about the failure says "your allowlist is not being read" -- it just looks as though the
+        fixtures are leaks. Pin the shape.
+        """
+        # Parsed, not grepped: the config's own comment has to name the wrong form in order to warn
+        # about it, and a text assertion would trip over that explanation.
+        parsed = tomllib.loads((ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+        self.assertIsInstance(parsed.get("allowlist"), dict, "allowlist must be the singular table")
+        self.assertNotIn("allowlists", parsed, "the plural array form is ignored by the pinned scanner")
+        allowlist = parsed["allowlist"]
+        # Allowlisted by VALUE, not by path: a real credential committed into a test file must
+        # still fail the gate, which a `paths` entry would silently exempt.
+        self.assertTrue(allowlist.get("regexes"))
+        self.assertNotIn("paths", allowlist)
+
+    def test_every_allowlisted_value_is_still_present_in_the_history_it_was_written_for(self):
+        """A stale entry is an allowlist that has quietly widened past what was reviewed."""
+        import subprocess
+
+        values = tomllib.loads((ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))["allowlist"]["regexes"]
+        self.assertGreaterEqual(len(values), 2, "the allowlist should not be empty")
+        probe = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--is-inside-work-tree"], capture_output=True)
+        if probe.returncode != 0:
+            self.skipTest("not a git checkout")
+        for value in values:
+            found = subprocess.run(
+                ["git", "-C", str(ROOT), "log", "--all", "-S", value, "--format=%H", "-1"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertTrue(
+                found.stdout.strip(),
+                "allowlisted value " + repr(value[:12]) + "... appears nowhere in history; remove it",
+            )
 
 
 class HostedWorkflowContractTest(unittest.TestCase):
