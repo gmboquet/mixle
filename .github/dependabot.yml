@@ -1,4 +1,9 @@
 version: 2
+# Dependabot reads THIS FILE FROM THE DEFAULT BRANCH ONLY. Updating the copy on a release branch has
+# no effect on where the bot opens pull requests, so `target-branch` below has to be moved here, on
+# main, whenever the active release line does. It was missed for 0.8.2: the bot kept opening pull
+# requests against release/0.8.1, where they cannot merge and where their checks fail on unrelated
+# drift, and four of them were open at once.
 updates:
   # Python dependencies declared in pyproject.toml.
   - package-ecosystem: "pip"
