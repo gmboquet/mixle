@@ -23,11 +23,14 @@ jobs:
     name: release decisions / accepted review
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/release/0.8.2')
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    # Full history and tags: the attribution check below reads a commit RANGE, and a shallow
+    # checkout has neither the base tag nor the messages to read.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
@@ -35,6 +38,12 @@ jobs:
         run: |
           python scripts/verify_decision_reviews.py release-checklists/0.8.0-decisions.md
           python scripts/verify_decision_reviews.py release-checklists/0.8.2-decisions.md
+      # The ledger's identity gate reads only %an/%cn, so a Co-Authored-By trailer naming a tool sits
+      # in the message BODY and passes it. The 0.7.0 line shipped forty of those and needed a history
+      # rewrite to remove them, which changed every commit SHA from mid-2026: cheap to prevent, very
+      # expensive to fix late. This refuses the release range instead of trusting a manual sweep.
+      - name: Refuse authorship this project does not claim
+        run: python scripts/check_commit_attribution.py --base v0.8.1
 
   smoke:
     name: smoke / collection-light
