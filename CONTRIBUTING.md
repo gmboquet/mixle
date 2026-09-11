@@ -19,7 +19,7 @@ Python 3.11 or 3.12 is required; those are the complete 0.8.1 release matrix.
 This summary is generated from `manifests/development_policy.json`; edit the manifest and rerun
 `python scripts/render_contributing_policy.py` rather than changing this block by hand.
 
-Current work targets `release/0.8.1` and milestone `0.8.1`. Automated
+Current work targets `release/0.8.2` and milestone `0.8.2`. Automated
 dependency updates target the same branch. Retarget both the manifest and Dependabot deliberately
 when the release line changes.
 
