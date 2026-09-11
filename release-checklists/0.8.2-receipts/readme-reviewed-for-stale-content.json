@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "candidate_commit": "f3111688edd3fd5e516b4ea623d201a371102c24",
  "command": "line-by-line review recorded in release-checklists/0.8.2-reviews/readme-review.md; machine checks from /tmp against a venv holding the 0.8.2 wheel built from this tree: `pytest --collect-only -m \"\"`, `base_dist_test._build_dists()`, `scripts/check_optional_extras.py`, and each of the seven fenced Python blocks executed (the five fragments re-run with the context their prose declares)",
- "date": "2026-09-09",
- "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "date": "2026-09-11",
+ "evidence_digest": "2c14d5b3aad57051328c911e868fbfe82dc928fe8cb6bb1042dce6a522f42599",
  "gate": "README reviewed for stale content",
  "note": "The record deliberately does not claim '7 of 7 snippets execute verbatim': five are fragments that name prose-defined values or carry an explicit `...`, and cannot. What was checked is that the library still does what each line says.",
  "result": "0 stale items found. 16,849 tests collected against the '15,000+' badge; base_dist_test builds exactly the 40 configurations over 34 families the page claims; requires-python \">=3.11,<3.13\" matches the python-3.11+ badge; 5 docs-site links under v0.8.2/, 2 deliberate site-root links, 3 v0.8.2 GitHub links; all seven Python blocks behave as documented"

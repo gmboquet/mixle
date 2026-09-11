@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "candidate_commit": "f3111688edd3fd5e516b4ea623d201a371102c24",
  "command": "PYTHONPATH=. <venv>/bin/python scripts/check_optional_extras.py; echo EXIT=$?; grep -E '^requires-python' pyproject.toml",
- "date": "2026-09-09",
- "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "date": "2026-09-11",
+ "evidence_digest": "2c14d5b3aad57051328c911e868fbfe82dc928fe8cb6bb1042dce6a522f42599",
  "gate": "Extras resolver and supported Python/OS matrix",
  "note": "The hosted check runs cited here were produced on f9c8bc8f. The only tracked file that changed between that commit and the one this receipt names is release-checklists/0.8.2.md, which ships in neither the wheel nor the sdist (verified against the built wheel's name list), so no code the hosted lanes exercised differs.",
  "result": "scripts/check_optional_extras.py printed 'all equals the runtime-feature extra union', exit 0; pyproject.toml declares requires-python = \">=3.11,<3.13\"; all 21 `install .[<extra>]` lanes are green on this SHA"

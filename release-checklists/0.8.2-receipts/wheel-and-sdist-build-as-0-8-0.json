@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "candidate_commit": "f3111688edd3fd5e516b4ea623d201a371102c24",
  "command": "cd $SC/srcA && SOURCE_DATE_EPOCH=1700000000 $SC/buildenv/bin/python -m build --no-isolation --outdir $SC/dist-a . >/dev/null 2>&1; echo 'build A exit='$?; cd $SC/srcB && SOURCE_DATE_EPOCH=1700000000 $SC/buildenv/bin/python -m build --no-isolation --outdir $SC/dist-b . >/dev/null 2>&1; echo 'build B exit='$?; cd . && for d in a b; do PYTHONPATH=. <venv>/bin/python scripts/normalize_sdist.py $SC/dist-$d/mixle-0.8.2.tar.gz 1700000000 >/dev/null; done; shasum -a 256 $SC/dist-a/mixle-0.8.2-py3-none-any.whl $SC/dist-b/mixle-0.8.2-py3-none-any.whl $SC/dist-a/mixle-0.8.2.tar.gz $SC/dist-b/mixle-0.8.2.tar.gz | sed 's#/.*/gatework/##'",
- "date": "2026-09-09",
- "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "date": "2026-09-11",
+ "evidence_digest": "2c14d5b3aad57051328c911e868fbfe82dc928fe8cb6bb1042dce6a522f42599",
  "gate": "Wheel and sdist build as 0.8.0",
  "note": "Built with the pinned closure of 0.8.2-build-requirements.txt (build 1.5.0, setuptools 83.0.0, wheel 0.47.0).",
  "result": "two independent builds from `git archive f9c8bc8f` into separate source trees, SOURCE_DATE_EPOCH=1700000000, both exit 0; after scripts/normalize_sdist.py the two artifact sets are byte-identical -- wheel ac8f0aabd3fbc04f534984f8b46599817a9717f3e3178e86edacdbc5659be73a, sdist 1b0cc470a7c52baef3aa52037a80ee73d1d250f7e098cca4b9219cc7ba399eb7"

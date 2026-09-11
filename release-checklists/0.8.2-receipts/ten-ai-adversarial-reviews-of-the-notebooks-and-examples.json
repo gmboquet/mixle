@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "candidate_commit": "f3111688edd3fd5e516b4ea623d201a371102c24",
  "command": "echo -n 'examples exit 0: '; awk '$1==0' $SC/examples_run.log | wc -l | tr -d ' '; echo -n ' of '; wc -l < $SC/examples_run.log; echo -n 'notebooks run: '; wc -l < $SC/notebooks_run.jsonl; echo -n 'notebooks clean on first pass: '; grep -c '\"ok\": true' $SC/notebooks_run.jsonl; echo 'malware_certificate_embedding retry (quiet host):'; grep -E '^OK|^FAIL' $SC/nb_malware.log; echo 'estimation_using_spark: needs a JVM'; java -version 2>&1 | head -1; echo -n '0.8.2 re-review passes with findings.json: '; ls -d <review-workdir>/reviews-082/pass-*/ 2>/dev/null | wc -l | tr -d ' '",
- "date": "2026-09-09",
- "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "date": "2026-09-11",
+ "evidence_digest": "2c14d5b3aad57051328c911e868fbfe82dc928fe8cb6bb1042dce6a522f42599",
  "gate": "Ten AI adversarial reviews of the notebooks and examples",
  "note": "The ten passes themselves are the 0.8.1 campaign's (release-checklists/0.8.1-reviews/pass-01..10). What is new for 0.8.2 is the re-review of the repairs, whose findings are recorded in the CHANGELOG's 're-review' section and in 0.8.2-followups.md, and this execution fact on the 0.8.2 artifact.",
  "result": "executed against the 0.8.2 wheel built from this tree: 57 of 57 examples exit 0, and 130 of 131 notebooks. malware_certificate_embedding.ipynb hit the runner's 900-second per-cell limit on a pass that competed with a full test suite for the machine and completes in 1752 s on a quiet host. estimation_using_spark.ipynb cannot run here: it needs a JVM, and /usr/bin/java on this host is the macOS stub ('Unable to locate a Java Runtime'), the same absence that makes the suite skip its own Spark cases. Seven 0.8.2 re-review passes are retained under .ci-repro-colima/reviews-082/"

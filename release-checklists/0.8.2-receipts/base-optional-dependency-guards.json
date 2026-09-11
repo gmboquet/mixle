@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "candidate_commit": "f3111688edd3fd5e516b4ea623d201a371102c24",
  "command": "unset PYTHONPATH; cd /tmp && $SC/cleanwheel/bin/python -m pip check; echo 'pip check exit='$?; echo -n 'installed: '; $SC/cleanwheel/bin/python -m pip list --format=freeze | tr '\\n' ' '; echo; cd $SC && $SC/cleanwheel/bin/python $SC/import_sweep.py; echo 'sweep exit='$?",
- "date": "2026-09-09",
- "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "date": "2026-09-11",
+ "evidence_digest": "2c14d5b3aad57051328c911e868fbfe82dc928fe8cb6bb1042dce6a522f42599",
  "gate": "Base optional-dependency guards",
  "note": "Run with PYTHONPATH cleared and cwd outside any checkout, so the installed distribution is what loads -- the sweep refuses outright if it detects a source/editable tree.",
  "result": "the 0.8.2 wheel installed into a fresh venv resolves to numpy 2.5.3 + scipy 1.18.1 and nothing else; `pip check` finds no broken requirements; the import sweep imports all 810 public modules cleanly"

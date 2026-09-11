@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "candidate_commit": "f3111688edd3fd5e516b4ea623d201a371102c24",
  "command": "gh api repos/gmboquet/mixle/commits/f9c8bc8fe73a62153a3239cb8bf5cda14b2a758e/check-runs --paginate --jq '.check_runs[]|select(.name==\"numerical / repeated-seed stress\")|\"\\(.status)/\\(.conclusion)  id=\\(.id)\"'",
- "date": "2026-09-09",
- "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "date": "2026-09-11",
+ "evidence_digest": "2c14d5b3aad57051328c911e868fbfe82dc928fe8cb6bb1042dce6a522f42599",
  "gate": "Flake/order campaign",
  "note": "That lane is `workflow_dispatch`/`schedule` only, so a push cannot produce it -- it is skipped on every push run. It was obtained by dispatching tests.yml against release/0.8.2 at this exact tip. Re-obtained on the release tip by a second explicit dispatch of tests.yml, so this lane's evidence is exact-tip rather than inherited from an earlier commit.",
- "result": "the 'numerical / repeated-seed stress' lane is completed/success on this SHA (check run 102302521489)"
+ "result": "on the release tip, numerical / repeated-seed stress = success (check run 102807120075)"
 }

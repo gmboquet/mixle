@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "candidate_commit": "f3111688edd3fd5e516b4ea623d201a371102c24",
  "command": "python3 -c \"import json;d=json.load(open('$SC/check-runs.json'));r=[x for p in d for x in p['check_runs']];import re;names=sorted({x['name'] for x in r if re.search(r'core /|full /|optional extras|smoke /', x['name'])});print('\\n'.join('%s: %s' % (n, sorted({y['conclusion'] for y in r if y['name']==n and y['conclusion']!='cancelled'})) for n in names))\"",
- "date": "2026-09-09",
- "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "date": "2026-09-11",
+ "evidence_digest": "2c14d5b3aad57051328c911e868fbfe82dc928fe8cb6bb1042dce6a522f42599",
  "gate": "Purpose/time-budget test tiers",
  "note": "Recorded as measured, including the failure: the tier machinery and its budgets are what this gate is about, and one shard exceeding its budget is a fact about them. The shard-3 failure is A-09, reproduced and written up in 0.8.2-followups.md; it blocks the exact-tip hosted matrix row, which is open.",
- "result": "on the release tip every tier lane is success EXCEPT `full / py3.12 / shard 3`, which failed at the full tier's 2700-second budget with A-09's signature (99% progress, ten minutes of silence, OSError: cannot send (already closed?), zero FAILED lines); `full / coverage floor` is skipped in consequence. Green: smoke / collection-light; core / py3.11 shards 0-3; core / py3.12 shards 0-3; core / macOS arm64 py3.11 and py3.12; core / minimum versions; full / py3.12 shards 0-2; optional extras / py3.12 shards 0-1"
+ "result": "every tier lane on the release tip is success -- 19 of them across smoke, core (py3.11 and py3.12 shards 0-3, macOS arm64 py3.11/py3.12, minimum versions), full (py3.12 shards 0-3 and the coverage floor) and optional extras (shards 0-1) -- plus the two dispatch-only lanes, numerical / repeated-seed stress = success (check run 102807120075) and hardware / MPI and torchrun = success (check run 102807120012). The A-09 shard-3 budget overrun recorded in the previous cut is repaired: the split is cost-balanced and the budget re-priced, and all four full shards pass"
 }

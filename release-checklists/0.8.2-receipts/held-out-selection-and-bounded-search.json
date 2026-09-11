@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "bee8d3bf7a1b02a218d25eb81ba4d6a0bbd112de",
+ "candidate_commit": "f3111688edd3fd5e516b4ea623d201a371102c24",
  "command": "PYTHONPATH=. <venv>/bin/python -m pytest mixle/tests/model_selection_benchmark_test.py mixle/tests/propose_budget_test.py -p no:randomly -q -m '' -n 0",
- "date": "2026-09-09",
- "evidence_digest": "ae9aa91a1368d732ff9014fc29289286d4755cdc1df2311507a7c31e669df3d2",
+ "date": "2026-09-11",
+ "evidence_digest": "2c14d5b3aad57051328c911e868fbfe82dc928fe8cb6bb1042dce6a522f42599",
  "gate": "Held-out selection and bounded search",
- "result": "10 passed, 2 subtests passed in 4.85s (2 test file(s): model_selection_benchmark_test.py, propose_budget_test.py)"
+ "result": "10 passed, 2 subtests passed in 6.91s (2 test file(s): model_selection_benchmark_test.py, propose_budget_test.py)"
 }
