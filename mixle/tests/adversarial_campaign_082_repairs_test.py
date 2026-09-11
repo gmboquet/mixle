@@ -229,5 +229,87 @@ class TerminalStateReadoutsAgreeWithTheModelTest(unittest.TestCase):
         self.assertGreater(marginals[-1][0], 0.5)  # free to end where the data points
 
 
+class OneTableOneAnswerTest(unittest.TestCase):
+    """Q05-F01: the production and scoring verbs each had their own idea of what a table is.
+
+    ``optimize`` reads a DataFrame through ``_reusable_observations`` and gets its rows.
+    ``fit_with_provenance``, ``Monitor.check``/``update`` and the scoring verbs each carried a
+    two-line spelling -- ``records()`` if present, else iterate the object -- which is right for a
+    list and wrong for a table. So the same frame fitted as a categorical over its two COLUMN NAMES
+    with ``n_records=2`` stamped into the provenance header, a bare string fitted as its 17
+    characters, and ``Service.score`` raised a ContractError on a frame ``optimize`` handles.
+
+    One normalizer now, ``mixle.inference.estimation.tabular_records``, which is what makes the
+    CHANGELOG's "one table gets one answer whichever verb reads it" true rather than aspirational.
+    """
+
+    FRAME = {"x": [1.0, 2.0, 3.0, 4.0], "k": [0, 1, 0, 1]}
+
+    def _frame(self):
+        pandas = __import__("pandas")
+        return pandas.DataFrame(self.FRAME)
+
+    def setUp(self):
+        try:
+            __import__("pandas")
+        except ImportError:  # pragma: no cover - pandas is a base test dependency
+            self.skipTest("pandas is required to express the defect")
+
+    def test_every_verb_reads_the_same_rows_out_of_the_same_frame(self):
+        from mixle.inference import optimize
+        from mixle.inference.production import fit_with_provenance
+
+        frame = self._frame()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            by_optimize = optimize(frame, max_its=2)
+            by_provenance, header = fit_with_provenance(frame, None, max_its=2)
+        self.assertEqual(type(by_provenance).__name__, type(by_optimize).__name__)
+        # Four rows, not two column labels. The header records this as fact about the training set.
+        self.assertEqual(header.to_dict().get("n_records"), 4)
+
+    def test_a_bare_string_is_refused_by_every_verb_that_takes_data(self):
+        from mixle.inference.production import fit_with_provenance
+
+        with self.assertRaises(ValueError) as caught:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                fit_with_provenance("hello world hello", None, max_its=2)
+        self.assertIn("iterates as its individual characters", str(caught.exception))
+
+    def test_the_scoring_verbs_score_the_frame_rather_than_refusing_it(self):
+        from mixle.inference import optimize
+        from mixle.inference.production import Service
+
+        frame = self._frame()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = optimize(frame, max_its=2)
+            scores = Service(model, reference=frame).score(frame)
+        self.assertEqual(np.asarray(scores).shape, (4,))
+
+    def test_the_monitor_reads_a_batch_the_way_a_fit_reads_it(self):
+        from mixle.inference import optimize
+        from mixle.inference.production import Monitor
+
+        frame = self._frame()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = optimize(frame, max_its=2)
+            monitor = Monitor(model, None, frame)
+            report = monitor.check(frame)
+        self.assertFalse(report.drift, "a frame checked against itself is not drifted")
+
+    def test_the_verbs_share_one_normalizer(self):
+        """The duplication was the defect; assert it is gone rather than trusting behaviour alone."""
+        import inspect
+
+        from mixle.inference.production import monitor, provenance, serving
+
+        for module in (monitor, provenance, serving):
+            with self.subTest(module=module.__name__.rsplit(".", 1)[-1]):
+                self.assertIn("tabular_records", inspect.getsource(module))
+
+
 if __name__ == "__main__":
     unittest.main()

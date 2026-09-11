@@ -181,9 +181,18 @@ def _resource_usage() -> dict:
 
 
 def _records(data: Any):
-    """Iterate a dataset uniformly, whether it is a list/sequence or a DataSource (``.records()``)."""
-    rec = getattr(data, "records", None)
-    return rec() if callable(rec) else data
+    """``data`` as observation records, through the same front door every fit verb uses.
+
+    This was ``records()`` if present, else iterate the object -- which is the right answer for a
+    list and the wrong one for a table. ``fit_with_provenance(df, ...)`` therefore fitted a
+    categorical over the two COLUMN NAMES and stamped ``n_records=2`` on the provenance header,
+    and ``fit_with_provenance('hello world hello', ...)`` stamped ``n_records=17`` for the
+    characters -- both of them recorded as fact in the artifact this function exists to make
+    trustworthy, while ``optimize`` on the same inputs was correct or refused by name (Q05-F01).
+    """
+    from mixle.inference.estimation import tabular_records
+
+    return tabular_records(data, "fit_with_provenance()")
 
 
 def _final_loglik(model: Any, data: Any) -> float | None:

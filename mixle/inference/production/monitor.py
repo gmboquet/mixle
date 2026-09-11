@@ -54,9 +54,15 @@ class Monitor:
 
     @staticmethod
     def _materialize(data: Any, name: str) -> list:
-        records = getattr(data, "records", None)
-        source = records() if callable(records) else data
-        batch = list(source)
+        """Through the fit verbs' front door: a drift batch is read the same way a fit reads it.
+
+        This carried its own copy of "records() if present, else iterate", so a DataFrame handed to
+        check() or update() became its column labels and a bare string became its characters -- and
+        update() then retrained on that (Q05-F01).
+        """
+        from mixle.inference.estimation import tabular_records
+
+        batch = tabular_records(data, f"Monitor({name})")
         if not batch:
             raise ValueError(f"{name} data must contain at least one observation")
         return batch

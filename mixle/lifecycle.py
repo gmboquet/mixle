@@ -151,52 +151,10 @@ class DeployedArtifact(str):
 
 
 def _tabular_records(data: Any, entry: str = "fit()") -> list:
-    """``data`` as a list of observation records -- always one record per ROW, never per column.
+    """``data`` as a list of observation records; see :func:`mixle.inference.estimation.tabular_records`."""
+    from mixle.inference.estimation import tabular_records
 
-    A pandas ``DataFrame`` iterates as its column labels and a mapping iterates as its keys, so a bare
-    ``list(data)`` silently modeled the five HEADER STRINGS of an 891-row table (and stamped
-    ``n_rows=5``) while :func:`mixle.inference.optimize` handled the same frame correctly. Convert the
-    tabular inputs into the row records the estimation path expects (DataFrame -> one record per row
-    via :func:`mixle.data.sources.pandas_source.dataframe_records`, exactly the shape ``optimize``'s
-    ``fields`` path produces; DataSource -> ``records()``), and leave already-row-shaped sequences
-    byte-identical to the historical ``list(data)``.
-
-    Everything the three tabular spellings above do not cover is handed to
-    :func:`mixle.inference.estimation._reusable_observations`, the fit verbs' own front door, so
-    that one table gets one answer whichever verb reads it. It had been reached only through
-    ``optimize``/``fit``/``best_of``, which left the lifecycle verbs to meet the raw failures it
-    exists to replace: a structured array died on ``unhashable type: 'writeable void-scalar'``, a
-    ``numpy.matrix`` on ``RecursionError``, a ``timedelta64`` column on ``float() argument must be
-    ... not 'datetime.timedelta'``, and ``Model().fit('hello world hello')`` cheerfully returned a
-    categorical over nine characters (R06-F03).
-    """
-    from mixle.inference.estimation import _reusable_observations
-
-    if hasattr(data, "records") and callable(data.records) and hasattr(data, "structure"):
-        return list(data.records())  # a mixle DataSource
-    if hasattr(data, "columns") and hasattr(data, "itertuples"):  # a pandas DataFrame (duck-typed)
-        from mixle.data.sources.pandas_source import dataframe_records
-
-        return dataframe_records(data)
-    if type(data).__name__ == "Series" and type(data).__module__.startswith("pandas"):
-        # A bare Series carries pandas' own missing-value convention rather than the row-shaped
-        # sentinel Model.fit/evaluate/propose expect, and the generic list(data) fallthrough below
-        # does not normalize it, so a Model built from a Series meets the same dtype-dependent
-        # sentinel mismatch the auto-inference path had (campaign four, T2-02, the Series half).
-        from mixle.data.sources.pandas_source import column_records
-
-        return column_records(data)
-    try:
-        return list(_reusable_observations(data, entry))
-    except TypeError as exc:
-        # A single observation (m.fit(0.5), m.evaluate(0.5)) died here as a bare
-        # "TypeError: 'float' object is not iterable" that named neither the expectation nor the
-        # verb that does take one observation.
-        raise ValueError(
-            f"data must be a collection of observation records (a list, array, DataFrame, "
-            f"DataSource, or mapping of columns); got a single {type(data).__name__}. To score one "
-            "observation use model(x); to fit or evaluate on it, wrap it in a list."
-        ) from exc
+    return tabular_records(data, entry)
 
 
 def saddle_suspect(fitted: Any, data: Any, *, sample: int = 200, tol: float = 0.02) -> bool:
