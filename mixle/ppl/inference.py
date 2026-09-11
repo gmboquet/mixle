@@ -176,7 +176,62 @@ def _loc_scale(s: _Slot, vals: dict):
     return loc, scale
 
 
-class Posterior:
+class _DroppedClosurePickling:
+    """Pickle support for a posterior carrying closures over the lowered program.
+
+    The fitters attach callables built as local closures: ``build`` (a vals-dict -> concrete
+    distribution) and ``predictive``. Neither survives pickling, and their presence made every
+    posterior-bearing fit unpicklable -- while explain_fit's docstring says the record travels with
+    the model through pickling (P04-F05). The draws, the raw chain, the diagnostics and the fit
+    record are all plain data and do travel; the closures are dropped and replaced by a stand-in
+    that says so, so a restored posterior summarizes and reports exactly as before, and only the
+    model-rebuilding calls refuse.
+
+    This is one class because it was two. ``ConjugatePosterior`` carried a verbatim copy of the
+    state pair -- so it recorded the drop correctly -- but never defined
+    ``_refuse_dropped_closure``, and the caller gated the refusal on ``hasattr``. The class MOST
+    fits return therefore answered ``predict()`` on a restored pickle with the plug-in predictive,
+    silently, while the two sampler routes refused; the regression test covered only those two
+    routes, so nothing caught it (Q04-F01). Subclasses declare ``_CLOSURE_FIELDS`` and inherit the
+    rest, which is what makes the two routes impossible to drift apart again.
+    """
+
+    _CLOSURE_FIELDS: tuple[str, ...] = ()
+
+    def __getstate__(self) -> dict:
+        state = dict(self.__dict__)
+        state["_dropped_closures"] = tuple(name for name in self._CLOSURE_FIELDS if state.get(name) is not None)
+        for name in self._CLOSURE_FIELDS:
+            state[name] = None
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        dropped = state.pop("_dropped_closures", ())
+        self.__dict__.update(state)
+        self._dropped_closures = tuple(dropped)
+
+    def _refuse_dropped_closure(self, name: str) -> None:
+        if name not in getattr(self, "_dropped_closures", ()):
+            return
+        if name == "predictive":
+            raise ValueError(
+                "this posterior was restored from a pickle, so predict() cannot integrate over "
+                "its draws: the posterior predictive rebuilds the model at each draw through a "
+                "closure over the lowered program that pickling cannot carry. Answering from the "
+                "posterior-MEAN model instead would be the plug-in predictive, which drops exactly "
+                "the parameter uncertainty this posterior holds, so it is refused rather than "
+                "returned. The draws, the raw chain and the diagnostics survived -- summary(), the "
+                "ESS/R-hat fields and the explain_fit record all work. Re-fit the model to predict."
+            )
+        raise ValueError(
+            "this posterior was restored from a pickle, and %s() rebuilds the model from a "
+            "closure over the lowered program that pickling cannot carry. The draws, the raw "
+            "chain and the diagnostics survived -- summary(), the ESS/R-hat fields and the "
+            "explain_fit record all work. Re-fit the model to get %s() back." % (name, name)
+        )
+
+
+class Posterior(_DroppedClosurePickling):
     """Parameter-posterior result attached to a fitted RV's ``.result``.
 
     Holds value-space draws and the raw ``MCMCResult``. Look up a parameter by its
@@ -198,26 +253,7 @@ class Posterior:
         self.tail_ess = None  # {param: tail effective sample size}
         self.num_divergences = 0  # NUTS divergent transitions (post-warmup, summed over chains)
 
-    # The fitters attach two callables built as local closures over the lowered model: ``build``
-    # (a vals-dict -> concrete distribution) and ``predictive``. Neither survives pickling, and
-    # their presence made every posterior-bearing fit unpicklable -- while explain_fit's docstring
-    # says the record travels with the model through pickling (P04-F05). The draws, the raw chain,
-    # the diagnostics and the fit record are all plain data and do travel; the two closures are
-    # dropped and replaced by a stand-in that says so, so a restored posterior summarizes and
-    # reports exactly as before and only the two model-rebuilding calls refuse.
     _CLOSURE_FIELDS = ("predictive", "build")
-
-    def __getstate__(self) -> dict:
-        state = dict(self.__dict__)
-        state["_dropped_closures"] = tuple(name for name in self._CLOSURE_FIELDS if state.get(name) is not None)
-        for name in self._CLOSURE_FIELDS:
-            state[name] = None
-        return state
-
-    def __setstate__(self, state: dict) -> None:
-        dropped = state.pop("_dropped_closures", ())
-        self.__dict__.update(state)
-        self._dropped_closures = tuple(dropped)
 
     def __pysp_seed_key__(self) -> tuple:
         """This posterior's canonical value: the parameters it carries and the draws it holds.
@@ -229,23 +265,6 @@ class Posterior:
         (the raw chain object, the attached closures) distinguishes what it says.
         """
         return ("mixle.ppl.Posterior", tuple(slot.name for slot in self._slots), np.asarray(self._samples))
-
-    def _refuse_dropped_closure(self, name: str) -> None:
-        if name in getattr(self, "_dropped_closures", ()):
-            raise ValueError(
-                "this posterior was restored from a pickle, and %s() rebuilds the model from a "
-                "closure over the lowered program that pickling cannot carry. The draws, the raw "
-                "chain and the diagnostics survived -- summary(), the ESS/R-hat fields and the "
-                "explain_fit record all work. Re-fit the model to get %s() back." % (name, name)
-                if name != "predictive"
-                else "this posterior was restored from a pickle, so predict() cannot integrate over "
-                "its draws: the posterior predictive rebuilds the model at each draw through a "
-                "closure over the lowered program that pickling cannot carry. Answering from the "
-                "posterior-MEAN model instead would be the plug-in predictive, which drops exactly "
-                "the parameter uncertainty this posterior holds, so it is refused rather than "
-                "returned. The draws, the raw chain and the diagnostics survived -- summary(), the "
-                "ESS/R-hat fields and the explain_fit record all work. Re-fit the model to predict."
-            )
 
     def pointwise_log_likelihood(self, data) -> np.ndarray:
         """Return the ``(n_draws, n_obs)`` log-likelihood of ``data`` under each posterior draw.
@@ -3620,7 +3639,7 @@ def vi_fit(
 
 
 # ---------------------------------------------------- closed-form conjugate Bayes
-class ConjugatePosterior:
+class ConjugatePosterior(_DroppedClosurePickling):
     """Exact closed-form posterior over a conjugate parameter.
 
     ``post`` maps parameter name -> {mean, sample(n, rng), name, hyper}. This is the
@@ -3637,18 +3656,6 @@ class ConjugatePosterior:
         self.post = post
         self.acceptance_rate = None
         self.predictive = None
-
-    def __getstate__(self) -> dict:
-        state = dict(self.__dict__)
-        state["_dropped_closures"] = tuple(name for name in self._CLOSURE_FIELDS if state.get(name) is not None)
-        for name in self._CLOSURE_FIELDS:
-            state[name] = None
-        return state
-
-    def __setstate__(self, state: dict) -> None:
-        dropped = state.pop("_dropped_closures", ())
-        self.__dict__.update(state)
-        self._dropped_closures = tuple(dropped)
 
     def _entry(self, param):
         for nm, e in self.post.items():

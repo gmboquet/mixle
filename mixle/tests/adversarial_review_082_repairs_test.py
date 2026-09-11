@@ -123,7 +123,9 @@ class RestoredPredictiveTest(unittest.TestCase):
 
         mu = Normal(0, 10, name="mu")
         kw = {"draws": 600, "burn": 200} if how in ("mcmc", "hmc") else {}
-        return _quiet(lambda: Normal(mu, 2.0).fit(self.ROWS, how=how, rng=np.random.RandomState(0), **kw))
+        if how is not None:
+            kw["how"] = how
+        return _quiet(lambda: Normal(mu, 2.0).fit(self.ROWS, rng=np.random.RandomState(0), **kw))
 
     def test_a_live_posterior_integrates_over_its_draws(self):
         live = self._fitted("mcmc")
@@ -131,7 +133,11 @@ class RestoredPredictiveTest(unittest.TestCase):
         self.assertGreater(spread, 2.05)  # wider than the plug-in sqrt(4) = 2.0
 
     def test_a_restored_posterior_refuses_rather_than_dropping_the_uncertainty(self):
-        for how in ("mcmc", "laplace"):
+        # `None` is the DEFAULT route, and on a conjugate model it selects ConjugatePosterior --
+        # the class most fits actually return. This loop covered only the two sampler routes, so
+        # the claim was verified on everything except the common case, and the common case was the
+        # one still answering with the plug-in predictive (Q04-F01). Route coverage first.
+        for how in (None, "mcmc", "laplace"):
             with self.subTest(how=how):
                 restored = pickle.loads(pickle.dumps(self._fitted(how)))
                 with self.assertRaises(ValueError) as caught:
@@ -139,6 +145,12 @@ class RestoredPredictiveTest(unittest.TestCase):
                 message = str(caught.exception)
                 self.assertIn("restored from a pickle", message)
                 self.assertIn("plug-in", message)
+
+    def test_the_default_route_is_the_conjugate_one_so_the_loop_above_covers_it(self):
+        """Pin what `how=None` selects, so the route coverage cannot quietly narrow again."""
+        posterior = self._fitted(None).result
+        self.assertEqual(type(posterior).__name__, "ConjugatePosterior")
+        self.assertTrue(hasattr(posterior, "_refuse_dropped_closure"))
 
     def test_everything_the_changelog_says_survives_the_round_trip_still_does(self):
         restored = pickle.loads(pickle.dumps(self._fitted("mcmc")))

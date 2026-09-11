@@ -84,7 +84,17 @@ _OPTIONAL_SERIALIZATION_MODULES = (
 # produced. They are stripped before the constructor-owned schema check, which would otherwise refuse
 # any fitted object that carries one (``component_row_mass``: the effective rows each mixture
 # component won, recorded so a component the data never identified can be seen -- A-02).
-_NON_STATE_ATTRIBUTES = frozenset({"_fit_provenance", "_numerical_repairs", "header", "component_row_mass"})
+# ``_p_level_cache`` is the third kind: neither a parameter nor a record of the fit, but a MEMO
+# derived entirely from parameters the artifact already carries (init_prob @ transitions^k, keyed by
+# a byte snapshot of w and transitions). A constructor sets it to None and a fit warms it, so the
+# decoder's constructed-vs-artifact comparison saw None against a populated tuple and refused the
+# whole model -- a tree HMM fitted by optimize() could not be written as JSON at all on 0.8.2, while
+# the same fit round-tripped on 0.8.1 (Q09-F01/Q02-F09). Stripping it on BOTH sides is the fix and
+# loses nothing: the memo is recomputed on first use from state that survives the round trip, and two
+# models with the same parameters are the same model whether or not one has a warm cache.
+_NON_STATE_ATTRIBUTES = frozenset(
+    {"_fit_provenance", "_numerical_repairs", "header", "component_row_mass", "_p_level_cache"}
+)
 
 _STABLE_STATE_FIELDS: dict[str, frozenset[str]] = {
     "mixle.stats.univariate.continuous.exponential.ExponentialDistribution": frozenset(
