@@ -311,5 +311,95 @@ class OneTableOneAnswerTest(unittest.TestCase):
                 self.assertIn("tabular_records", inspect.getsource(module))
 
 
+class SupportLimitedComponentsCanBeMixedTest(unittest.TestCase):
+    """Q01-F02 / Q02-F02: a mixture refused a model it can express, and blamed the data.
+
+    Two halves, both of them the same asymmetry between what a family refuses and what it tells the
+    rest of the library about itself.
+
+    Initialization: four families refused out-of-support rows in ``seq_update`` without exposing
+    ``supported_rows``, so a latent model's initializer could not know to withhold those rows. It
+    seeded the component from one anyway and the refusal then named the DATA -- a Poisson-plus-
+    Geometric fit on counts containing zeros was refused outright, though the Poisson component
+    explains the zeros perfectly well.
+
+    Encoding: ``ParetoDataEncoder`` refused non-positive rows, where the contract is that encoders
+    admit them so a mixture can encode one batch against every component. The law already agreed
+    with itself -- ``seq_log_density`` masks them to -inf and the scalar path returns -inf -- so only
+    the encoder disagreed.
+    """
+
+    def test_a_poisson_plus_geometric_mixture_fits_counts_containing_zeros(self):
+        from mixle.inference import optimize
+        from mixle.stats import GeometricEstimator, MixtureEstimator, PoissonEstimator
+
+        rng = np.random.RandomState(0)
+        counts = np.concatenate([rng.poisson(2, 200), rng.geometric(0.3, 200)])
+        self.assertGreater(int((counts == 0).sum()), 0, "the defect needs zeros in the data")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fitted = optimize(
+                counts,
+                MixtureEstimator([PoissonEstimator(), GeometricEstimator()]),
+                max_its=20,
+                rng=np.random.RandomState(1),
+            )
+        self.assertEqual(len(fitted.w), 2)
+        self.assertTrue(all(weight > 0.05 for weight in fitted.w), f"a component was starved: {fitted.w}")
+
+    def test_a_gaussian_plus_pareto_mixture_encodes_one_batch(self):
+        from mixle.inference import optimize
+        from mixle.stats import GaussianEstimator, MixtureEstimator, ParetoEstimator
+
+        rng = np.random.RandomState(0)
+        x = np.concatenate([rng.normal(-3, 1, 200), rng.pareto(3.0, 200) + 1.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fitted = optimize(
+                x,
+                MixtureEstimator([GaussianEstimator(), ParetoEstimator()]),
+                max_its=20,
+                rng=np.random.RandomState(1),
+            )
+        self.assertEqual(len(fitted.w), 2)
+
+    def test_the_pareto_encoder_admits_what_its_density_already_scores(self):
+        from mixle.stats import ParetoDistribution
+
+        law = ParetoDistribution(1.0, 3.0)
+        encoded = law.dist_to_encoder().seq_encode([-1.0, 1.5])
+        densities = law.seq_log_density(encoded)
+        self.assertEqual(float(densities[0]), float("-inf"))
+        self.assertEqual(float(law.log_density(-1.0)), float("-inf"))
+        self.assertTrue(np.isfinite(densities[1]))
+
+    def test_nan_is_still_refused_as_missing_data(self):
+        """Admitting out-of-support rows must not have admitted missing ones."""
+        from mixle.stats import ParetoDistribution
+
+        with self.assertRaises(ValueError) as caught:
+            ParetoDistribution(1.0, 3.0).dist_to_encoder().seq_encode([float("nan"), 1.5])
+        self.assertIn("NaN marks missing data", str(caught.exception))
+
+    def test_a_family_that_refuses_rows_also_declares_which_rows_it_supports(self):
+        """The asymmetry itself, asserted: refusing without declaring is what broke initialization."""
+        import ast
+
+        root = Path(__file__).resolve().parents[1] / "stats"
+        asymmetric = []
+        for path in sorted(root.rglob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            if "refuse_unsupported_observations" not in source or "_observation_contracts" in path.name:
+                continue
+            if "def refuse_unsupported_observations" in source:
+                continue
+            for node in ast.walk(ast.parse(source)):
+                if isinstance(node, ast.ClassDef):
+                    body = ast.get_source_segment(source, node) or ""
+                    if "refuse_unsupported_observations(" in body and "def supported_rows" not in body:
+                        asymmetric.append(f"{path.name}::{node.name}")
+        self.assertEqual(asymmetric, [], "these refuse rows they never declare unsupported")
+
+
 if __name__ == "__main__":
     unittest.main()

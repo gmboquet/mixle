@@ -18,6 +18,14 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import refuse_unsupported_observations
+
+_PARETO_SUPPORT_MESSAGE = (
+    "ParetoDistribution has support x > 0, but at least %d observation(s) carrying weight are "
+    "non-positive, NaN, or infinite (estimation encodes in chunks; the first offending chunk "
+    "refuses). The encoder admits them so a mixture can score one batch against every component; "
+    "they cannot contribute to this component's sufficient statistics."
+)
 
 
 class ParetoDistribution(SequenceEncodableProbabilityDistribution):
@@ -284,6 +292,16 @@ class ParetoAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
+    def supported_rows(self, x) -> np.ndarray:
+        """Encoded rows this law can be fitted on: finite and strictly positive.
+
+        The encoder admits out-of-support rows so a mixture can encode one batch against every
+        component; this predicate is what keeps them out of the sufficient statistics, and what a
+        latent model's initialization consults before handing this component any responsibility.
+        """
+        values = np.asarray(x[0])
+        return np.isfinite(values) & (values > 0.0)
+
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: ParetoDistribution | None
     ) -> None:
@@ -292,6 +310,7 @@ class ParetoAccumulator(SequenceEncodableStatisticAccumulator):
         weights = np.asarray(weights, dtype=np.float64)
         if weights.shape != np.asarray(xx).shape or np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
             raise ValueError("Pareto weights must be finite, non-negative, and aligned with observations.")
+        refuse_unsupported_observations(self.supported_rows(x), weights, message=_PARETO_SUPPORT_MESSAGE)
         mask = weights > 0.0
         if np.any(mask):
             self.count += np.sum(weights[mask], dtype=np.float64)
@@ -410,8 +429,27 @@ class ParetoDataEncoder(DataSequenceEncoder):
         return isinstance(other, ParetoDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
-        """Encode observations as values and log-values."""
+        """Encode observations as values and log-values, admitting rows outside the support.
+
+        An encoder admits out-of-support observations so a mixture can encode ONE batch against
+        every component: the component that does not own a value scores it -inf and the E-step gives
+        it no responsibility (P02-F03). This one refused instead, which made any mixture containing
+        a Pareto component unencodable the moment another component owned a non-positive value --
+        ``optimize`` on a Gaussian-plus-Pareto mixture died at encode time on data both components
+        can jointly explain, and said so as a type error about disjoint types (Q01-F02).
+
+        ``seq_log_density`` already scores those rows -inf through its own ``xx >= xm`` mask, and
+        the scalar ``log_density(-1.0)`` already returned -inf, so the law never disagreed with
+        itself -- only the encoder did. NaN stays refused: it marks missing data rather than an
+        observation, which is the rule every sibling family applies.
+        """
         rv = np.asarray(x, dtype=np.float64)
-        if rv.size and (np.any(rv <= 0.0) or np.any(np.isnan(rv))):
-            raise ValueError("ParetoDistribution requires observations x > 0.")
-        return rv, np.log(rv)
+        if rv.size and np.any(np.isnan(rv)):
+            raise ValueError(
+                "Pareto observations contain %d NaN value(s). NaN marks missing data, not an "
+                "observation; drop or impute those rows." % int(np.count_nonzero(np.isnan(rv)))
+            )
+        positive = rv > 0.0
+        log_values = np.full(rv.shape, -np.inf, dtype=np.float64)
+        np.log(rv, out=log_values, where=positive)
+        return rv, log_values

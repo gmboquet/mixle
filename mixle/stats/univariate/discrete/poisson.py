@@ -723,6 +723,19 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum += x * weight
         self.count += weight
 
+    def supported_rows(self, x) -> "np.ndarray":
+        """Encoded rows this law can be fitted on: finite and non-negative.
+
+        The encoder admits out-of-support observations so that a mixture can encode a whole batch
+        against every component (P02-F03); this is the predicate that keeps them out of the
+        sufficient statistics, and the one a latent model's initialization consults before it hands
+        this component any responsibility. Without it the initializer could not tell that this
+        component does not own a row, seeded it from one anyway, and the refusal below then blamed
+        the DATA for a mixture the model can express -- a Poisson-plus-Geometric fit on counts with
+        zeros was refused outright (Q01-F02/Q02-F02).
+        """
+        return np.isfinite(x[0]) & (np.asarray(x[0]) >= 0)
+
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: Optional["PoissonDistribution"] = None
     ) -> None:
@@ -744,7 +757,7 @@ class PoissonAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         refuse_unsupported_observations(
-            np.isfinite(x[0]) & (np.asarray(x[0]) >= 0),
+            self.supported_rows(x),
             weights,
             message=_POISSON_SUPPORT_MESSAGE,
         )

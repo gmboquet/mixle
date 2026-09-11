@@ -547,6 +547,19 @@ class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
         self.sum += x * weight
         self.count += weight
 
+    def supported_rows(self, x) -> "np.ndarray":
+        """Encoded rows this law can be fitted on: finite and at least one.
+
+        The encoder admits out-of-support observations so that a mixture can encode a whole batch
+        against every component (P02-F03); this is the predicate that keeps them out of the
+        sufficient statistics, and the one a latent model's initialization consults before it hands
+        this component any responsibility. Without it the initializer could not tell that this
+        component does not own a row, seeded it from one anyway, and the refusal below then blamed
+        the DATA for a mixture the model can express -- a Poisson-plus-Geometric fit on counts with
+        zeros was refused outright (Q01-F02/Q02-F02).
+        """
+        return np.isfinite(x) & (np.asarray(x) >= 1)
+
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Optional["GeometricDistribution"]) -> None:
         """Vectorized update of sufficient statistics from encoded sequence x.
 
@@ -563,7 +576,7 @@ class GeometricAccumulator(SequenceEncodableStatisticAccumulator):
 
         """
         refuse_unsupported_observations(
-            np.isfinite(x) & (np.asarray(x) >= 1),
+            self.supported_rows(x),
             weights,
             message=_GEOMETRIC_SUPPORT_MESSAGE,
         )

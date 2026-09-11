@@ -245,9 +245,22 @@ class UniformAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
+    def supported_rows(self, x) -> "np.ndarray":
+        """Encoded rows this law can be fitted on: finite.
+
+        The encoder admits out-of-support observations so that a mixture can encode a whole batch
+        against every component (P02-F03); this is the predicate that keeps them out of the
+        sufficient statistics, and the one a latent model's initialization consults before it hands
+        this component any responsibility. Without it the initializer could not tell that this
+        component does not own a row, seeded it from one anyway, and the refusal below then blamed
+        the DATA for a mixture the model can express -- a Poisson-plus-Geometric fit on counts with
+        zeros was refused outright (Q01-F02/Q02-F02).
+        """
+        return np.isfinite(x)
+
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: UniformDistribution | None) -> None:
         """Accumulate support bounds and count from encoded observations."""
-        refuse_unsupported_observations(np.isfinite(x), weights, message=_UNIFORM_SUPPORT_MESSAGE)
+        refuse_unsupported_observations(self.supported_rows(x), weights, message=_UNIFORM_SUPPORT_MESSAGE)
         mask = weights > 0.0
         if np.any(mask):
             self.count += np.sum(weights[mask], dtype=np.float64)
