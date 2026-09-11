@@ -153,6 +153,11 @@ class LaplaceDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF ``F^{-1}(q)``: the value at cumulative-probability index ``q`` (continuous unranking)."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="LaplaceDistribution.quantile")
         from scipy.stats import laplace as _sp
 
         return float(_sp.ppf(q, loc=self.mu, scale=self.b))

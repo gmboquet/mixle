@@ -269,6 +269,11 @@ class GeneralizedGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF F^{-1}(q)."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="GeneralizedGaussianDistribution.quantile")
         qv = float(q) - 0.5
         z = gammaincinv(1.0 / self.beta, 2.0 * abs(qv))
         return float(self.mu + math.copysign(self.alpha * z ** (1.0 / self.beta), qv))

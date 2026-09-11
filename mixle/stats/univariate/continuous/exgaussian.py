@@ -146,6 +146,11 @@ class ExponentiallyModifiedGaussianDistribution(SequenceEncodableProbabilityDist
 
     def quantile(self, q: float) -> float:
         """Inverse CDF ``F^{-1}(q)``."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="ExponentiallyModifiedGaussianDistribution.quantile")
         from scipy.stats import exponnorm
 
         return float(exponnorm.ppf(q, 1.0 / (self.lam * self.sigma), loc=self.mu, scale=self.sigma))

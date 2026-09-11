@@ -189,6 +189,11 @@ class NakagamiDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF F^{-1}(q)."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="NakagamiDistribution.quantile")
         return float(math.sqrt(self.omega * gammaincinv(self.m, float(q)) / self.m))
 
     def mean(self) -> float:

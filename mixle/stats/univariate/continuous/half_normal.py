@@ -233,6 +233,11 @@ class HalfNormalDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF F^{-1}(q)."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="HalfNormalDistribution.quantile")
         from scipy.special import erfinv
 
         return float(self.sigma * math.sqrt(2.0) * erfinv(float(q)))

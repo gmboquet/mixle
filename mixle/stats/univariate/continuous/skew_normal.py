@@ -117,6 +117,11 @@ class SkewNormalDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF ``F^{-1}(q)``."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="SkewNormalDistribution.quantile")
         from scipy.stats import skewnorm as _sp
 
         return float(_sp.ppf(q, self.shape, loc=self.loc, scale=self.scale))

@@ -280,6 +280,11 @@ class InverseGaussianDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF F^{-1}(q)."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="InverseGaussianDistribution.quantile")
         from scipy.stats import invgauss
 
         return float(invgauss.ppf(float(q), mu=self.mu / self.lam, scale=self.lam))

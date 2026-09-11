@@ -221,6 +221,11 @@ class SkellamDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF F^{-1}(q) (via scipy skellam)."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="SkellamDistribution.quantile")
         from scipy.stats import skellam
 
         return float(skellam.ppf(float(q), self.mu1, self.mu2))

@@ -223,6 +223,11 @@ class GumbelDistribution(SequenceEncodableProbabilityDistribution):
         the one continuous family that raised there, where Gaussian, Laplace and the rest already
         returned the infinities (P01-F12).
         """
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="GumbelDistribution.quantile")
         q = float(q)
         if math.isnan(q) or not 0.0 <= q <= 1.0:
             raise ValueError("GumbelDistribution.quantile: q must be in [0, 1].")

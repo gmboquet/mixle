@@ -199,6 +199,11 @@ class RicianDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF F^{-1}(q) (via scipy rice)."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="RicianDistribution.quantile")
         from scipy.stats import rice
 
         return float(rice.ppf(float(q), self.nu / self.sigma, scale=self.sigma))

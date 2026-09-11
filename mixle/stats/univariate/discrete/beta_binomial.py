@@ -130,6 +130,11 @@ class BetaBinomialDistribution(SequenceEncodableProbabilityDistribution):
 
     def quantile(self, q: float) -> float:
         """Inverse CDF F^{-1}(q) over {0..n}: the smallest count whose cdf reaches ``q`` (search on the cdf)."""
+        from mixle.stats.univariate.continuous._observation_contracts import (
+            validated_quantile_probability,
+        )
+
+        q = validated_quantile_probability(q, label="BetaBinomialDistribution.quantile")
         qq = float(q)
         if qq <= 0.0:
             return 0.0
