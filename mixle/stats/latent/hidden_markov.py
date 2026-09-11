@@ -1775,9 +1775,19 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
 
         emission_encoder, _ = _build_emission_encoder(_emission_encoders_from_dists(self.topics))
         pr_obs = self._state_seq_log_densities(emission_encoder.seq_encode(list(x)))
-        if self.terminal_states is not None and nn > 1:
+        if self.terminal_states is not None:
+            # BOTH halves of the restriction, not one. "No terminal state before the end" was
+            # enforced; "the last state must BE terminal" was not, so `viterbi`/`mode` returned paths
+            # ending in a non-terminal state -- paths this model scores as impossible -- and the
+            # last-row marginal came back off by 1.0 (Q02-F01). With both masks the ordinary
+            # recursion is exactly the restricted one: no position before the last can be terminal,
+            # so no transition can leave a terminal state, which is what `terminal_log_alpha`
+            # enforces directly. The length-1 case is the final position, so it takes the second
+            # mask alone -- the old `> 1` guard left a one-element sequence unrestricted entirely.
             pr_obs = np.array(pr_obs, dtype=float, copy=True)
-            pr_obs[:-1, self._terminal_mask] = -np.inf
+            if nn > 1:
+                pr_obs[:-1, self._terminal_mask] = -np.inf
+            pr_obs[-1, ~self._terminal_mask] = -np.inf
 
         delta = np.zeros((nn, num_states), dtype=np.float64)
         psi = np.zeros((nn, num_states), dtype=np.int32)
@@ -1812,9 +1822,19 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         """
         emission_encoder, _ = _build_emission_encoder(_emission_encoders_from_dists(self.topics))
         log_b = self._state_seq_log_densities(emission_encoder.seq_encode(list(x)))
-        if self.terminal_states is not None and log_b.shape[0] > 1:
+        if self.terminal_states is not None and log_b.shape[0] > 0:
+            # BOTH halves of the restriction, not one. "No terminal state before the end" was
+            # enforced; "the last state must BE terminal" was not, so `viterbi`/`mode` returned paths
+            # ending in a non-terminal state -- paths this model scores as impossible -- and the
+            # last-row marginal came back off by 1.0 (Q02-F01). With both masks the ordinary
+            # recursion is exactly the restricted one: no position before the last can be terminal,
+            # so no transition can leave a terminal state, which is what `terminal_log_alpha`
+            # enforces directly. The length-1 case is the final position, so it takes the second
+            # mask alone -- the old `> 1` guard left a one-element sequence unrestricted entirely.
             log_b = np.array(log_b, dtype=float, copy=True)
-            log_b[:-1, self._terminal_mask] = -np.inf
+            if log_b.shape[0] > 1:
+                log_b[:-1, self._terminal_mask] = -np.inf
+            log_b[-1, ~self._terminal_mask] = -np.inf
         return MarkovChainLatentPosterior(self.log_w, self.log_transitions, log_b)
 
     def posterior_predictive(self, x: list[T], seed: int | None = None) -> list[Any]:

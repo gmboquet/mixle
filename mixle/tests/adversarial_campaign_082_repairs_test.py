@@ -157,5 +157,77 @@ class QuantileDomainIsUniformTest(unittest.TestCase):
                 self.assertAlmostEqual(family(*args).quantile(0.5), expected, places=3)
 
 
+class TerminalStateReadoutsAgreeWithTheModelTest(unittest.TestCase):
+    """Q02-F01: the readouts enforced half the terminal restriction.
+
+    A terminal-state HMM's length is a stopping time at the first terminal state, so a path is
+    admissible only if it passes through no terminal state before the end AND ends in one.
+    ``latent_posterior`` and ``viterbi`` masked the first half only, so the last-row marginal came
+    back off by 1.0, ``mode()`` returned paths the model scores as impossible, and every FFBS draw
+    ended in a non-terminal state. ``seq_posterior`` and ``log_density`` were right the whole time,
+    which is why nothing flagged it.
+
+    With both masks the ordinary recursion IS the restricted one: no position before the last can be
+    terminal, so no transition can leave a terminal state. That is asserted here against
+    ``terminal_forward_backward`` rather than argued.
+    """
+
+    def _model(self, means, w, transitions, terminal):
+        from mixle.stats import GaussianDistribution, HiddenMarkovModelDistribution
+
+        return HiddenMarkovModelDistribution(
+            [GaussianDistribution(float(m), 1.0) for m in means],
+            w=w,
+            transitions=transitions,
+            terminal_states=terminal,
+        )
+
+    def test_the_readouts_equal_the_restricted_forward_backward(self):
+        from mixle.stats.latent.hidden_markov import (
+            _build_emission_encoder,
+            _emission_encoders_from_dists,
+            terminal_forward_backward,
+        )
+
+        rng = np.random.RandomState(0)
+        compared = 0
+        for _ in range(20):
+            k = int(rng.randint(2, 4))
+            terminal = sorted(set(rng.choice(k, size=int(rng.randint(1, k)), replace=False).tolist()))
+            model = self._model(
+                rng.normal(0, 3, k), rng.dirichlet(np.ones(k)), rng.dirichlet(np.ones(k), size=k), terminal
+            )
+            x = list(rng.normal(0, 3, int(rng.randint(1, 6))))
+            encoder, _ = _build_emission_encoder(_emission_encoders_from_dists(model.topics))
+            log_b = model._state_seq_log_densities(encoder.seq_encode(list(x)))
+            _, gamma, _ = terminal_forward_backward(model.log_w, model.log_transitions, log_b, model._terminal_mask)
+            if gamma is None:
+                continue
+            compared += 1
+            np.testing.assert_allclose(model.latent_posterior(x).marginals(), gamma, atol=1e-10)
+        self.assertGreater(compared, 10, "the sweep should compare a useful number of models")
+
+    def test_no_readout_puts_the_chain_in_a_non_terminal_state_at_the_end(self):
+        rng = np.random.RandomState(1)
+        for length in (1, 2, 4):
+            with self.subTest(length=length):
+                model = self._model([-3.0, 3.0], [0.5, 0.5], [[0.7, 0.3], [0.4, 0.6]], [1])
+                x = [-3.0] * length  # every observation favours the NON-terminal state 0
+                posterior = model.latent_posterior(x)
+                marginals = posterior.marginals()
+                # The admissible last-row marginal is exactly [0, 1]: only state 1 may end the chain.
+                np.testing.assert_allclose(marginals[-1], [0.0, 1.0], atol=1e-10)
+                self.assertEqual(int(posterior.mode()[-1]), 1)
+                self.assertEqual(int(model.viterbi(x)[-1]), 1)
+                for seed in range(25):
+                    self.assertEqual(int(posterior.sample(np.random.RandomState(seed))[-1]), 1)
+
+    def test_an_unrestricted_model_is_untouched(self):
+        """The masks must only apply when terminal_states is set."""
+        model = self._model([-3.0, 3.0], [0.5, 0.5], [[0.7, 0.3], [0.4, 0.6]], None)
+        marginals = model.latent_posterior([-3.0, -3.0, -3.0]).marginals()
+        self.assertGreater(marginals[-1][0], 0.5)  # free to end where the data points
+
+
 if __name__ == "__main__":
     unittest.main()
