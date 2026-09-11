@@ -401,5 +401,76 @@ class SupportLimitedComponentsCanBeMixedTest(unittest.TestCase):
         self.assertEqual(asymmetric, [], "these refuse rows they never declare unsupported")
 
 
+class EnsembleBurnInPaysForItsInitializationTest(unittest.TestCase):
+    """Q04-F11: ``how='ensemble'`` returned a wrong posterior at its default budget, silently.
+
+    ``_ensemble_p0`` deliberately draws HALF the walkers from the prior so one ensemble spans every
+    region the prior supports and genuine multimodality blows up the cross-ensemble R-hat instead of
+    being averaged away (RR22-12). The burn-in default predates that change and was never revisited,
+    so the walkers never contracted and the unburned prior cloud was reported as parameter
+    uncertainty -- sds 3.2-9.1x too WIDE on a 5-parameter model, where mcmc, nuts and hmc all
+    returned ratios of ~1.0. Nothing said so: split-R-hat is a deliberate NaN for ensembles (walkers
+    interact) and the cross-ensemble statistic needs ``chains >= 2``, so the single-chain default has
+    no statistic that can flag it.
+
+    Measured one control at a time: burn=500 -> 3.73 posterior sds off at a 9.14x sd ratio;
+    burn=1500 -> 0.19 and 1.06. Raising DRAWS does not fix it (burn=500/draws=5000 is still 1.05 off
+    at 5.37x), which is also why an ESS threshold would not have caught this: the extra draws lift
+    ess_bulk from 31 to 225 while the posterior stays 5x too wide. The sweeps needed grow with the
+    number of parameters -- 5 needed 1500, 18 needed ~5400 -- so the default scales with dimension,
+    as ``walkers`` already does.
+    """
+
+    @staticmethod
+    def _fit(burn):
+        from mixle.ppl import DiagGaussian, free
+
+        rng = np.random.RandomState(0)
+        x = np.stack([rng.normal(loc, 0.5, 300) for loc in (0, 2, 1, 3, 4)], axis=1)
+        kw = {} if burn is None else {"burn": burn}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fit = DiagGaussian(5, mean=free(5, name="v"), var=np.full(5, 0.25)).fit(
+                x.tolist(), how="ensemble", rng=np.random.RandomState(0), **kw
+            )
+        summary = fit.result.summary()
+        exact_sd = 0.5 / np.sqrt(300)
+        sds = np.array([summary["v%d" % i]["std"] for i in range(5)])
+        means = np.array([summary["v%d" % i]["mean"] for i in range(5)])
+        return np.abs(means - x.mean(0)).max() / exact_sd, (sds / exact_sd).max()
+
+    def test_the_default_budget_returns_the_posterior_it_claims(self):
+        error_sds, sd_ratio = self._fit(None)
+        self.assertLess(error_sds, 1.0, "the posterior mean is off by more than one posterior sd")
+        self.assertLess(sd_ratio, 1.5, "the reported posterior is far wider than the exact one")
+
+    def test_the_old_default_is_still_wrong_so_the_test_above_can_fail(self):
+        """A budget test that passes at any budget proves nothing; pin the defect it was written for."""
+        error_sds, sd_ratio = self._fit(500)
+        self.assertGreater(sd_ratio, 2.0, "burn=500 should still show the unburned prior cloud")
+
+    def test_the_default_scales_with_the_number_of_parameters(self):
+        """Five parameters needed 1500 sweeps and eighteen needed ~5400; a constant covers neither."""
+        import inspect
+
+        from mixle.ppl.inference import ensemble_fit
+
+        self.assertIsNone(inspect.signature(ensemble_fit).parameters["burn"].default)
+        source = inspect.getsource(ensemble_fit)
+        self.assertIn("max(1500, 300 * d)", source)
+
+    def test_an_explicit_budget_is_still_honoured_and_still_validated(self):
+        from mixle.ppl import Normal
+
+        rows = list(np.random.RandomState(0).normal(3, 1, 80))
+        mu = Normal(0, 10, name="mu")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fitted = Normal(mu, 1.0).fit(rows, how="ensemble", rng=np.random.RandomState(0), burn=200)
+            self.assertAlmostEqual(fitted.result.summary()["mu"]["mean"], 3.0, delta=0.3)
+            with self.assertRaises(ValueError):
+                Normal(mu, 1.0).fit(rows, how="ensemble", rng=np.random.RandomState(0), burn=-5)
+
+
 if __name__ == "__main__":
     unittest.main()

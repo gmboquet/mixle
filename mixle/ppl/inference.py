@@ -2762,7 +2762,22 @@ def ensemble_fit(
     data,
     *,
     draws: int = 1500,
-    burn: int = 500,
+    # Burn-in has to pay for the initialization. `_ensemble_p0` deliberately draws HALF the walkers
+    # from the prior so a single ensemble spans every region the prior supports and genuine
+    # multimodality blows up the cross-ensemble R-hat instead of being averaged away (RR22-12).
+    # That dispersion was added without revisiting this number, which predates it, and 500 sweeps is
+    # not enough for those walkers to contract: on a 5-dimensional DiagGaussian with 300 rows and
+    # every other control at its default, the returned posterior was 3.73 posterior sds off the
+    # exact mean with sds 3.2-9.1x too WIDE -- the unburned prior cloud, reported as parameter
+    # uncertainty -- while mcmc, nuts and hmc all returned sd ratios of ~1.0 (Q04-F11).
+    #
+    # Measured on that model, varying one control at a time: burn=500 gives 3.73 sds off and a
+    # 9.14x sd ratio; burn=1500 gives 0.19 and 1.06; burn=5000 gives 0.09 and 1.02. Raising DRAWS
+    # instead does not fix it -- burn=500 with draws=5000 is still 1.05 sds off at a 5.37x ratio --
+    # which is also why no ESS threshold would have caught this: those extra draws lift ess_bulk
+    # from 31 to 225 while the posterior stays 5x too wide, because more sweeps dilute the
+    # contamination without removing it.
+    burn: int | None = None,
     thin: int = 1,
     walkers: int | None = None,
     constraints=None,
@@ -2784,7 +2799,11 @@ def ensemble_fit(
     spreads them over a process pool)."""
     from mixle.inference.mcmc import affine_invariant_ensemble
 
-    draws, burn, thin, chains, parallel, rng = _sampler_controls(draws, burn, thin, chains, parallel, rng)
+    # `burn` is resolved against the model's dimension below, so it is validated there rather than
+    # here; everything else takes the shared path.
+    draws, _unused_burn, thin, chains, parallel, rng = _sampler_controls(
+        draws, 0 if burn is None else burn, thin, chains, parallel, rng
+    )
     log_target, _grad, slots, build, dmean, dstd, feasible = _prepare_target(
         rv,
         data,
@@ -2798,6 +2817,13 @@ def ensemble_fit(
     d = len(slots)
     if walkers is None:
         walkers = max(2 * (d + 1), 8)
+    if burn is None:
+        # Scaled with dimension for the same reason `walkers` above is: the stretch move contracts
+        # the deliberately overdispersed starting cloud one direction at a time, so the sweeps it
+        # needs grow with the number of parameters. A fixed 500 was the default and did not survive
+        # either model the campaign measured (Q04-F11).
+        burn = max(1500, 300 * d)
+    burn = _exact_int_control(burn, "burn", minimum=0)
     walkers = _exact_int_control(walkers, "walkers", minimum=max(2 * (d + 1), 4))
     if walkers % 2:
         raise ValueError("walkers must be even")
