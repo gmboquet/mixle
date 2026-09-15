@@ -554,7 +554,11 @@ repair claims in this changelog that did not hold on a documented route, and one
 this release introduced. The blocking and documentation findings are repaired here, together with
 the nine real findings that shared a blocking defect's mechanism. Every other finding is recorded,
 with the reviewer's reproduction, in `release-checklists/0.8.3-followups.md` (D-0217). Reports are
-retained in `release-checklists/0.8.2-reviews/pass-NN/`.
+retained in `release-checklists/0.8.2-reviews/pass-NN/`. An independent reviewer then re-ran every
+blocking reproduction on the candidate wheel with the repairs and attacked the repairs themselves
+(`release-checklists/0.8.2-reviews/rerun/`). Six held; the seventh, the ensemble budget, did not, and
+it is completed below together with four defects the reviewer found beside the repairs (V01-F01,
+V01-F03, V01-F04, V01-F06, V01-F08). The reviewer's remaining findings are recorded for 0.8.3.
 
 - **`quantile(q)` refuses an out-of-domain `q` on every family that defines it.** The R05-F07 repair
   reached fifteen of thirty-one: `HalfNormalDistribution(1).quantile(-0.1)` returned `-0.1257`,
@@ -573,7 +577,12 @@ retained in `release-checklists/0.8.2-reviews/pass-NN/`.
   it has no support off the integers, which is the rule the `Binomial` encoder already documented. A
   row that no component supports now scores `-inf` under the whole mixture, and the non-finite
   objective error reports how many rows did so; before, it named the cause only when every row did
-  (Q01-F02, Q02-F02, Q01-F04).
+  (Q01-F02, Q02-F02, Q01-F04). The generated engine kernels carried no support of their own, so once
+  the count encoders admitted such rows the numba-generated kernel scored a Bernoulli `-1` as a
+  positive log-probability and a Geometric `0` as finite, and the log-series kernel returned `+inf`
+  and NaN on torch; the support now sits in those families' base measures, and the numpy and torch engines both
+  return `-inf` (V01-F04). The generated kernels of `Beta`, `InverseGamma` and `LogGaussian` still return NaN
+  on torch for an out-of-support row; that is recorded for 0.8.3.
 - **A terminal-state HMM's readouts enforce both halves of the restriction.** The R05-F01 repair forbade
   a terminal state before the last position but never required the last state to be terminal: the
   last-row marginal came back off by 1.0, Viterbi and `mode()` returned paths ending in a non-terminal
@@ -586,7 +595,10 @@ retained in `release-checklists/0.8.2-reviews/pass-NN/`.
   only into `Posterior`, and `ConjugatePosterior` -- the default route for every conjugate model --
   answered with the plug-in predictive, a standard deviation of 2.03 where the integrated answer is
   2.31. The two classes now share the refusal instead of each carrying a copy of the pickling code
-  (Q04-F01).
+  (Q04-F01). A copy of a LIVE fit is not a restored pickle: `copy.deepcopy` used the same state
+  reduction and lost `predict()` with a message about a pickle round trip that never happened, where
+  0.8.1's deep copies integrated correctly. Copies keep the closures now; a pickle still refuses
+  (V01-F06).
 - **`how='ensemble'` returns the right posterior at its default budget.** Half the walkers start from
   prior draws, and the old default of 500 burn-in sweeps did not contract that cloud: on a
   5-parameter model the means came back 3.7 posterior standard deviations off and the spreads up to
@@ -597,8 +609,15 @@ retained in `release-checklists/0.8.2-reviews/pass-NN/`.
   sample size while the posterior stayed five times too wide -- which is why no ESS threshold was added. The
   docstring no longer calls the pooled draws near-independent, and it says what an explicit short
   `burn` still does: on the 18-group model at `burn=500`, `chains=2` reports an R-hat of 11.2 where
-  the default gives 1.03
-  (Q04-F11; Q07-F06 is recorded for 0.8.3).
+  the default gives 1.03 (Q04-F11; Q07-F06 is recorded for 0.8.3). The burn-in rule was half the
+  defect. The other half was where the walkers started: every real location parameter began at ONE
+  shared data mean, so on an 8-parameter location model whose column means run from -6 to 9 the far
+  coordinates were never reached, and the fit came back 141-149 posterior sds off with an MCSE of
+  0.008 -- at the default budget, at `burn=20000` and through `how='sample'`. The walkers now start
+  around the log-target's maximum over the location parameters, found before sampling; scale and
+  probability parameters keep their data-informed starts, and the prior-drawn half is unchanged. That
+  model is now within 0.14 sds, and a sweep over 5 to 12 parameters is within 0.18 on every seed
+  (V01-F01).
 - **One table gets one answer from every verb that reads data.** The R06-F03 repair gave the lifecycle
   and fit verbs a shared front door, and `fit_with_provenance`, `Monitor`, `Service.score`,
   `detect_drift` and `score_drift` still read a DataFrame or a mapping as its column names:
@@ -607,9 +626,12 @@ retained in `release-checklists/0.8.2-reviews/pass-NN/`.
   set, `best_of` (which refused a DataFrame `optimize` fits), `learn_structure` and
   `learn_bayesian_network` (which learned a mapping as two records of its keys). A DataFrame reaches a
   record model as rows keyed the way its encoder reads them, so a `RecordEstimator` fitted from a frame
-  can be fitted, evaluated, scored and drift-checked on that frame. The structure learners refuse a
-  sequence of scalars by name (Q05-F01, Q06-F01, Q06-F02, Q06-F03, Q06-F04, Q06-F05, Q02-F08,
-  Q03-F04).
+  can be fitted, evaluated, scored and drift-checked on that frame; a mapping of columns or a
+  structured array, which a record model cannot read, is refused by name on every verb, where the
+  drift verbs had reported DRIFT on two identical batches of it (V01-F03).
+  `learn_mixture_structure` and `mixture_structure_health` take the same front door (V01-F08). The
+  structure learners refuse a sequence of scalars, and dict rows, by name (Q05-F01, Q06-F01, Q06-F02,
+  Q06-F03, Q06-F04, Q06-F05, Q02-F08, Q03-F04).
 - **A fitted `TreeHiddenMarkovModelDistribution` writes JSON again.** A fit warms a per-level
   probability memo, and the serializer wrote it and then refused its own output, so every fitted tree
   HMM -- the gallery example fits one -- lost its JSON path, where 0.8.1 round-tripped. The memo is
