@@ -23,6 +23,7 @@ from mixle.stats import (
     dump_models,
     load_models,
 )
+from mixle.utils.optional_deps import HAS_NUMBA
 
 
 class FittedTreeHmmSerializesTest(unittest.TestCase):
@@ -221,6 +222,47 @@ class TerminalStateReadoutsAgreeWithTheModelTest(unittest.TestCase):
                 self.assertEqual(int(model.viterbi(x)[-1]), 1)
                 for seed in range(25):
                     self.assertEqual(int(posterior.sample(np.random.RandomState(seed))[-1]), 1)
+
+    def _seq_viterbi_fixture(self):
+        rng = np.random.RandomState(2)
+        model = self._model([-3.0, 0.0, 3.0], [0.4, 0.3, 0.3], [[0.6, 0.3, 0.1], [0.2, 0.6, 0.2], [0.1, 0.3, 0.6]], [2])
+        sequences = [[-3.0] * 4, [-3.0], [-3.0, -3.0, 3.0]] + [list(rng.normal(0, 3, n)) for n in (7, 2, 5)]
+        return model, sequences
+
+    def test_the_encoded_batch_viterbi_agrees_with_the_single_sequence_one(self):
+        """``seq_viterbi`` is a readout too, and the first repair left it on the unrestricted recursion.
+
+        On ``[-3, -3, -3, -3]`` it kept returning ``[0, 0, 0, 0]`` -- a path the model scores as
+        impossible -- after ``viterbi`` had been repaired to ``[0, 0, 0, 1]``. This is the
+        time-banded layout the model's own encoder produces.
+        """
+        model, sequences = self._seq_viterbi_fixture()
+        banded = model.dist_to_encoder().seq_encode(sequences)
+        flat = np.asarray(model.seq_viterbi(banded))
+        (_, _, _, _, idx_mat, _, _), _, _ = banded[0]
+        for i, x in enumerate(sequences):
+            with self.subTest(sequence=i):
+                path = flat[idx_mat[i, : len(x)]].tolist()
+                self.assertEqual(path, np.asarray(model.viterbi(x)).tolist())
+                self.assertEqual(path[-1], 2)
+
+    @unittest.skipUnless(HAS_NUMBA, "a sequence-contiguous encoding is produced only by the numba encoder")
+    def test_the_contiguous_layout_is_restricted_the_same_way(self):
+        """The same check on the layout a numba-enabled encoder produces for the same data."""
+        from mixle.stats import HiddenMarkovModelDistribution
+
+        model, sequences = self._seq_viterbi_fixture()
+        twin = HiddenMarkovModelDistribution(model.topics, w=model.w, transitions=model.transitions, use_numba=True)
+        contiguous = twin.dist_to_encoder().seq_encode(sequences)
+        self.assertIsNotNone(contiguous[1], "the numba encoder should produce the contiguous layout")
+        flat = np.asarray(model.seq_viterbi(contiguous))
+        offset = 0
+        for i, x in enumerate(sequences):
+            with self.subTest(sequence=i):
+                path = flat[offset : offset + len(x)].tolist()
+                self.assertEqual(path, np.asarray(model.viterbi(x)).tolist())
+                self.assertEqual(path[-1], 2)
+            offset += len(x)
 
     def test_an_unrestricted_model_is_untouched(self):
         """The masks must only apply when terminal_states is set."""

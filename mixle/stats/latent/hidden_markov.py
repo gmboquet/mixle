@@ -1754,6 +1754,29 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         """
         return self.topics
 
+    def _restrict_to_terminal_paths(self, log_b: np.ndarray, is_last: np.ndarray) -> np.ndarray:
+        """Fold the ``terminal_states`` restriction into per-row emission log-densities.
+
+        ``is_last`` marks the rows that are the final position of their sequence. BOTH halves of the
+        restriction apply, not one: a terminal state may not occupy any other row, and the final row
+        must BE terminal. Enforcing only the first half is what returned Viterbi paths and FFBS draws
+        ending in a non-terminal state -- paths this model scores as impossible -- and a last-row
+        marginal off by 1.0 (Q02-F01). With both masks the ordinary recursion is exactly the
+        restricted one: no row before the last can be terminal, so no transition can leave a terminal
+        state, which is what `terminal_log_alpha` enforces directly. A length-1 sequence is its own
+        final position and takes the second mask alone.
+
+        Every readout shares this one fold -- `viterbi`, `latent_posterior` (and so `mode`, `sample`
+        and `posterior_predictive`) and the encoded `seq_viterbi` -- because the batch route was left
+        on the unrestricted recursion when the single-sequence routes were repaired (Q02-F01).
+        """
+        restricted = np.array(log_b, dtype=float, copy=True)
+        is_last = np.asarray(is_last, dtype=bool)
+        terminal = self._terminal_mask
+        restricted[np.ix_(~is_last, terminal)] = -np.inf
+        restricted[np.ix_(is_last, ~terminal)] = -np.inf
+        return restricted
+
     def viterbi(self, x: list[T]) -> np.ndarray:
         """Return the most likely latent-state path for a single observation sequence.
 
@@ -1776,18 +1799,7 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         emission_encoder, _ = _build_emission_encoder(_emission_encoders_from_dists(self.topics))
         pr_obs = self._state_seq_log_densities(emission_encoder.seq_encode(list(x)))
         if self.terminal_states is not None:
-            # BOTH halves of the restriction, not one. "No terminal state before the end" was
-            # enforced; "the last state must BE terminal" was not, so `viterbi`/`mode` returned paths
-            # ending in a non-terminal state -- paths this model scores as impossible -- and the
-            # last-row marginal came back off by 1.0 (Q02-F01). With both masks the ordinary
-            # recursion is exactly the restricted one: no position before the last can be terminal,
-            # so no transition can leave a terminal state, which is what `terminal_log_alpha`
-            # enforces directly. The length-1 case is the final position, so it takes the second
-            # mask alone -- the old `> 1` guard left a one-element sequence unrestricted entirely.
-            pr_obs = np.array(pr_obs, dtype=float, copy=True)
-            if nn > 1:
-                pr_obs[:-1, self._terminal_mask] = -np.inf
-            pr_obs[-1, ~self._terminal_mask] = -np.inf
+            pr_obs = self._restrict_to_terminal_paths(pr_obs, np.arange(nn) == nn - 1)
 
         delta = np.zeros((nn, num_states), dtype=np.float64)
         psi = np.zeros((nn, num_states), dtype=np.int32)
@@ -1823,18 +1835,8 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         emission_encoder, _ = _build_emission_encoder(_emission_encoders_from_dists(self.topics))
         log_b = self._state_seq_log_densities(emission_encoder.seq_encode(list(x)))
         if self.terminal_states is not None and log_b.shape[0] > 0:
-            # BOTH halves of the restriction, not one. "No terminal state before the end" was
-            # enforced; "the last state must BE terminal" was not, so `viterbi`/`mode` returned paths
-            # ending in a non-terminal state -- paths this model scores as impossible -- and the
-            # last-row marginal came back off by 1.0 (Q02-F01). With both masks the ordinary
-            # recursion is exactly the restricted one: no position before the last can be terminal,
-            # so no transition can leave a terminal state, which is what `terminal_log_alpha`
-            # enforces directly. The length-1 case is the final position, so it takes the second
-            # mask alone -- the old `> 1` guard left a one-element sequence unrestricted entirely.
-            log_b = np.array(log_b, dtype=float, copy=True)
-            if log_b.shape[0] > 1:
-                log_b[:-1, self._terminal_mask] = -np.inf
-            log_b[-1, ~self._terminal_mask] = -np.inf
+            length = log_b.shape[0]
+            log_b = self._restrict_to_terminal_paths(log_b, np.arange(length) == length - 1)
         return MarkovChainLatentPosterior(self.log_w, self.log_transitions, log_b)
 
     def posterior_predictive(self, x: list[T], seed: int | None = None) -> list[Any]:
@@ -1856,6 +1858,9 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
         result is indexed in the encoder's flattened sequence layout (time-banded for the blocked
         encoding, sequence-contiguous for the numba encoding). Use the data encoder metadata to map
         flattened assignments back to individual sequences when working directly with encoded data.
+
+        Under ``terminal_states`` each sequence's search is restricted to admissible paths exactly as
+        :meth:`viterbi` restricts it, so the two agree sequence by sequence.
         """
         x0, x1 = x
         num_states = self.n_states
@@ -1873,6 +1878,11 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
                 return ptr
 
             pr_obs = self._state_seq_log_densities(enc_data)
+            if self.terminal_states is not None:
+                is_last = np.zeros(tot_cnt, dtype=bool)
+                nonempty = np.asarray(len_vec) > 0
+                is_last[idx_mat[np.flatnonzero(nonempty), np.asarray(len_vec)[nonempty].astype(np.int64) - 1]] = True
+                pr_obs = self._restrict_to_terminal_paths(pr_obs, is_last)
             v = np.zeros((tot_cnt, num_states), dtype=np.float64)
             psi = np.zeros((tot_cnt, num_states), dtype=np.int32)
 
@@ -1916,6 +1926,10 @@ class HiddenMarkovModelDistribution(SequenceEncodableProbabilityDistribution):
                 return ptr
 
             pr_obs = self._state_seq_log_densities(enc_data)
+            if self.terminal_states is not None:
+                is_last = np.zeros(tot_cnt, dtype=bool)
+                is_last[tz[1:][sz > 0] - 1] = True
+                pr_obs = self._restrict_to_terminal_paths(pr_obs, is_last)
 
             for s in range(len(sz)):
                 s0, s1 = int(tz[s]), int(tz[s + 1])

@@ -1217,8 +1217,10 @@ class TerminalStateRoutesTest(unittest.TestCase):
         evidence = 0.0
         best_path, best_mass = None, -1.0
         for path in itertools.product(range(2), repeat=len(sequence)):
-            # Only the LAST position may be terminal.
-            if terminal and any(state in self.TERMINAL for state in path[:-1]):
+            # Only the LAST position may be terminal, and the last position MUST be: this enumeration
+            # used to apply the first half alone, which is the half-law the readouts implemented, so it
+            # passed for the reason the readouts were wrong (Q02-F01).
+            if terminal and (any(state in self.TERMINAL for state in path[:-1]) or path[-1] not in self.TERMINAL):
                 continue
             mass = start[path[0]] * np.exp(components[path[0]].log_density(sequence[0]))
             for t in range(1, len(sequence)):
@@ -1250,7 +1252,9 @@ class TerminalStateRoutesTest(unittest.TestCase):
         self.assertNotEqual(restricted_path, unrestricted_path)
 
     def test_a_sampled_path_never_visits_a_terminal_state_early(self):
-        """`.sample()` and `posterior_predictive` read the same object, so the restriction reaches them."""
+        """`.sample()` and `posterior_predictive` read the same object, so the restriction reaches them.
+
+        Both halves: no terminal state before the end, and a terminal state at the end."""
         model = self._model(True)
         sequence = self.SEQUENCES[0]
         posterior = model.latent_posterior(sequence)
@@ -1259,6 +1263,7 @@ class TerminalStateRoutesTest(unittest.TestCase):
             self.assertEqual(len(path), len(sequence))
             for state in path[:-1]:
                 self.assertNotIn(state, self.TERMINAL)
+            self.assertIn(path[-1], self.TERMINAL)
         drawn = model.posterior_predictive(sequence, seed=0)
         self.assertEqual(len(drawn), len(sequence))
 
