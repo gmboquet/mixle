@@ -2793,10 +2793,21 @@ def ensemble_fit(
     A population of walkers samples jointly with no per-dimension step tuning; it is invariant
     to affine rescalings, so it mixes well on correlated / poorly-scaled posteriors and gives
     very high ESS/sec on low/medium-dimensional models (no JIT-compile latency). Each ``draws``
-    sweep contributes all ``walkers`` states, so the pooled posterior has ``draws*walkers``
-    near-independent samples. Uses the fast NumPy scalar log-target (one eval per proposal).
-    ``chains>1`` runs independent ensembles for Gelman-Rubin R-hat / pooled ESS (``parallel``
-    spreads them over a process pool)."""
+    sweep contributes all ``walkers`` states to the pooled posterior, but those ``draws*walkers``
+    states are NOT independent: a walker is autocorrelated across sweeps and the walkers move
+    together, so the effective sample size is typically a small fraction of the pooled count
+    (read ``ess_bulk``, not the count). Uses the fast NumPy scalar log-target (one eval per proposal).
+
+    Half the walkers start from prior draws, so ``burn`` has to pay for contracting that cloud.
+    Left at ``None`` it scales with the number of parameters ``d`` as ``max(1500, 300*d)``; an
+    explicit smaller value is honoured as given, and a burn-in too short to contract the cloud
+    returns a posterior that is too wide and off-centre with a single-chain summary that cannot
+    see it -- on an 18-group model ``burn=500`` left rates 8.8 posterior sds from the exact answer
+    (Q04-F11, Q07-F06). ``chains>1`` runs independent ensembles for Gelman-Rubin R-hat / pooled
+    ESS (``parallel`` spreads them over a process pool). That between-chain R-hat is the
+    diagnostic that does flag an uncontracted ensemble -- on the same 18-group model, ``burn=500``
+    with ``chains=2`` reports R-hat 11.2, against 1.03 at the default burn -- so use it whenever
+    the budget is not the default."""
     from mixle.inference.mcmc import affine_invariant_ensemble
 
     # `burn` is resolved against the model's dimension below, so it is validated there rather than
