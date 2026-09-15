@@ -16,6 +16,7 @@ thresholds, suitable for a monitoring loop (see :class:`mixle.inference.producti
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -141,8 +142,13 @@ def score_drift(model: Any, reference: Any, current: Any) -> dict:
     each was unscorable -- because a shift measured over a handful of surviving finite scores is not
     the same claim as one measured over the whole sample.
     """
-    ref_rows = list(reference)
-    cur_rows = list(current)
+    from mixle.inference.estimation import tabular_records
+
+    # The fit verbs' front door rather than ``list()``: a DataFrame iterates as its column labels, so a
+    # frame the model was fitted from was scored as two header strings and reported n_current=2
+    # (Q05-F01, Q06-F04).
+    ref_rows = tabular_records(reference, "score_drift(reference)", target=model)
+    cur_rows = tabular_records(current, "score_drift(current)", target=model)
     ll_ref = _log_densities(model, ref_rows)
     ll_cur = _log_densities(model, cur_rows)
     fr = ll_ref[np.isfinite(ll_ref)]
@@ -217,6 +223,10 @@ def _raw_columns(records: Any, n_fields: int) -> list[list[Any]]:
     # collapsed the whole batch into ONE scalar column, so a two-field batch was compared against
     # the reference's first field alone and a false drift verdict tripped a retrain (P05-F06).
     first = rows[0]
+    if isinstance(first, Mapping):
+        # A record model's rows are mappings; iterating one yields its KEYS, so treating the batch as
+        # one scalar column tried to code whole dicts and died on "unhashable type: 'dict'" (Q06-F05).
+        return [[row.get(key) for row in rows] for key in first]
     if isinstance(first, np.ndarray) and first.ndim == 1:
         return [[row[i] for row in rows] for i in range(int(first.shape[0]))]
     if not isinstance(first, (tuple, list)):
@@ -328,8 +338,11 @@ def detect_drift(
     one-shot iterable is safe: consuming the stream twice previously left the feature pass with empty
     columns and manufactured a PSI-infinity DRIFT verdict out of two identical inputs.
     """
-    reference = list(reference)
-    current = list(current)
+    from mixle.inference.estimation import tabular_records
+
+    # Read through the same front door as the fit verbs, for the reason score_drift gives (Q05-F01).
+    reference = tabular_records(reference, "detect_drift(reference)", target=model)
+    current = tabular_records(current, "detect_drift(current)", target=model)
     if not reference:
         raise ValueError("drift detection requires a non-empty reference dataset")
     if not current:
@@ -368,6 +381,8 @@ def detect_drift(
             names = [f.name for f in Schema.for_model(model).fields]
         except Exception:  # noqa: BLE001
             names = None
+        if isinstance(reference[0], Mapping):
+            names = list(reference[0])  # the columns come out in the record's own key order
         n_fields = len(names) if names else 1
         ref_raw = _raw_columns(reference, n_fields)
         cur_raw = _raw_columns(current, n_fields)

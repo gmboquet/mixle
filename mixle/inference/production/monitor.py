@@ -43,7 +43,7 @@ class Monitor:
 
         self.model = model
         self.estimator = estimator
-        self.reference = self._materialize(reference, "reference")
+        self.reference = self._materialize(reference, "reference", model)
         self.thresholds = {
             "psi_threshold": float(psi_threshold),
             "ks_threshold": float(ks_threshold),
@@ -53,7 +53,7 @@ class Monitor:
         self.header: Header | None = getattr(model, "header", None)
 
     @staticmethod
-    def _materialize(data: Any, name: str) -> list:
+    def _materialize(data: Any, name: str, model: Any = None) -> list:
         """Through the fit verbs' front door: a drift batch is read the same way a fit reads it.
 
         This carried its own copy of "records() if present, else iterate", so a DataFrame handed to
@@ -62,14 +62,14 @@ class Monitor:
         """
         from mixle.inference.estimation import tabular_records
 
-        batch = tabular_records(data, f"Monitor({name})")
+        batch = tabular_records(data, f"Monitor({name})", target=model)
         if not batch:
             raise ValueError(f"{name} data must contain at least one observation")
         return batch
 
     def check(self, current: Any) -> DriftReport:
         """Drift report of ``current`` (production) data against the reference under the current model."""
-        batch = self._materialize(current, "current")
+        batch = self._materialize(current, "current", self.model)
         return detect_drift(self.model, self.reference, batch, **self.thresholds)
 
     def update(self, current: Any, *, retrain: bool = True, combine_reference: bool = True, **fit_kw: Any) -> dict:
@@ -78,7 +78,7 @@ class Monitor:
         :attr:`history`. ``combine_reference`` retrains on reference + current (else current only)."""
         if not isinstance(retrain, bool) or not isinstance(combine_reference, bool):
             raise TypeError("retrain and combine_reference must be booleans")
-        batch = self._materialize(current, "current")
+        batch = self._materialize(current, "current", self.model)
         report = detect_drift(self.model, self.reference, batch, **self.thresholds)
         action = "none"
         header = self.header

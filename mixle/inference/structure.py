@@ -23,7 +23,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.inference.estimation import _caller_stacklevel, fit
+from mixle.inference.estimation import _caller_stacklevel, fit, tabular_records
 from mixle.stats.combinator.conditional import ConditionalDistributionEstimator
 from mixle.stats.compute.pdist import FitProvenance, FitProvenanceCarrier
 
@@ -41,7 +41,16 @@ def _columns(data: Sequence[tuple]) -> list[list[Any]]:
             "structure learning received no records: the data is empty. A DAG (or dependency tree) "
             "cannot be searched without observations."
         )
-    n = len(data[0])
+    first = data[0]
+    if isinstance(first, (str, bytes, bytearray)) or not hasattr(first, "__len__"):
+        # A sequence of scalars is a univariate sample, not a table; it died here as "object of type
+        # 'float' has no len()", and a list of strings was transposed into columns of CHARACTERS.
+        raise ValueError(
+            "structure learning requires one record per row with one entry per field (a tuple, list, "
+            "or DataFrame row), but record 0 is a single %s. A univariate sample has no dependency "
+            "structure to learn; fit it with optimize() instead." % type(first).__name__
+        )
+    n = len(first)
     for index, row in enumerate(data):
         if len(row) != n:
             raise ValueError(
@@ -1057,7 +1066,10 @@ def learn_structure(
     itself was nondeterministic.)
     """
     rng = np.random.RandomState(0) if rng is None else rng
-    data = list(data)
+    # The fit verbs' front door, not ``list(data)``: a DataFrame iterates as its column names and a
+    # mapping as its keys, so a frame was learned as a two-observation tree over its HEADERS -- an
+    # empty frame included -- and a str as its characters (Q03-F04).
+    data = tabular_records(data, "learn_structure()")
     cols = _columns(data)
     n_fields = len(cols)
     templates = list(field_estimators) if field_estimators is not None else [_field_estimator(c) for c in cols]

@@ -54,7 +54,7 @@ def _contains_nonfinite_number(value: Any) -> bool:
     return False
 
 
-def _serving_records(data, entry: str) -> list:
+def _serving_records(data, entry: str, model: Any = None) -> list:
     """Observation records, read the way every fit verb reads them.
 
     The scoring verbs each spelled this as ``list(data)``, which is correct for a list of records
@@ -64,7 +64,7 @@ def _serving_records(data, entry: str) -> list:
     """
     from mixle.inference.estimation import tabular_records
 
-    return tabular_records(data, entry)
+    return tabular_records(data, entry, target=model)
 
 
 class Service:
@@ -84,7 +84,7 @@ class Service:
         self.name = name
         # Same front door as the fit verbs: a DataFrame reference iterates as its column labels
         # under a bare list() and the drift baseline becomes the header strings (Q05-F01).
-        self.reference = _serving_records(reference, "Service(reference=)") if reference is not None else None
+        self.reference = _serving_records(reference, "Service(reference=)", model) if reference is not None else None
         self.log_path = log_path
         # ``keep`` bounds the activity log, and ``activity[-0:]`` is a FULL slice: keep=0 kept
         # everything (unbounded), keep=-1 discarded every event so health() reported zero events
@@ -149,7 +149,7 @@ class Service:
                 silently accept. Raised only for a batch call that *succeeded* with the wrong shape;
                 it is not itself treated as a reason to retry per-record.
         """
-        recs = _serving_records(records, "Service.score()")
+        recs = _serving_records(records, "Service.score()", self.model)
         n_expected = len(recs)
         t0 = time.time()
         n_unavailable = 0
@@ -245,7 +245,7 @@ class Service:
             raise ValueError("Service has no reference sample; pass reference= to enable drift checks")
         from mixle.inference.production.drift import detect_drift
 
-        report = detect_drift(self.model, self.reference, _serving_records(records, "Service.drift()"))
+        report = detect_drift(self.model, self.reference, _serving_records(records, "Service.drift()", self.model))
         self._log({"time": time.time(), "op": "drift", "model": self.name, "drift": report.drift})
         return report
 

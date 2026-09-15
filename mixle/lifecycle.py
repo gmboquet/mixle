@@ -150,11 +150,11 @@ class DeployedArtifact(str):
         return self
 
 
-def _tabular_records(data: Any, entry: str = "fit()") -> list:
+def _tabular_records(data: Any, entry: str = "fit()", target: Any = None) -> list:
     """``data`` as a list of observation records; see :func:`mixle.inference.estimation.tabular_records`."""
     from mixle.inference.estimation import tabular_records
 
-    return tabular_records(data, entry)
+    return tabular_records(data, entry, target=target)
 
 
 def saddle_suspect(fitted: Any, data: Any, *, sample: int = 200, tol: float = 0.02) -> bool:
@@ -284,7 +284,7 @@ class Model:
         # disclosed below via the fit-provenance receipt.
         optimize_kw.setdefault("max_its", 500)
         source = data.records() if hasattr(data, "records") and callable(data.records) else data
-        rows = _tabular_records(source, "Model.fit()")
+        rows = _tabular_records(source, "Model.fit()", self.spec)
         if not rows:
             raise ValueError("fit requires at least one training record")
         if restarts not in ("auto", None) and (
@@ -484,7 +484,7 @@ class Model:
         but does not raise, unlike ``NaN``/``+inf``, both of which are unconditionally scorer bugs.
         """
         d = self._require_fitted()
-        rows = _tabular_records(data, "Model.evaluate()")
+        rows = _tabular_records(data, "Model.evaluate()", d)
         if not rows:
             raise ValueError("evaluate requires at least one held-out record")
         enc = d.dist_to_encoder().seq_encode(rows)

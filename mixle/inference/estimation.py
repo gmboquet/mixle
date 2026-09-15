@@ -269,7 +269,7 @@ def _reusable_observations(data: Any, entry: str = "optimize()") -> Any:
         return data  # not iterable: leave it to the caller's own validation
 
 
-def tabular_records(data: Any, entry: str = "fit()") -> list:
+def tabular_records(data: Any, entry: str = "fit()", *, target: Any = None) -> list:
     """``data`` as a list of observation records -- always one record per ROW, never per column.
 
     A pandas ``DataFrame`` iterates as its column labels and a mapping iterates as its keys, so a bare
@@ -296,10 +296,18 @@ def tabular_records(data: Any, entry: str = "fit()") -> list:
     ``n_records=2``, ``fit_with_provenance('hello world hello', ...)`` stamped ``n_records=17``
     for the characters, and ``Monitor.update`` and the scoring verbs read the same way, while
     ``optimize`` on the same frame was correct (Q05-F01). One function, every verb.
+
+    ``target`` is the model or estimator the records are for. A record model is defined on MAPPING
+    rows keyed the way its encoder reads them, so a DataFrame handed to it has to arrive as those
+    mappings -- the conversion ``optimize(df, RecordEstimator(...))`` already applied. Without it a
+    record model fitted from a frame could not be fitted by ``Model.fit``, evaluated, scored, or
+    drift-checked on the same frame: every one of those refused the tuple rows (Q06-F05).
     """
     if hasattr(data, "records") and callable(data.records) and hasattr(data, "structure"):
         return list(data.records())  # a mixle DataSource
     if hasattr(data, "columns") and hasattr(data, "itertuples"):  # a pandas DataFrame (duck-typed)
+        if _recordish(target):
+            return list(_data_records_for_encoding(data, None, target, target))
         from mixle.data.sources.pandas_source import dataframe_records
 
         return dataframe_records(data)
@@ -2035,6 +2043,11 @@ def optimize(
     )
     rng = _resolve_rng_arg(rng, seed)
     data = _reusable_observations(data, "optimize()")
+    # The validation set is the same kind of table as the data and meets the same front door: it was
+    # handed to the encoder raw, so a mapping of columns was read as its keys, a structured array as
+    # void scalars, and a str or a masked array reached the encoder instead of being refused by name
+    # (Q06-F01).
+    vdata = _reusable_observations(vdata, "optimize(vdata=)")
     # An explicit ``print_iter`` asks for progress and now supplies the stream that carries it, rather
     # than being inert whenever ``out`` was left at its quiet default (P08-F04). ``print_iter=0`` is a
     # request for NO periodic lines, so it brings no stream; an absent ``print_iter`` keeps the
@@ -2621,6 +2634,7 @@ def best_of(
     """
     rng = _resolve_rng_arg(rng, seed)
     data = _reusable_observations(data, "best_of()")
+    vdata = _reusable_observations(vdata, "best_of(vdata=)")
     if data is None and enc_data is None:
         raise ValueError(
             "best_of() received no observations: data and enc_data are both None. "
@@ -2640,14 +2654,17 @@ def best_of(
     trials = max(1, trials)
     i_est = est if init_estimator is None else init_estimator
 
-    # encode once and reuse across trials (each trial re-initializes from rng)
+    # encode once and reuse across trials (each trial re-initializes from rng). The records are the
+    # ones optimize() encodes: a DataFrame is its rows (keyed by source for a record estimator) and a
+    # view such as dict.values() is materialized. Encoding `data` as handed over refused the frame
+    # optimize fits with "expected 2-tuples, got DataFrame" (Q06-F02).
     if enc_data is None:
         encoder = _resolve_encoder(i_est)
-        enc_data = seq_encode(data, encoder)
+        enc_data = seq_encode(_data_records_for_encoding(data, None, i_est, None), encoder)
         if enc_vdata is None and vdata is not None:
-            enc_vdata = seq_encode(vdata, encoder)
+            enc_vdata = seq_encode(_data_records_for_encoding(vdata, None, i_est, None), encoder)
     elif enc_vdata is None and vdata is not None:
-        enc_vdata = seq_encode(vdata, _resolve_encoder(i_est))
+        enc_vdata = seq_encode(_data_records_for_encoding(vdata, None, i_est, None), _resolve_encoder(i_est))
     score_data = enc_data if enc_vdata is None else enc_vdata
 
     rv_ll, rv_mm = -np.inf, None

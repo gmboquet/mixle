@@ -1168,11 +1168,6 @@ def _column_routing(
     return vec_dims, discrete, opaque, templates, levels
 
 
-def _dataframe_like(data: Any) -> bool:
-    """Duck-typed DataFrame check, matching ``mixle.inference.estimation``'s."""
-    return hasattr(data, "columns") and hasattr(data, "loc")
-
-
 def learn_bayesian_network(
     data: Sequence[tuple],
     *,
@@ -1201,13 +1196,12 @@ def learn_bayesian_network(
     # A DataFrame iterates as its column NAMES, so ``list(df)`` handed the search two strings and it
     # returned a one-field categorical over them -- with a receipt claiming n_observations=2 whatever
     # the frame held, and an EMPTY frame fitted as a two-record corpus rather than named as an empty
-    # one (R02-F07). ``optimize`` already converts a frame to the flat records the encoding path
-    # fits; this is the same conversion, so both entry points read the same table the same way.
-    if _dataframe_like(data):
-        from mixle.inference.estimation import _data_records_for_encoding
+    # one (R02-F07). Converting only a DataFrame left the other spellings on ``list(data)``: a mapping
+    # of columns was fitted as two records of its KEYS and a str as its characters (Q02-F08). The fit
+    # verbs' own front door reads every spelling, so both entry points read one table the same way.
+    from mixle.inference.estimation import tabular_records
 
-        data = _data_records_for_encoding(data, None, None, None)
-    data = list(data)
+    data = tabular_records(data, "learn_bayesian_network()")
     cols = _columns(data)
     n_fields = len(cols)
     n = len(data)

@@ -343,14 +343,137 @@ class OneTableOneAnswerTest(unittest.TestCase):
         self.assertFalse(report.drift, "a frame checked against itself is not drifted")
 
     def test_the_verbs_share_one_normalizer(self):
-        """The duplication was the defect; assert it is gone rather than trusting behaviour alone."""
+        """The duplication was the defect; assert it is gone rather than trusting behaviour alone.
+
+        This check once listed three modules and passed while ``detect_drift`` -- a fourth, named in
+        the same finding -- still called ``list(current)``. The behavioural tests below are the
+        real guard; this one only keeps the listed modules from growing a private spelling back.
+        """
         import inspect
 
-        from mixle.inference.production import monitor, provenance, serving
+        from mixle.inference import bayesian_network, structure
+        from mixle.inference.production import drift, monitor, provenance, serving
 
-        for module in (monitor, provenance, serving):
+        for module in (drift, monitor, provenance, serving, structure, bayesian_network):
             with self.subTest(module=module.__name__.rsplit(".", 1)[-1]):
                 self.assertIn("tabular_records", inspect.getsource(module))
+
+    def _table(self, n=60):
+        rng = np.random.RandomState(0)
+        x = rng.normal(size=n)
+        return {"x": x.tolist(), "k": (x > 0).astype(int).tolist()}
+
+    def test_the_drift_functions_read_a_frame_as_its_rows(self):
+        """``detect_drift`` and ``score_drift`` were still ``list(current)``: two column labels, n_current=2."""
+        from mixle.inference import optimize
+        from mixle.inference.production import detect_drift
+        from mixle.inference.production.drift import score_drift
+
+        frame = self._frame()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = optimize(frame, max_its=2)
+            report = detect_drift(model, frame, frame)
+            score = score_drift(model, frame, frame)
+        self.assertEqual(report.score["n_current"], 4)
+        self.assertFalse(report.drift, "a frame checked against itself is not drifted")
+        self.assertEqual((score["n_reference"], score["n_current"]), (4, 4))
+        with self.assertRaises(ValueError) as caught:
+            score_drift(model, frame, "hello world")
+        self.assertIn("score_drift(current)", str(caught.exception))
+
+    def test_the_validation_set_meets_the_same_front_door_as_the_data(self):
+        """Q06-F01: ``vdata=`` reached the encoder raw on ``optimize``, ``fit`` and ``best_of``."""
+        from mixle.inference import best_of, optimize
+        from mixle.stats import CategoricalEstimator, CompositeEstimator
+
+        table = self._table()
+        rows = list(zip(table["x"], table["k"]))
+        estimator = CompositeEstimator([GaussianEstimator(), CategoricalEstimator()])
+        pandas = __import__("pandas")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for spelling, vdata in (
+                ("mapping of columns", table),
+                ("generator", (row for row in rows)),
+                ("DataFrame", pandas.DataFrame(table)),
+            ):
+                with self.subTest(vdata=spelling):
+                    model = optimize(rows, estimator, vdata=vdata, max_its=2, out=None)
+                    self.assertEqual(type(model).__name__, "CompositeDistribution")
+            _, best = best_of(rows, pandas.DataFrame(table), estimator, 1, 2, 0.1, 1e-6, rng=1)
+            self.assertEqual(type(best).__name__, "CompositeDistribution")
+        with self.assertRaises(ValueError) as caught:
+            optimize(rows, estimator, vdata="hello", max_its=2, out=None)
+        self.assertIn("optimize(vdata=)", str(caught.exception))
+
+    def test_best_of_reads_a_frame_as_the_rows_it_holds(self):
+        """Q06-F02: ``best_of(DataFrame)`` raised "expected 2-tuples, got DataFrame".
+
+        Compared against ``best_of`` on the same rows spelled as tuples, not against ``optimize``:
+        ``optimize`` also runs automatic structure search when no estimator is given and ``best_of``
+        does not, so their model classes can legitimately differ on correlated columns. What must not
+        differ is the data each verb reads, and with one seed the two spellings give the same fit.
+        """
+        from mixle.inference import best_of
+
+        table = self._table()
+        frame = __import__("pandas").DataFrame(table)
+        rows = list(zip(table["x"], table["k"]))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            expected_ll, expected = best_of(rows, None, None, 1, 2, 0.1, 1e-6, rng=1)
+            for spelling, data in (("DataFrame", frame), ("dict.values()", dict(enumerate(rows)).values())):
+                with self.subTest(data=spelling):
+                    ll, model = best_of(data, None, None, 1, 2, 0.1, 1e-6, rng=1)
+                    self.assertEqual(type(model).__name__, type(expected).__name__)
+                    self.assertAlmostEqual(ll, expected_ll, places=9)
+
+    def test_the_structure_learners_read_a_table_and_refuse_what_is_not_one(self):
+        """Q06-F03 / Q02-F08 / Q03-F04: a mapping of columns was learned as two records of its KEYS."""
+        from mixle.inference import learn_bayesian_network, learn_structure
+
+        table = self._table()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for learner in (learn_structure, learn_bayesian_network):
+                with self.subTest(learner=learner.__name__, data="mapping of columns"):
+                    model = learner(table, max_its=2) if learner is learn_bayesian_network else learner(table)
+                    self.assertEqual(model.fit_provenance().n_observations, len(table["x"]))
+                with self.subTest(learner=learner.__name__, data="str"):
+                    with self.assertRaises(ValueError) as caught:
+                        learner("hello world hello")
+                    self.assertIn(learner.__name__, str(caught.exception))
+                with self.subTest(learner=learner.__name__, data="scalars"):
+                    with self.assertRaises(ValueError) as caught:
+                        learner([1.0, 2.0, 3.0])
+                    self.assertIn("one entry per field", str(caught.exception))
+
+    def test_a_record_model_works_on_every_route_its_fit_does(self):
+        """Q06-F05: ``optimize(df, RecordEstimator(...))`` fitted, and no other verb could read that frame."""
+        from mixle import Model
+        from mixle.inference import optimize
+        from mixle.inference.production import Monitor, Service, detect_drift
+        from mixle.stats import CategoricalEstimator
+        from mixle.stats.combinator.record import RecordEstimator, field
+
+        pandas = __import__("pandas")
+        rng = np.random.RandomState(0)
+        frame = pandas.DataFrame({"x": rng.normal(size=80), "k": ["a", "b"] * 40})
+        rows = frame.to_dict("records")
+        estimator = RecordEstimator(
+            [field("mean", "x"), field("kind", "k")], [GaussianEstimator(), CategoricalEstimator()]
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = optimize(frame, estimator, max_its=3, out=None)
+            self.assertTrue(Model(estimator).fit(frame, max_its=2).fitted)
+            self.assertEqual(Model(estimator).fit(rows, max_its=2).evaluate(frame)["n"], 80)
+            self.assertEqual(np.asarray(Service(model).score(frame)).shape, (80,))
+            for spelling, data in (("DataFrame", frame), ("mapping rows", rows)):
+                with self.subTest(drift_input=spelling):
+                    self.assertFalse(detect_drift(model, data, data).drift)
+            self.assertFalse(Monitor(model, estimator, rows).check(frame).drift)
 
 
 class SupportLimitedComponentsCanBeMixedTest(unittest.TestCase):

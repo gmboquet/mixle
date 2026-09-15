@@ -180,7 +180,7 @@ def _resource_usage() -> dict:
         return {}
 
 
-def _records(data: Any):
+def _records(data: Any, target: Any = None):
     """``data`` as observation records, through the same front door every fit verb uses.
 
     This was ``records()`` if present, else iterate the object -- which is the right answer for a
@@ -192,14 +192,14 @@ def _records(data: Any):
     """
     from mixle.inference.estimation import tabular_records
 
-    return tabular_records(data, "fit_with_provenance()")
+    return tabular_records(data, "fit_with_provenance()", target=target)
 
 
 def _final_loglik(model: Any, data: Any) -> float | None:
     try:
         import numpy as np
 
-        enc = model.dist_to_encoder().seq_encode(list(_records(data)))
+        enc = model.dist_to_encoder().seq_encode(list(_records(data, model)))
         return float(np.sum(model.seq_log_density(enc)))
     except Exception:  # noqa: BLE001
         return None
@@ -442,7 +442,7 @@ def fit_with_provenance(
 
     # Consume any sequence, DataSource, or one-shot iterator exactly once. This immutable request
     # snapshot is then shared by fitting, final scoring, record counting, and hashing.
-    materialized_data = list(_records(data))
+    materialized_data = list(_records(data, estimator))
 
     # optimize()'s OWN defaults, not a hardcoded guess: a caller who relies on optimize()'s
     # defaults (doesn't pass max_its=/delta= explicitly) used to have those recorded as bare
