@@ -1,0 +1,10 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "a7345ca7fbe7a0ca79900bc18058a38633c2924e",
+ "command": "for e in testpypi pypi; do echo \"== $e\"; gh api repos/gmboquet/mixle/environments/$e --jq '[.protection_rules[]|{type, reviewers: [.reviewers[]?.reviewer.login]}]'; gh api repos/gmboquet/mixle/environments/$e/deployment-branch-policies --jq '[.branch_policies[]|\"\\(.type):\\(.name)\"]'; done; grep -nE 'environment: testpypi|environment: pypi|id-token: write|gh-action-pypi-publish@|repository-url|verify_rehearsal_record.py' .github/workflows/publish.yml",
+ "date": "2026-09-15",
+ "evidence_digest": "5891693f640d621258f13afac4cc2fff386588d3016dc162dcb042a20faa29f5",
+ "gate": "TestPyPI",
+ "note": "Closed on capability (D-0198). The rehearsal itself runs on the v0.8.2rc1 tag before the final and again for v0.8.2 (D-0216, amended 2026-09-15 at the owner's direction); promote refuses without a record bound to the exact candidate commit, prepare run and SHA256SUMS.",
+ "result": "testpypi environment: 2 protection rules (required_reviewers with reviewer gmboquet; branch_policy) and 2 deployment refs (tag:v*, branch:release/0.8.0); pypi environment: the same 2 rules and 2 refs; publish.yml runs the testpypi job in `environment: testpypi` (line 348) with id-token: write (352) and pypa/gh-action-pypi-publish pinned to ba38be9e against https://test.pypi.org/legacy/ (377-380), and runs promote in `environment: pypi` (439), where scripts/verify_rehearsal_record.py checks the rehearsal record (500, 505) before the publish step (547)"
+}

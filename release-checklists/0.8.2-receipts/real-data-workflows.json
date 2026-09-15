@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "f3111688edd3fd5e516b4ea623d201a371102c24",
+ "candidate_commit": "a7345ca7fbe7a0ca79900bc18058a38633c2924e",
  "command": "echo -n 'example files naming a dataset: '; ls examples | grep -icE 'adult|sunspot|banking'; echo -n 'examples total: '; ls examples/*.py | wc -l | tr -d ' '; echo -n 'dataset-name hits: '; grep -rilE 'banking77|sunspots|adult' examples | wc -l | tr -d ' '; echo -n 'datasets in pyproject: '; grep -c 'datasets' pyproject.toml",
- "date": "2026-09-11",
- "evidence_digest": "2c14d5b3aad57051328c911e868fbfe82dc928fe8cb6bb1042dce6a522f42599",
+ "date": "2026-09-15",
+ "evidence_digest": "5891693f640d621258f13afac4cc2fff386588d3016dc162dcb042a20faa29f5",
  "gate": "Real-data workflows",
  "note": "The gate documents an absence rather than a capability, and this is the same result 0.8.1 recorded. The harness exit is grep's: `grep -c` returns 1 when it counts zero.",
  "result": "0 of the 57 examples/*.py name a real-world dataset (adult/sunspot/banking), 0 dataset-name hits under examples/, and 0 occurrences of 'datasets' in pyproject.toml"

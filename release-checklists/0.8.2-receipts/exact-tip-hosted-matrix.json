@@ -1,0 +1,10 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "a7345ca7fbe7a0ca79900bc18058a38633c2924e",
+ "command": "SHA=a7345ca7fbe7a0ca79900bc18058a38633c2924e; gh api --paginate --slurp \"repos/gmboquet/mixle/commits/$SHA/check-runs?per_page=100\" > $SC/check-runs-live.json && PYTHONPATH=. <venv>/bin/python scripts/verify_required_checks.py --required .github/release-required-checks.txt --input $SC/check-runs-live.json --sha $SHA --repository gmboquet/mixle; echo EXIT=$?",
+ "date": "2026-09-15",
+ "evidence_digest": "5891693f640d621258f13afac4cc2fff386588d3016dc162dcb042a20faa29f5",
+ "gate": "Exact-tip hosted matrix",
+ "note": "publish.yml re-runs this verifier live against each tagged commit, so the verdict does not carry to a later commit: the v0.8.2rc1 and v0.8.2 tags each get their own dispatch as the last action before tagging. The Tests and Security push runs on this commit were superseded by the dispatches and show as cancelled; they are not selected.",
+ "result": "exit 0 on a7345ca7 with publication_authorized true: all 30 required job-level names completed/success, selected from 86 check runs on the commit (check_runs_sha256 19543c52c73d12f61a23365170c0f019c0d6bbbece5ed9883115eca74b120288) -- 24 from tests.yml workflow_dispatch run 34975417566, 4 from Security workflow_dispatch run 34975384960, 1 from the Extras resolver matrix push run 34975360431 and 1 from the Docs push run 34975360391; the dispatch run's own 'release check evidence / attested record' job is success (104410818676)"
+}

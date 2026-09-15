@@ -1,10 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "f3111688edd3fd5e516b4ea623d201a371102c24",
- "command": "PYTHONPATH=. <venv>/bin/python scripts/check_optional_extras.py; echo EXIT=$?; grep -E '^requires-python' pyproject.toml",
- "date": "2026-09-11",
- "evidence_digest": "2c14d5b3aad57051328c911e868fbfe82dc928fe8cb6bb1042dce6a522f42599",
+ "candidate_commit": "a7345ca7fbe7a0ca79900bc18058a38633c2924e",
+ "command": "PYTHONPATH=. <venv>/bin/python scripts/check_optional_extras.py; echo EXIT=$?; grep -E '^requires-python' pyproject.toml; gh api 'repos/gmboquet/mixle/actions/runs/34975360431/jobs?per_page=100' --jq '\"run head_sha: \\(.jobs[0].head_sha)\", ([.jobs[]|select(.name|startswith(\"install .\"))|.conclusion]|group_by(.)|map(\"install lanes \\(.[0]): \\(length)\")|.[]), (.jobs[]|select(.name==\"extras matrix / exact candidate\")|\"\\(.name): \\(.conclusion)\")'",
+ "date": "2026-09-15",
+ "evidence_digest": "5891693f640d621258f13afac4cc2fff386588d3016dc162dcb042a20faa29f5",
  "gate": "Extras resolver and supported Python/OS matrix",
- "note": "The hosted check runs cited here were produced on f9c8bc8f. The only tracked file that changed between that commit and the one this receipt names is release-checklists/0.8.2.md, which ships in neither the wheel nor the sdist (verified against the built wheel's name list), so no code the hosted lanes exercised differs.",
- "result": "scripts/check_optional_extras.py printed 'all equals the runtime-feature extra union', exit 0; pyproject.toml declares requires-python = \">=3.11,<3.13\"; all 21 `install .[<extra>]` lanes are green on this SHA"
+ "result": "scripts/check_optional_extras.py printed 'all equals the runtime-feature extra union', exit 0; pyproject.toml declares requires-python = \">=3.11,<3.13\"; on this commit all 24 `install .[<extra>]` lanes and 'extras matrix / exact candidate' are success (Extras resolver matrix run 34975360431)"
 }

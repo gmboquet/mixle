@@ -1,0 +1,10 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "a7345ca7fbe7a0ca79900bc18058a38633c2924e",
+ "command": "gh api repos/gmboquet/mixle/actions/runs/34975384960 --jq '\"run \\(.id): \\(.name) event=\\(.event) head_sha=\\(.head_sha) \\(.status)/\\(.conclusion)\"'; gh api repos/gmboquet/mixle/actions/runs/34975384960/jobs --jq '.jobs[] | \"JOB: \\(.name) :: \\(.conclusion) (id \\(.id))\", (.steps[] | select(.name|test(\"audit|SBOM|bandit|security analysis|gitleaks\";\"i\")) | \"   \\(.name) :: \\(.conclusion)\")'; J=$(gh api repos/gmboquet/mixle/actions/runs/34975384960/jobs --jq '.jobs[] | select(.name==\"gitleaks (full history)\") | .id'); gh run view --repo gmboquet/mixle --job $J --log | grep -oE 'event type: [a-z_]+|[0-9]+ commits scanned|no leaks found' | sort -u; echo -n 'waivers declared: '; python3 -c \"import json; print(len(json.load(open('.github/pip-audit-waivers.json'))['waivers']))\"",
+ "date": "2026-09-15",
+ "evidence_digest": "5891693f640d621258f13afac4cc2fff386588d3016dc162dcb042a20faa29f5",
+ "gate": "Dependency and static security audit",
+ "note": "Dispatched rather than push-triggered, because on a push event gitleaks-action scans only the pushed commits (A-11). The dispatch superseded this workflow's push run on the same commit, whose jobs show as cancelled; the required-check verifier selects the latest run per name.",
+ "result": "Security run 34975384960, a workflow_dispatch on a7345ca7, completed/success with 4 of 4 jobs success: pip-audit (base install), including 'Audit only the isolated wheel environment' and 'Generate and bind the artifact SBOM'; pip-audit (all runtime features), including 'Audit complete runtime-feature environment' and 'Bind complete-runtime SBOM to candidate and wheel'; bandit (source security); and gitleaks (full history), which scanned 5194 commits (event type workflow_dispatch) and found no leaks. .github/pip-audit-waivers.json declares 0 waivers"
+}
