@@ -1,4 +1,4 @@
-"""Exact count / rank / unrank over an autoregressive model's sequence space, without enumerating it.
+"""Count / rank / unrank over an autoregressive model's sequence space, without enumerating it.
 
 :class:`mixle.enumeration.AutoregressiveEnumerable` wraps a plain ``next_logprobs(prefix) -> [(token,
 log_prob), ...]`` callable -- the next-token log-probabilities given a prefix, e.g. the log_softmax of
@@ -8,6 +8,13 @@ space of complete sequences it defines: "how many sequences are at least this pr
 most probable sequence" (``unrank``), all *without* ever materializing or sorting the full sequence
 space. The trick is that the number of model queries is bounded by the number of *distinct prefixes*
 the recursion actually visits, not by the sequence count or the requested rank.
+
+What is exact: ``count``, ``rank`` and ``top_k``, and every log-probability any query returns.
+``unrank`` (and ``threshold``, which reads off it) orders the space through a quantized index -- exact
+between fine buckets ``bin_width_bits / oversample`` bits wide and unspecified within one, as its own
+docstring says -- so ``rank(unrank(i))`` can differ from ``i`` where neighbouring sequences are
+nearly tied. At this script's ``oversample=64`` that happens at 2 to 18 of the 125 indices, depending on the
+seed; raise ``oversample`` to shrink the window, or use ``top_k`` for a strictly sorted head.
 
 This example uses a small synthetic prefix-dependent logit table -- a fixed random tensor indexed by
 (depth, previous token) -- to keep it fast and dependency-free (no torch, no network, no download). A
@@ -120,7 +127,10 @@ def main():
     seq, log_p = ar.unrank(query_index)
     back = ar.rank(seq)
     print(f"     unrank({query_index}) -> {seq}   log_p={log_p:.4f}")
-    print(f"     rank({seq}) -> {back.rank}   (round-trips to {query_index}: {back.rank == query_index})")
+    print(
+        f"     rank({seq}) -> {back.rank}   (round-trips to {query_index}: {back.rank == query_index}; unrank's order is "
+        "exact only between fine buckets, so a near-tie can land elsewhere)"
+    )
     print(
         f"     -> prefixes queried so far: {len(counted.queried)} of {prefix_bound}  (unrank built the full seek index once)"
     )

@@ -24,7 +24,10 @@ soft assignment and its optimum depends on the draw. Rather than assert a recove
 always achieve, the script RESTARTS (``best_of``) and then PRINTS what it got -- the held-out mean
 log-density of the fit beside the generating model's on the same sequences -- so a run that landed on
 a poor optimum is visible in the output instead of being hidden behind a printed model (P10-F07).
-Runtime is ~20-25 s (1000 EM iterations with ``delta=None``, i.e. no early stop).
+The budget is four restarts of up to 400 EM iterations each (``best_of(data, valid, est, 4, 400, 1.0,
+None, ...)``: ``trials``, ``max_its``, ``init_p``, ``delta``). ``delta=None`` removes the convergence
+stop, so every restart gets the same budget, although a rejected update still ends a run early. No
+fixed runtime is claimed.
 """
 
 import numpy as np

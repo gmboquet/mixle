@@ -9,11 +9,13 @@ the existing `unittest.TestCase` tests intact.  Pytest markers in
 ```sh
 python -m pytest -m fast
 python -m pytest
-python -m pytest -m "slow and not optional and not benchmark"
+python -m pytest -m full
 python -m pytest -m "torch or mpi"
 ```
 
-`fast` is the per-commit gate.  Full CI runs all non-optional tests.  Optional
+`fast` is the per-commit gate.  `full` is every test that is neither optional nor a benchmark --
+`conftest.py` assigns it -- and is what full CI runs.  Pass one `-m` only: pytest keeps the last one,
+so `-m full -m ""` silently selects everything, optional tiers included.  Optional
 extras such as torch, MPI, UMAP, and platform-specific accelerators are marked
 separately so they can be enabled in dedicated jobs.
 

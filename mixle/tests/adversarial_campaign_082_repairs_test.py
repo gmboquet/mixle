@@ -46,18 +46,24 @@ class FittedTreeHmmSerializesTest(unittest.TestCase):
         data = source.sampler(1).sample(150)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            return source, optimize(
+            fitted = optimize(
                 data,
                 TreeHiddenMarkovEstimator([GaussianEstimator(), GaussianEstimator()], len_estimator=PoissonEstimator()),
                 max_its=8,
                 rng=np.random.RandomState(1),
                 out=None,
             )
+        # Only the numba scoring route reads the memo, so only there does a fit (or any later scoring)
+        # warm it; on a base install the encoded batch takes the other route and the memo stays cold,
+        # which is why this test first passed locally and then failed on the numba-free CI lanes.
+        # Warm it through its own builder, so every environment serializes the state that broke.
+        fitted._get_p_level(4)
+        return source, fitted
 
     def test_a_fitted_tree_hmm_round_trips_through_json(self):
         source, fitted = self._fitted()
         # The memo really is warm: without that this test would pass on the broken tree too.
-        self.assertIsNotNone(fitted._p_level_cache, "the fit should have warmed the level memo")
+        self.assertIsNotNone(fitted._p_level_cache, "the level memo should be warm before serializing")
         self.assertIsNone(source._p_level_cache)
         for label, model in (("constructed", source), ("fitted", fitted)):
             with self.subTest(model=label):

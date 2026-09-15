@@ -146,12 +146,16 @@ One call, each part fit by the right M-step: Baum-Welch for the Markov dynamics,
 inside a state, gradient descent for the neural leaf. Every node is an estimator, so the tree nests as
 deep as the model does — the call at the top never changes.
 
-`max_its` is the one knob that is not optional here. `optimize` runs **10** EM iterations by default,
-which is a sensible budget for a single leaf and far too few for a model with this much structure:
-at the default the transition matrix comes back with both rows pointing at one state and the neural
-leaf's scale several times too wide. `optimize` warns when it stops at the cap and
-`model.fit_provenance().converged` is `False`, so an under-budgeted fit says so — but the number to
-raise is `max_its`.
+`max_its` is the one knob that is not optional here — and raising it is necessary, not sufficient.
+`optimize` runs **10** EM iterations by default, a sensible budget for a single leaf and far too few for
+a model with this much structure: at the default the transition matrix comes back with both rows
+pointing at one state and the neural leaf's scale several times too wide. More iterations do not choose
+the basin, though. On data built to match this snippet, `max_its=300` still stopped at the cap on three
+of three seeds, with the neural leaf holding one of the mixture's clusters and both transition rows
+still pointing at one state. `optimize` warns when it stops at the cap and
+`model.fit_provenance().converged` is `False`, so an unfinished fit says so. Check that and the
+transition matrix, and compare restarts (`best_of`, or several `rng=` seeds) by held-out
+log-likelihood rather than trusting a single run.
 
 ## Engines & scale
 
@@ -193,7 +197,7 @@ from mixle.enumeration import AutoregressiveEnumerable
 
 name = "HuggingFaceTB/SmolLM2-135M"
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+llm = AutoModelForCausalLM.from_pretrained(name).float().eval()   # the numbers below are float32
 prompt = tokenizer("The capital of France is", return_tensors="pt").input_ids
 
 @torch.no_grad()
@@ -325,7 +329,7 @@ Real-dataset walkthroughs live in
 ```sh
 python -m pytest path/to/focused_test.py    # the smallest relevant test while developing
 python -m pytest                            # the fast local gate (~3 min on a laptop)
-python -m pytest -m full -m ""              # everything non-optional (~15 min at -n auto)
+python -m pytest -m full                    # everything non-optional (~15 min at -n auto)
 ```
 
 Hosted CI runs the same tiers sharded across runners — core, full (four shards plus a combined
