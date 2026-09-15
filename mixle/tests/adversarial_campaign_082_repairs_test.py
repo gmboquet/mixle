@@ -481,6 +481,50 @@ class OneTableOneAnswerTest(unittest.TestCase):
                     self.assertFalse(detect_drift(model, data, data).drift)
             self.assertFalse(Monitor(model, estimator, rows).check(frame).drift)
 
+    def test_a_record_model_refuses_a_mapping_of_columns_on_every_verb(self):
+        """V01-F03: the drift verbs read a mapping of columns as TUPLE rows, scored every row -inf, and
+        reported DRIFT on two identical batches -- then ``Monitor.update`` crashed retraining on them,
+        while every fit verb refused the same input. One answer everywhere now: a named refusal."""
+        from mixle.inference import optimize
+        from mixle.inference.production import Monitor, Service, detect_drift
+        from mixle.stats import CategoricalEstimator
+        from mixle.stats.combinator.record import RecordEstimator
+
+        pandas = __import__("pandas")
+        frame = pandas.DataFrame({"x": np.random.RandomState(0).normal(size=60), "k": ["a", "b"] * 30})
+        estimator = RecordEstimator(["x", "k"], [GaussianEstimator(), CategoricalEstimator()])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = optimize(frame, estimator, max_its=3, out=None)
+        columns = {"x": frame["x"].tolist(), "k": frame["k"].tolist()}
+        structured = frame.to_records(index=False)
+        for spelling, data in (("mapping of columns", columns), ("structured array", structured)):
+            for verb, call in (
+                ("detect_drift", lambda d=data: detect_drift(model, d, d)),
+                ("Monitor.check", lambda d=data: Monitor(model, estimator, frame).check(d)),
+                ("Service.score", lambda d=data: Service(model).score(d)),
+            ):
+                with self.subTest(verb=verb, data=spelling):
+                    with self.assertRaises(TypeError) as caught:
+                        call()
+                    self.assertIn("record model", str(caught.exception))
+        self.assertFalse(detect_drift(model, frame, frame).drift, "the DataFrame spelling still reads rows")
+
+    def test_the_mixture_structure_learners_read_a_table_too(self):
+        """V01-F08: ``learn_mixture_structure`` and ``mixture_structure_health`` were still ``list(data)``,
+        and every structure learner died on ``KeyError: 0`` for dict rows."""
+        from mixle.inference import learn_structure, mixture_structure_health
+        from mixle.inference.structure import learn_mixture_structure
+
+        table = self._table(80)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            mixture = learn_mixture_structure(table, 2)
+            self.assertIsInstance(mixture_structure_health(mixture, __import__("pandas").DataFrame(table)), dict)
+        with self.assertRaises(ValueError) as caught:
+            learn_structure([{"x": 1.0, "k": 0}, {"x": 2.0, "k": 1}])
+        self.assertIn("mapping", str(caught.exception))
+
 
 class SupportLimitedComponentsCanBeMixedTest(unittest.TestCase):
     """Q01-F02 / Q02-F02: a mixture refused a model it can express, and blamed the data.
@@ -786,10 +830,32 @@ class EnsembleBurnInPaysForItsInitializationTest(unittest.TestCase):
         self.assertLess(error_sds, 1.0, "the posterior mean is off by more than one posterior sd")
         self.assertLess(sd_ratio, 1.5, "the reported posterior is far wider than the exact one")
 
-    def test_the_old_default_is_still_wrong_so_the_test_above_can_fail(self):
-        """A budget test that passes at any budget proves nothing; pin the defect it was written for."""
-        error_sds, sd_ratio = self._fit(500)
-        self.assertGreater(sd_ratio, 2.0, "burn=500 should still show the unburned prior cloud")
+    @staticmethod
+    def _grouped_worst_error(**budget):
+        from mixle.ppl import Bernoulli, Beta
+
+        hits = [18, 17, 16, 15, 14, 14, 13, 12, 11, 11, 10, 10, 10, 10, 10, 9, 8, 7]
+        games = [[1.0] * h + [0.0] * (45 - h) for h in hits]
+        a, b = 164.0, 453.9
+        exact = np.array([(a + h) / (a + b + 45) for h in hits])
+        exact_sd = np.sqrt(exact * (1 - exact) / (a + b + 46))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fit = Bernoulli(Beta(a, b).each()).fit(games, how="ensemble", rng=np.random.RandomState(0), **budget)
+        summary = fit.result.summary()
+        means = np.array([summary["p[%d]" % i]["mean"] for i in range(18)])
+        return float((np.abs(means - exact) / exact_sd).max())
+
+    def test_the_prior_drawn_walkers_still_need_the_scaled_burn_in(self):
+        """A budget test that passes at any budget proves nothing; pin the defect it was written for.
+
+        The location anchor below made the five-parameter model right even at ``burn=500``, so the
+        control now lives where the burn-in rule is what matters: a grouped model whose slots carry a
+        proper prior, where half the walkers start from prior draws. At ``burn=500`` it is still many
+        posterior sds off; at the default it is not.
+        """
+        self.assertGreater(self._grouped_worst_error(draws=1000, burn=500), 3.0)
+        self.assertLess(self._grouped_worst_error(), 1.0)
 
     def test_the_default_scales_with_the_number_of_parameters(self):
         """Five parameters needed 1500 sweeps and eighteen needed ~5400; a constant covers neither."""
@@ -800,6 +866,36 @@ class EnsembleBurnInPaysForItsInitializationTest(unittest.TestCase):
         self.assertIsNone(inspect.signature(ensemble_fit).parameters["burn"].default)
         source = inspect.getsource(ensemble_fit)
         self.assertIn("max(1500, 300 * d)", source)
+
+    @staticmethod
+    def _far_apart_error(anchored=True):
+        """V01-F01's model: eight location parameters whose posteriors sit up to 600 widths apart."""
+        from unittest import mock
+
+        from mixle.ppl import DiagGaussian, free, inference
+
+        rng = np.random.RandomState(0)
+        x = np.stack([rng.normal(loc, 0.5, 300) for loc in (0.0, 2.0, 1.0, 3.0, 4.0, -6.0, 9.0, -3.0)], axis=1)
+        unanchored = lambda log_target, slots, dmean, dstd, feasible=None: inference._init_u(slots, dmean, dstd)  # noqa: E731
+        with (
+            warnings.catch_warnings(),
+            mock.patch.object(inference, "_ensemble_anchor", inference._ensemble_anchor if anchored else unanchored),
+        ):
+            warnings.simplefilter("ignore")
+            fit = DiagGaussian(8, mean=free(8, name="v"), var=np.full(8, 0.25)).fit(
+                x.tolist(), how="ensemble", rng=np.random.RandomState(0)
+            )
+        summary = fit.result.summary()
+        means = np.array([summary["v%d" % i]["mean"] for i in range(8)])
+        return float(np.abs(means - x.mean(0)).max() / (0.5 / np.sqrt(300)))
+
+    def test_far_apart_location_parameters_start_where_their_posterior_is(self):
+        """V01-F01: every location slot started at ONE shared data mean, and the default ensemble
+        never walked the far coordinates home -- 141 posterior sds off with an MCSE of 0.008, at the
+        default budget and at 20,000 burn-in sweeps. The anchor is the target's maximum over the
+        location slots; the control without it shows this test can fail."""
+        self.assertLess(self._far_apart_error(anchored=True), 1.0)
+        self.assertGreater(self._far_apart_error(anchored=False), 10.0)
 
     def test_an_explicit_budget_is_still_honoured_and_still_validated(self):
         from mixle.ppl import Normal
@@ -812,6 +908,102 @@ class EnsembleBurnInPaysForItsInitializationTest(unittest.TestCase):
             self.assertAlmostEqual(fitted.result.summary()["mu"]["mean"], 3.0, delta=0.3)
             with self.assertRaises(ValueError):
                 Normal(mu, 1.0).fit(rows, how="ensemble", rng=np.random.RandomState(0), burn=-5)
+
+
+class EngineKernelsScoreOutOfSupportAsImpossibleTest(unittest.TestCase):
+    """V01-F04: the generated engine kernels had no support of their own.
+
+    Once the count encoders admitted out-of-support rows, the numba-generated NumPy kernel scored
+    Bernoulli ``-1`` as a POSITIVE log-probability and Geometric ``0`` as ``-0.85``, the log-series
+    kernel returned ``+inf`` and NaN on torch, and an engine fit reported a finite validation
+    objective for a validation set the default route refuses. The support now sits in each family's
+    exponential-family base measure (as the Poisson family's already did) and in the log-series
+    backend scorer, so every engine returns the ``-inf`` the numpy scorer returns.
+    """
+
+    CASES = (
+        ("BernoulliDistribution", (0.3,), [0, 1, 2, -1]),
+        ("GeometricDistribution", (0.3,), [1, 2, 0, -1]),
+        ("LogSeriesDistribution", (0.5,), [1, 2, 0, -2]),
+    )
+
+    def _engines(self):
+        from mixle.engines.numpy_engine import NumpyEngine
+
+        engines = [("numpy", NumpyEngine())]
+        try:
+            from mixle.engines import TorchEngine
+
+            engines.append(("torch", TorchEngine(device="cpu", dtype="float64")))
+        except ImportError:
+            pass
+        return engines
+
+    def test_every_engine_agrees_with_the_numpy_scorer_off_the_support(self):
+        from mixle import stats
+
+        for name, args, rows in self.CASES:
+            dist = getattr(stats, name)(*args)
+            encoded = dist.dist_to_encoder().seq_encode(rows)
+            expected = np.asarray(dist.seq_log_density(encoded), dtype=float)
+            self.assertTrue(np.isneginf(expected[2:]).all(), "the numpy scorer is the reference")
+            for label, engine in self._engines():
+                with self.subTest(family=name, engine=label):
+                    try:
+                        kernel = dist.kernel(engine=engine)
+                    except Exception as exc:  # noqa: BLE001 -- an engine this family does not support
+                        self.skipTest(f"{label} declines {name}: {exc}")
+                    got = np.asarray(engine.to_numpy(kernel.score(encoded)), dtype=float)
+                    np.testing.assert_allclose(got[:2], expected[:2], rtol=1e-12)
+                    self.assertTrue(np.isneginf(got[2:]).all(), f"{label} scored impossible rows as {got[2:]}")
+
+    def test_an_engine_fit_refuses_an_impossible_validation_set_like_the_default_route(self):
+        from mixle.engines.numpy_engine import NumpyEngine
+        from mixle.stats import BernoulliEstimator
+
+        train = np.random.RandomState(0).binomial(1, 0.3, 300).tolist()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for label, extra in (("default", {}), ("numpy engine", {"engine": NumpyEngine()})):
+                with self.subTest(route=label):
+                    with self.assertRaises(ValueError) as caught:
+                        optimize(train, BernoulliEstimator(), vdata=[0, 1, 1, 0, 2, -1], max_its=5, out=None, **extra)
+                    self.assertIn("validation", str(caught.exception))
+
+
+class CopiedPosteriorsStillPredictTest(unittest.TestCase):
+    """V01-F06: a copy of a LIVE fit lost ``predict()``.
+
+    ``copy.deepcopy`` uses ``__getstate__`` when a class defines one, and the posterior's
+    ``__getstate__`` exists to drop the closures pickling cannot carry. A deep copy -- a live object in
+    the same process -- was therefore refused with a message about a pickle round trip that never
+    happened, where 0.8.1's deep copies integrated correctly. A pickle round trip must still refuse.
+    """
+
+    def _fit(self, how):
+        from mixle.ppl import Normal
+
+        rows = list(np.random.RandomState(0).normal(5, 2, 3))
+        extra = {} if how is None else {"how": how, "draws": 300, "burn": 150, "rng": np.random.RandomState(0)}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return Normal(Normal(0, 10, name="mu"), 2.0).fit(rows, **extra)
+
+    def test_copies_integrate_and_a_pickle_still_refuses(self):
+        import copy
+        import pickle
+
+        for how in (None, "mcmc"):
+            fit = self._fit(how)
+            live = np.asarray(fit.predict(5000, rng=np.random.RandomState(1))).std()
+            for label, clone in (("deepcopy", copy.deepcopy(fit)), ("copy", copy.copy(fit))):
+                with self.subTest(route=how or "conjugate", copy=label):
+                    copied = np.asarray(clone.predict(5000, rng=np.random.RandomState(1))).std()
+                    self.assertAlmostEqual(copied, live, places=12)
+            with self.subTest(route=how or "conjugate", copy="pickle"):
+                with self.assertRaises(ValueError) as caught:
+                    pickle.loads(pickle.dumps(fit)).predict(10)
+                self.assertIn("restored from a pickle", str(caught.exception))
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import copy
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -42,6 +42,12 @@ def _columns(data: Sequence[tuple]) -> list[list[Any]]:
             "cannot be searched without observations."
         )
     first = data[0]
+    if isinstance(first, Mapping):
+        # Positional transposition of a dict row indexes it by 0, 1, ... and died on KeyError: 0.
+        raise ValueError(
+            "structure learning reads records positionally, one entry per field, but record 0 is a "
+            "mapping. Pass a DataFrame (its columns become the fields) or tuples in a fixed field order."
+        )
     if isinstance(first, (str, bytes, bytearray)) or not hasattr(first, "__len__"):
         # A sequence of scalars is a univariate sample, not a table; it died here as "object of type
         # 'float' has no len()", and a list of strings was transposed into columns of CHARACTERS.
@@ -810,7 +816,9 @@ def learn_mixture_structure(
     tie_tolerance = float(tie_tolerance)
     if not np.isfinite(tie_tolerance) or tie_tolerance < 0.0:
         raise ValueError("tie_tolerance must be a finite, non-negative number of nats")
-    data = list(data)
+    # The same front door as learn_structure: list(data) read a DataFrame or a mapping as its column
+    # names and refused them as a univariate sample of strings (V01-F08).
+    data = _tabular_records(data, "learn_mixture_structure()")
     n = len(data)
     if n == 0:
         raise ValueError("learn_mixture_structure requires at least one observation.")
@@ -982,7 +990,7 @@ def mixture_structure_health(
     from mixle.stats import MixtureDistribution
     from mixle.stats.combinator.conditional import ConditionalDistribution
 
-    data = list(data)
+    data = _tabular_records(data, "mixture_structure_health()")
     cols = _columns(data)
     dominant = mot.responsibilities(data).argmax(axis=1)
     components, diagnosis = [], []

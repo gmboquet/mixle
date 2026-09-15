@@ -210,6 +210,28 @@ class _DroppedClosurePickling:
         self.__dict__.update(state)
         self._dropped_closures = tuple(dropped)
 
+    def __copy__(self):
+        clone = type(self).__new__(type(self))
+        clone.__dict__.update(self.__dict__)
+        return clone
+
+    def __deepcopy__(self, memo: dict):
+        """A copy is a live object in this process, so the closures come with it.
+
+        ``copy.deepcopy`` reaches for ``__getstate__`` when a class defines one, and ``__getstate__``
+        exists to drop what PICKLING cannot carry. A deep copy of a live fit therefore lost
+        ``predict()`` and was refused with a message about a pickle round trip that never happened,
+        where 0.8.1's deep copies integrated correctly (V01-F06). ``deepcopy`` shares a function by
+        reference in any case, so the closures are shared and everything else is copied.
+        """
+        import copy
+
+        clone = type(self).__new__(type(self))
+        memo[id(self)] = clone
+        for key, value in self.__dict__.items():
+            clone.__dict__[key] = value if key in self._CLOSURE_FIELDS else copy.deepcopy(value, memo)
+        return clone
+
     def _refuse_dropped_closure(self, name: str) -> None:
         if name not in getattr(self, "_dropped_closures", ()):
             return
@@ -1375,7 +1397,65 @@ def _nuts_worker(seed, rv, data, kw):
     )
 
 
-def _ensemble_p0(slots, dmean, dstd, n_data, walkers, rng):
+def _ensemble_anchor(log_target, slots, dmean, dstd, feasible=None) -> np.ndarray:
+    """The data-informed point the ensemble's anchored walkers start around.
+
+    ``_init_u`` starts EVERY real location slot at one shared scalar -- the mean of all the data --
+    which is a reasonable start for a scalar location and a poor one for a vector of them. On an
+    8-parameter DiagGaussian whose column means run from -6 to 9, every coordinate started at 1.25,
+    up to 600 posterior widths from where its posterior sits; the stretch move only moves walkers
+    along directions the ensemble itself spans, the cloud contracted before it arrived, and the fit
+    came back 141-149 posterior sds off with an MCSE of 0.008 -- at the default budget, at 20,000
+    burn-in sweeps, and with ``how='sample'`` (V01-F01, the part of Q04-F11 the burn-in rule did not
+    reach). NUTS and HMC were right on the same model because their gradients carry them there.
+
+    So the anchor is moved to the log-target's local maximum over the real LOCATION slots, found by
+    L-BFGS-B from the shared start. Only those slots move: positive and unit slots keep their
+    data-informed values, and a non-centered latent keeps its zero, so a hierarchical scale cannot
+    be driven to the degenerate boundary a joint mode can sit on. The search is a starting point, not
+    an estimate -- the prior-drawn half of the walkers is unchanged, so an ensemble still spans the
+    prior for multimodality detection (RR22-12) -- and it falls back to the shared start whenever it
+    fails to improve the target or leaves the feasible set.
+    """
+    u0 = _init_u(slots, dmean, dstd)
+    real = [k for k, s in enumerate(slots) if s.support == "real" and s.reparam is None]
+    if not real:
+        return u0
+
+    def target_at(z):
+        u = u0.copy()
+        u[real] = z
+        if feasible is not None and not feasible(u):
+            return None
+        value = float(log_target(u))
+        return value if np.isfinite(value) else None
+
+    start = target_at(u0[real])
+    if start is None:
+        return u0
+    # An infeasible or non-finite point is scored a finite amount worse than the start, so a line search
+    # backtracks from it instead of differencing an infinity.
+    penalty = -start + 1e6 * (1.0 + abs(start))
+
+    def objective(z):
+        value = target_at(z)
+        return penalty if value is None else -value
+
+    try:
+        from scipy.optimize import minimize
+
+        result = minimize(objective, u0[real], method="L-BFGS-B", options={"maxiter": 500, "maxfun": 50000})
+    except Exception:  # noqa: BLE001 -- the anchor is an optimization of the start; the fit must not depend on it
+        return u0
+    best = target_at(result.x) if np.all(np.isfinite(result.x)) else None
+    if best is None or best < start:
+        return u0
+    anchored = u0.copy()
+    anchored[real] = result.x
+    return anchored
+
+
+def _ensemble_p0(slots, dmean, dstd, n_data, walkers, rng, anchor=None):
     """Dispersed initial ensemble (walkers, d): PRIOR-DRAWN walker positions where a slot carries
     a prior, data-scale jitter otherwise.
 
@@ -1390,7 +1470,7 @@ def _ensemble_p0(slots, dmean, dstd, n_data, walkers, rng):
     basin. Walker 0 stays at the data-informed point as the feasibility anchor; slots without a
     recorded prior (or with non-finite prior draws) keep the data-scale jitter."""
     d = len(slots)
-    u0 = _init_u(slots, dmean, dstd)
+    u0 = _init_u(slots, dmean, dstd) if anchor is None else np.asarray(anchor, dtype=float)
     spread = _init_scale(slots, dstd, n_data) * math.sqrt(n_data)
     p0 = u0[None, :] + 0.1 * spread[None, :] * rng.standard_normal((walkers, d))
     # Prior draws go to the SECOND HALF of the walkers only: mode detection needs some walkers
@@ -1435,7 +1515,8 @@ def _ensemble_worker(seed, rv, data, kw):
         rv, data, None, None, want_grad=False, numpy_only=True, missing=kw["missing"]
     )
     rng = np.random.RandomState(seed)
-    p0 = _ensemble_p0(slots, dmean, dstd, len(data), kw["walkers"], rng)
+    anchor = _ensemble_anchor(log_target, slots, dmean, dstd)
+    p0 = _ensemble_p0(slots, dmean, dstd, len(data), kw["walkers"], rng, anchor=anchor)
     return affine_invariant_ensemble(
         log_target, p0, num_samples=kw["draws"], burn_in=kw["burn"], thin=kw["thin"], rng=rng
     )
@@ -2798,6 +2879,11 @@ def ensemble_fit(
     together, so the effective sample size is typically a small fraction of the pooled count
     (read ``ess_bulk``, not the count). Uses the fast NumPy scalar log-target (one eval per proposal).
 
+    The other walkers start around an anchor: the log-target's maximum over the real location
+    parameters, found from the data-informed start before sampling. Starting every location at one
+    shared data mean left coordinates whose posterior sat far from it unreachable -- an 8-parameter
+    location model came back 141 posterior sds off at any burn-in (V01-F01).
+
     Half the walkers start from prior draws, so ``burn`` has to pay for contracting that cloud.
     Left at ``None`` it scales with the number of parameters ``d`` as ``max(1500, 300*d)``; an
     explicit smaller value is honoured as given, and a burn-in too short to contract the cloud
@@ -2841,9 +2927,13 @@ def ensemble_fit(
     if constraints is not None or potentials is not None:
         parallel = False  # process workers rebuild the target without the constraint/penalty/potential closure
 
+    # One anchor per fit, shared by every chain: it is deterministic given the target, and the chains'
+    # independence comes from their own jitter and prior draws, not from where the search started.
+    anchor = _ensemble_anchor(log_target, slots, dmean, dstd, feasible)
+
     def run_one(seed):
         crng = np.random.RandomState(seed)
-        p0 = _ensemble_p0(slots, dmean, dstd, len(data), walkers, crng)
+        p0 = _ensemble_p0(slots, dmean, dstd, len(data), walkers, crng, anchor=anchor)
         if feasible is not None:  # every walker must start feasible (finite log-target)
             p0[0] = _project_init(p0[0], feasible, crng)
             for k in range(walkers):

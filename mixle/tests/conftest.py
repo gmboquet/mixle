@@ -614,6 +614,9 @@ NODEID_MARKERS: tuple[tuple[str, MarkerTuple], ...] = (
     # total). Both belong in `full`, which still runs them on every release candidate.
     ("latent_identifiability_disclosure_test.py::HealthTieBreakTest", ("slow",)),
     ("adversarial_review_082_repairs_test.py::SurrogateRepairDisclosureTest", ("slow",)),
+    # Each test in this class runs full default-budget ensemble fits, two of them twice (the repair and
+    # the negative control that shows the test can fail): about 11 s for the class on a laptop.
+    ("adversarial_campaign_082_repairs_test.py::EnsembleBurnInPaysForItsInitializationTest", ("slow",)),
 )
 
 

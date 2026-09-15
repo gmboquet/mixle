@@ -11374,6 +11374,30 @@
         "return_annotation": "'GeometricEstimator'"
       }
     },
+    "mixle.stats.univariate.discrete.geometric.GeometricDistribution.exp_family_base_measure": {
+      "kind": "class-method",
+      "signature": {
+        "parameters": [
+          {
+            "annotation": "Any",
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "x"
+          },
+          {
+            "annotation": "Any",
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "engine"
+          }
+        ],
+        "return_annotation": "Any"
+      }
+    },
     "mixle.stats.univariate.discrete.geometric.GeometricDistribution.exp_family_from_natural": {
       "kind": "class-method",
       "signature": {

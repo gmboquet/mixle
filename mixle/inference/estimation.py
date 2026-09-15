@@ -316,6 +316,19 @@ def _tabular_records(data: Any, entry: str = "fit()", *, target: Any = None) -> 
     """
     if hasattr(data, "records") and callable(data.records) and hasattr(data, "structure"):
         return list(data.records())  # a mixle DataSource
+    if _recordish(target) and (
+        isinstance(data, Mapping) or (isinstance(data, np.ndarray) and data.dtype.names is not None)
+    ):
+        # A record model reads one MAPPING per row. Only a DataFrame is converted to those rows here;
+        # a mapping of columns or a structured array would come out of the generic path as TUPLES,
+        # which the record scorer gives -inf. The fit verbs already refuse this input; the drift
+        # verbs instead turned two identical batches into a DRIFT verdict and a retrain that then
+        # crashed (V01-F03). Every verb now gives the same answer: a refusal that says what to pass.
+        raise TypeError(
+            "%s received a %s for a record model, which reads one mapping per row keyed by its fields; "
+            "the fit verbs refuse this input too. Pass a DataFrame or a list of dict rows."
+            % (entry, "mapping of columns" if isinstance(data, Mapping) else "numpy structured array")
+        )
     if hasattr(data, "columns") and hasattr(data, "itertuples"):  # a pandas DataFrame (duck-typed)
         if _recordish(target):
             return list(_data_records_for_encoding(data, None, target, target))

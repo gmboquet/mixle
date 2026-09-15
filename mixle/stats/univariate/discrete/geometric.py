@@ -74,6 +74,7 @@ class GeometricDistribution(CachedParameterLaw, SequenceEncodableProbabilityDist
                 sufficient_statistics=cls.exp_family_sufficient_statistics,
                 natural_parameters=cls.exp_family_natural_parameters,
                 log_partition=cls.exp_family_log_partition,
+                base_measure=cls.exp_family_base_measure,
                 legacy_sufficient_statistics=cls.exp_family_legacy_sufficient_statistics,
             ),
         )
@@ -88,6 +89,16 @@ class GeometricDistribution(CachedParameterLaw, SequenceEncodableProbabilityDist
     def exp_family_sufficient_statistics(x: Any, engine: Any) -> tuple[Any, ...]:
         """Return Geometric sufficient statistic ``T(x) = (x,)`` (support x = 1, 2, ...)."""
         return (engine.asarray(x),)
+
+    @staticmethod
+    def exp_family_base_measure(x: Any, engine: Any) -> Any:
+        """Return the Geometric base measure: ``0`` for ``x >= 1``, ``-inf`` below.
+
+        Without it the generated engine kernels scored an admitted zero or negative count with the
+        closed form ``log p + (x - 1) log(1 - p)`` -- a finite log-probability for an impossible
+        value, where every numpy route returns ``-inf`` (V01-F04). The encoder guarantees integers.
+        """
+        return engine.where(engine.asarray(x) >= 1, engine.asarray(0.0), engine.asarray(-np.inf))
 
     @staticmethod
     def exp_family_natural_parameters(params: dict[str, Any], engine: Any) -> tuple[Any, ...]:

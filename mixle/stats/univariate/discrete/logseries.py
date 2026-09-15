@@ -132,8 +132,14 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def exp_family_base_measure(x: tuple[Any, Any], engine: Any) -> Any:
-        """Return the log-series base measure ``log h(k) = -log(k)`` (independent of p, fixed base)."""
-        return -engine.asarray(x[1])
+        """Return the log-series base measure ``log h(k) = -log(k)`` for ``k >= 1``, and ``-inf`` below.
+
+        ``-log(k)`` alone is ``+inf`` at an admitted ``k = 0`` and NaN at a negative count, so the
+        generated engine kernels returned ``+inf`` and NaN where every numpy route returns ``-inf``
+        (V01-F04). The encoder guarantees integers.
+        """
+        k = engine.asarray(x[0])
+        return engine.where(k >= 1, -engine.asarray(x[1]), engine.asarray(-np.inf))
 
     @staticmethod
     def exp_family_from_natural(eta: Any) -> "LogSeriesDistribution":
@@ -144,8 +150,12 @@ class LogSeriesDistribution(SequenceEncodableProbabilityDistribution):
 
     @staticmethod
     def backend_log_density_from_params(k: Any, log_k: Any, log_p: Any, log_norm: Any, engine: Any) -> Any:
-        """Engine-neutral log-series log-mass from explicit parameters (linear in k and log k)."""
-        return k * log_p - log_k - log_norm
+        """Engine-neutral log-series log-mass from explicit parameters (``-inf`` for ``k < 1``).
+
+        Linear in ``k`` and ``log k``, which is ``+inf`` at an admitted ``k = 0`` and NaN at a negative
+        count, so the torch kernel returned both where the numpy scorer returns ``-inf`` (V01-F04).
+        """
+        return engine.where(k >= 1, k * log_p - log_k - log_norm, engine.asarray(-np.inf))
 
     def __init__(self, p: float, name: str | None = None, keys: str | None = None) -> None:
         """LogSeriesDistribution for shape parameter p.

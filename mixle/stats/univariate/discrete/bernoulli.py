@@ -100,6 +100,7 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
                 sufficient_statistics=cls.exp_family_sufficient_statistics,
                 natural_parameters=cls.exp_family_natural_parameters,
                 log_partition=cls.exp_family_log_partition,
+                base_measure=cls.exp_family_base_measure,
                 legacy_sufficient_statistics=cls.exp_family_legacy_sufficient_statistics,
             ),
         )
@@ -108,6 +109,19 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
     def exp_family_sufficient_statistics(x: Any, engine: Any) -> tuple[Any, ...]:
         """Return Bernoulli sufficient statistics for generated scoring."""
         return (engine.asarray(x) * engine.asarray(1.0),)
+
+    @staticmethod
+    def exp_family_base_measure(x: Any, engine: Any) -> Any:
+        """Return the Bernoulli base measure: ``0`` on ``{0, 1}``, ``-inf`` for any other count.
+
+        The generated engine kernels score ``x log p + (1 - x) log(1 - p)`` with no support of their
+        own, so once the encoder admitted a count outside ``{0, 1}`` (Q01-F02) the numba-generated
+        kernel scored ``-1`` as a POSITIVE log-probability, and an engine fit reported a finite
+        validation objective the default route refuses (V01-F04). The support lives in the base
+        measure, as the Poisson family's already does.
+        """
+        xx = engine.asarray(x)
+        return engine.where((xx == 0) | (xx == 1), engine.asarray(0.0), engine.asarray(-np.inf))
 
     @staticmethod
     def exp_family_legacy_sufficient_statistics(x: Any, params: dict[str, Any], engine: Any) -> tuple[Any, ...]:
