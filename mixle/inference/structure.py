@@ -23,7 +23,7 @@ from typing import Any
 
 import numpy as np
 
-from mixle.inference.estimation import _caller_stacklevel, fit, tabular_records
+from mixle.inference.estimation import _caller_stacklevel, _tabular_records, fit
 from mixle.stats.combinator.conditional import ConditionalDistributionEstimator
 from mixle.stats.compute.pdist import FitProvenance, FitProvenanceCarrier
 
@@ -1069,7 +1069,7 @@ def learn_structure(
     # The fit verbs' front door, not ``list(data)``: a DataFrame iterates as its column names and a
     # mapping as its keys, so a frame was learned as a two-observation tree over its HEADERS -- an
     # empty frame included -- and a str as its characters (Q03-F04).
-    data = tabular_records(data, "learn_structure()")
+    data = _tabular_records(data, "learn_structure()")
     cols = _columns(data)
     n_fields = len(cols)
     templates = list(field_estimators) if field_estimators is not None else [_field_estimator(c) for c in cols]

@@ -62,9 +62,9 @@ def _serving_records(data, entry: str, model: Any = None) -> list:
     correctly by ``optimize`` -- "one table gets one answer whichever verb reads it" was the claim
     (Q05-F01).
     """
-    from mixle.inference.estimation import tabular_records
+    from mixle.inference.estimation import _tabular_records
 
-    return tabular_records(data, entry, target=model)
+    return _tabular_records(data, entry, target=model)
 
 
 class Service:

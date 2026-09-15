@@ -269,7 +269,7 @@ def _reusable_observations(data: Any, entry: str = "optimize()") -> Any:
         return data  # not iterable: leave it to the caller's own validation
 
 
-def tabular_records(data: Any, entry: str = "fit()", *, target: Any = None) -> list:
+def _tabular_records(data: Any, entry: str = "fit()", *, target: Any = None) -> list:
     """``data`` as a list of observation records -- always one record per ROW, never per column.
 
     A pandas ``DataFrame`` iterates as its column labels and a mapping iterates as its keys, so a bare

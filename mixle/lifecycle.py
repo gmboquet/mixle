@@ -151,8 +151,8 @@ class DeployedArtifact(str):
 
 
 def _tabular_records(data: Any, entry: str = "fit()", target: Any = None) -> list:
-    """``data`` as a list of observation records; see :func:`mixle.inference.estimation.tabular_records`."""
-    from mixle.inference.estimation import tabular_records
+    """``data`` as a list of observation records; see :func:`mixle.inference.estimation._tabular_records`."""
+    from mixle.inference.estimation import _tabular_records as tabular_records
 
     return tabular_records(data, entry, target=target)
 

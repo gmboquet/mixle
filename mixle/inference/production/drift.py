@@ -142,13 +142,13 @@ def score_drift(model: Any, reference: Any, current: Any) -> dict:
     each was unscorable -- because a shift measured over a handful of surviving finite scores is not
     the same claim as one measured over the whole sample.
     """
-    from mixle.inference.estimation import tabular_records
+    from mixle.inference.estimation import _tabular_records
 
     # The fit verbs' front door rather than ``list()``: a DataFrame iterates as its column labels, so a
     # frame the model was fitted from was scored as two header strings and reported n_current=2
     # (Q05-F01, Q06-F04).
-    ref_rows = tabular_records(reference, "score_drift(reference)", target=model)
-    cur_rows = tabular_records(current, "score_drift(current)", target=model)
+    ref_rows = _tabular_records(reference, "score_drift(reference)", target=model)
+    cur_rows = _tabular_records(current, "score_drift(current)", target=model)
     ll_ref = _log_densities(model, ref_rows)
     ll_cur = _log_densities(model, cur_rows)
     fr = ll_ref[np.isfinite(ll_ref)]
@@ -338,11 +338,11 @@ def detect_drift(
     one-shot iterable is safe: consuming the stream twice previously left the feature pass with empty
     columns and manufactured a PSI-infinity DRIFT verdict out of two identical inputs.
     """
-    from mixle.inference.estimation import tabular_records
+    from mixle.inference.estimation import _tabular_records
 
     # Read through the same front door as the fit verbs, for the reason score_drift gives (Q05-F01).
-    reference = tabular_records(reference, "detect_drift(reference)", target=model)
-    current = tabular_records(current, "detect_drift(current)", target=model)
+    reference = _tabular_records(reference, "detect_drift(reference)", target=model)
+    current = _tabular_records(current, "detect_drift(current)", target=model)
     if not reference:
         raise ValueError("drift detection requires a non-empty reference dataset")
     if not current:

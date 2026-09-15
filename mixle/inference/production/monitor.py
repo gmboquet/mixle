@@ -60,9 +60,9 @@ class Monitor:
         check() or update() became its column labels and a bare string became its characters -- and
         update() then retrained on that (Q05-F01).
         """
-        from mixle.inference.estimation import tabular_records
+        from mixle.inference.estimation import _tabular_records
 
-        batch = tabular_records(data, f"Monitor({name})", target=model)
+        batch = _tabular_records(data, f"Monitor({name})", target=model)
         if not batch:
             raise ValueError(f"{name} data must contain at least one observation")
         return batch

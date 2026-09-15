@@ -190,9 +190,9 @@ def _records(data: Any, target: Any = None):
     characters -- both of them recorded as fact in the artifact this function exists to make
     trustworthy, while ``optimize`` on the same inputs was correct or refused by name (Q05-F01).
     """
-    from mixle.inference.estimation import tabular_records
+    from mixle.inference.estimation import _tabular_records
 
-    return tabular_records(data, "fit_with_provenance()", target=target)
+    return _tabular_records(data, "fit_with_provenance()", target=target)
 
 
 def _final_loglik(model: Any, data: Any) -> float | None:

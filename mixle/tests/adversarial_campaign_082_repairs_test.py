@@ -281,7 +281,7 @@ class OneTableOneAnswerTest(unittest.TestCase):
     with ``n_records=2`` stamped into the provenance header, a bare string fitted as its 17
     characters, and ``Service.score`` raised a ContractError on a frame ``optimize`` handles.
 
-    One normalizer now, ``mixle.inference.estimation.tabular_records``, which is what makes the
+    One normalizer now, ``mixle.inference.estimation._tabular_records``, which is what makes the
     CHANGELOG's "one table gets one answer whichever verb reads it" true rather than aspirational.
     """
 
@@ -356,7 +356,7 @@ class OneTableOneAnswerTest(unittest.TestCase):
 
         for module in (drift, monitor, provenance, serving, structure, bayesian_network):
             with self.subTest(module=module.__name__.rsplit(".", 1)[-1]):
-                self.assertIn("tabular_records", inspect.getsource(module))
+                self.assertIn("_tabular_records", inspect.getsource(module))
 
     def _table(self, n=60):
         rng = np.random.RandomState(0)

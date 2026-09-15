@@ -1199,9 +1199,9 @@ def learn_bayesian_network(
     # one (R02-F07). Converting only a DataFrame left the other spellings on ``list(data)``: a mapping
     # of columns was fitted as two records of its KEYS and a str as its characters (Q02-F08). The fit
     # verbs' own front door reads every spelling, so both entry points read one table the same way.
-    from mixle.inference.estimation import tabular_records
+    from mixle.inference.estimation import _tabular_records
 
-    data = tabular_records(data, "learn_bayesian_network()")
+    data = _tabular_records(data, "learn_bayesian_network()")
     cols = _columns(data)
     n_fields = len(cols)
     n = len(data)
