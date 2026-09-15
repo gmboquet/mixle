@@ -20,6 +20,13 @@ wrong result with an error -- estimators refuse observations outside their suppo
 refuses an empty batch and ``delta=0``, a mixture refuses a likelihood-factor component -- so
 existing code can start raising where it used to fit quietly: see :doc:`migrations/0.8.2`.
 
+A second ten-pass adversarial review ran on the 0.8.2 candidate itself. Its seven blocking defects are
+repaired -- among them ``quantile`` refusing an out-of-domain level on every family, every
+support-limited family mixable, terminal-state HMM readouts honouring the full restriction, every data
+verb reading a table as rows, and ``how='ensemble'`` correct at its default budget -- along with its
+documentation findings. The remaining findings are recorded in ``release-checklists/0.8.3-followups.md``
+(decision D-0217).
+
 0.8.1
 -----
 

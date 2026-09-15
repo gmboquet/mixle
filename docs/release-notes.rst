@@ -1,7 +1,7 @@
 Release Notes
 =============
 
-Mixle 0.8.2 is a patch release of 0.8.1 with the same public surface: it repairs the defects the ten adversarial reviews of the 0.8.1 candidate deferred (decision D-0213; see :doc:`migrations/0.8.2` for the repairs that now raise where 0.8.1 fit quietly) and the release-process defects the 0.8.1 publication exposed. Mixle 0.8.1 is the credibility, correctness, and evidence release, published as the first release of the 0.8 line (0.8.0 was prepared under the same evidence but never published; decision D-0212). It retains
+Mixle 0.8.2 is a patch release of 0.8.1 with the same public surface: it repairs the defects the ten adversarial reviews of the 0.8.1 candidate deferred (decision D-0213; see :doc:`migrations/0.8.2` for the repairs that now raise where 0.8.1 fit quietly), the release-process defects the 0.8.1 publication exposed, and the blocking and documentation findings of a second ten-pass review run on the 0.8.2 candidate itself (decision D-0217; the rest are recorded for 0.8.3). Mixle 0.8.1 is the credibility, correctness, and evidence release, published as the first release of the 0.8 line (0.8.0 was prepared under the same evidence but never published; decision D-0212). It retains
 the library's broad probabilistic-modeling surface while making maturity,
 compatibility, numerical behavior, release claims, and operational limits
 explicit and machine-checkable.
