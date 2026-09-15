@@ -191,9 +191,10 @@ release (`release-checklists/0.8.2-followups.md`).
   fits on the default automatic path, not only with an explicit estimator (P06-F05); a numpy
   structured array fits as its rows (P06-F07); a mapping of equal-length columns fits the columns
   rather than a categorical over their field NAMES (P06-F10); and a masked array, a
-  `numpy.matrix`, a 0-dimensional array, a `timedelta64` array, and a bare string or bytes object
-  are named instead of crashing several frames down or fitting something nobody asked for
-  (P06-F06, P06-F09, P06-F10).
+  `numpy.matrix`, a 0-dimensional array, a `datetime64` or `timedelta64` array, and a bare string or
+  bytes object are named instead of crashing several frames down or fitting something nobody asked
+  for (P06-F06, P06-F09, P06-F10). On 0.8.1 a `datetime64` array was fitted, as an ignored
+  categorical over its timestamps, so for that dtype this is a change from a fit to an error (Q06-F13).
 - A DataFrame's own column labels are no longer read as `(name, source)` alias pairs, so a
   2-level MultiIndex frame fits (P06-F03); a repeated column label is named as such rather than
   as "logical fields must be unique" or an `AttributeError` (P06-F09); and a `RecordEstimator`
@@ -544,6 +545,99 @@ release (`release-checklists/0.8.2-followups.md`).
   carries the clean receipt in 45, and in the other 3 the healthy candidate is 6 to 85 nats behind,
   where the rule is meant to decline. The docstring and the ledger entry say so; a caller who wants
   health to arbitrate a gap that wide has to ask for it.
+
+### Fixed by the ten adversarial reviews of the 0.8.2 candidate (2026-09-11)
+
+Ten fresh review passes over the 0.8.2 candidate itself, by area as for 0.8.1, raised 165 findings:
+9 blocking (seven distinct defects), 56 real, 79 minor and 21 documentation. Five of the seven were
+repair claims in this changelog that did not hold on a documented route, and one was a regression
+this release introduced. The blocking and documentation findings are repaired here, together with
+the nine real findings that shared a blocking defect's mechanism. Every other finding is recorded,
+with the reviewer's reproduction, in `release-checklists/0.8.3-followups.md` (D-0217). Reports are
+retained in `release-checklists/0.8.2-reviews/pass-NN/`.
+
+- **`quantile(q)` refuses an out-of-domain `q` on every family that defines it.** The R05-F07 repair
+  reached fifteen of thirty-one: `HalfNormalDistribution(1).quantile(-0.1)` returned `-0.1257`,
+  `BetaBinomialDistribution(10, 2, 3).quantile(1.1)` the support point `10.0`, and fourteen others
+  NaN. All thirty-one now route through `validated_quantile_probability`. The regression test used to
+  build each class from a fixed set of constructor spellings and skip the ones that did not fit,
+  which were exactly the sixteen; it now walks every `def quantile` in the tree (Q01-F01, Q08-F08).
+- **Every support-limited family can be mixed.** The P02-F03 repair covered the families in its own
+  reproductions. `GeneralizedPareto`, `Nakagami`, `Rician` and `Tweedie` still refused a finite
+  out-of-support row at encode time, as did `NegativeBinomial`, `BetaBinomial` and `Bernoulli`, so
+  `Mixture[Gaussian, Nakagami]` or `Mixture[IntegerCategorical, NegativeBinomial]` could not be encoded
+  on data the other component owns. `Poisson`, `Geometric`, `LogSeries` and `Binomial` handed such
+  rows responsibility at initialization and then refused them. Each family now admits the row, scores
+  it `-inf` as its scalar path does, declares `supported_rows`, refuses the row when it carries weight
+  and folds nothing from it at zero weight. A count family still refuses a non-integer at encode time:
+  it has no support off the integers, which is the rule the `Binomial` encoder already documented. A
+  row that no component supports now scores `-inf` under the whole mixture, and the non-finite
+  objective error reports how many rows did so; before, it named the cause only when every row did
+  (Q01-F02, Q02-F02, Q01-F04).
+- **A terminal-state HMM's readouts enforce both halves of the restriction.** The R05-F01 repair forbade
+  a terminal state before the last position but never required the last state to be terminal: the
+  last-row marginal came back off by 1.0, Viterbi and `mode()` returned paths ending in a non-terminal
+  state, 200 of 200 FFBS draws did, a length-1 sequence was left unrestricted, and the encoded
+  `seq_viterbi` ignored `terminal_states` altogether. One fold now serves `viterbi`, `latent_posterior`
+  and both encoded layouts of `seq_viterbi`, checked against the restricted forward-backward and
+  against enumeration. The earlier regression test enumerated the same half-law the code implemented,
+  so it passed for the wrong reason (Q02-F01).
+- **A conjugate posterior restored from a pickle refuses `predict()`.** The R02-F04 refusal was wired
+  only into `Posterior`, and `ConjugatePosterior` -- the default route for every conjugate model --
+  answered with the plug-in predictive, a standard deviation of 2.03 where the integrated answer is
+  2.31. The two classes now share the refusal instead of each carrying a copy of the pickling code
+  (Q04-F01).
+- **`how='ensemble'` returns the right posterior at its default budget.** Half the walkers start from
+  prior draws, and the old default of 500 burn-in sweeps did not contract that cloud: on a
+  5-parameter model the means came back 3.7 posterior standard deviations off and the spreads up to
+  nine times too wide, and on an 18-group model 7.8 off, with the single-chain summary reporting tiny Monte
+  Carlo errors. `burn` now defaults to `max(1500, 300 * d)`. At that default, over three seeds each,
+  the worst errors are 0.06-0.19 standard deviations on the 5-parameter model and 0.12-0.18 on the
+  18-group one. A larger `draws` does not fix a short burn-in -- more draws raised the effective
+  sample size while the posterior stayed five times too wide -- which is why no ESS threshold was added. The
+  docstring no longer calls the pooled draws near-independent, and it says what an explicit short
+  `burn` still does: on the 18-group model at `burn=500`, `chains=2` reports an R-hat of 11.2 where
+  the default gives 1.03
+  (Q04-F11; Q07-F06 is recorded for 0.8.3).
+- **One table gets one answer from every verb that reads data.** The R06-F03 repair gave the lifecycle
+  and fit verbs a shared front door, and `fit_with_provenance`, `Monitor`, `Service.score`,
+  `detect_drift` and `score_drift` still read a DataFrame or a mapping as its column names:
+  `fit_with_provenance(df)` fitted a categorical over two labels and recorded `n_records=2`, and
+  `Monitor.update(df)` retrained on them. The same front door now also serves the `vdata=` validation
+  set, `best_of` (which refused a DataFrame `optimize` fits), `learn_structure` and
+  `learn_bayesian_network` (which learned a mapping as two records of its keys). A DataFrame reaches a
+  record model as rows keyed the way its encoder reads them, so a `RecordEstimator` fitted from a frame
+  can be fitted, evaluated, scored and drift-checked on that frame. The structure learners refuse a
+  sequence of scalars by name (Q05-F01, Q06-F01, Q06-F02, Q06-F03, Q06-F04, Q06-F05, Q02-F08,
+  Q03-F04).
+- **A fitted `TreeHiddenMarkovModelDistribution` writes JSON again.** A fit warms a per-level
+  probability memo, and the serializer wrote it and then refused its own output, so every fitted tree
+  HMM -- the gallery example fits one -- lost its JSON path, where 0.8.1 round-tripped. The memo is
+  now derived state and is rebuilt on use (Q09-F01, Q02-F09).
+- Documentation that the reviews found untrue of the release:
+  - the README's nested-HMM budget note no longer implies that raising `max_its` is enough: at the
+    snippet's own 300 the fit still ended capped in the wrong basin on three of three seeds (Q08-F10);
+  - its enumeration snippet loads the model in float32, the precision its printed numbers were
+    measured at (Q08-F11);
+  - its "everything non-optional" test command is `pytest -m full`, not `-m full -m ""`, which
+    selects optional tiers too because pytest keeps the last `-m` (Q08-F12);
+  - the migration guide lists `datetime64` arrays among the newly refused inputs, scopes the HMM
+    initialization change to the emissions it reaches, drops `how='map'` from the routes the
+    no-prior guard refuses, moves `potentials=` to the sampler fits it belongs to, says that
+    models and posteriors used as prompts seed differently from 0.8.1, and says that the eight
+    re-serialized families hash differently from 0.8.1 (Q06-F13, Q07-F05, Q04-F04, Q08-F13, Q05-F09,
+    Q05-F11);
+  - `mixle.ops.project` and the migration guide say that `delta=None` removes the convergence stop
+    but a rejected update still ends the run (Q10-F03);
+  - the example execution manifest names `torch` as the base-install blocker for
+    `calibrated_report_demo`, `geoscience_inversion_report` and
+    `heterogeneous_representation_example` (Q09-F15);
+  - the engine benchmark prints the iterations each engine actually ran instead of claiming equal
+    work (Q03-F24); the autoregressive enumeration example states that `unrank` is quantized
+    (Q09-F16); the lookback HMM example states its real budget (Q10-F04); and the skeptic's-challenge
+    example no longer announces a winner before measuring one (Q10-F10);
+  - the six findings whose surface is the `mixle-notebooks` corpus are repaired there (Q03-F22,
+    Q03-F23, Q05-F12, Q07-F15, Q07-F16, Q08-F14).
 
 
 ## [0.8.1] — 2026-09-07

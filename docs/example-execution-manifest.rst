@@ -216,7 +216,13 @@ none in these examples' own code paths) and still pass. This pass also:
   2026-07-17 evidence despite exercising ``mixle.task.inverse`` -- passes its
   execution contract. The script's calibration layer detected a poorly
   calibrated candidate and abstained. Exact measurements belong in the
-  content-addressed receipt, not in this mutable narrative.
+  content-addressed receipt, not in this mutable narrative. *Superseded in
+  0.8.2:* that abstention was the simulator defect P09-F04 -- the forward
+  model handed to ``learn_inverse`` was noise-free, so the learned posterior
+  was near-deterministic against a noisy measurement and the SBC and coverage
+  checks rightly failed -- and on the repaired script those checks pass and the
+  report serves a depth interval that contains the true depth. Like the three other ``torch``-backed rows
+  above, it cannot run in a base install at all.
 
 **2026-07-23 addition.** ``quickstart_example.py`` was added to close a
 coverage gap: neither ``mixle.describe()`` (the package docstring's own
@@ -408,7 +414,9 @@ Inventory
    * - ``examples/autoregressive_enumeration_example.py``
      - Execute. Base install (numpy only; synthetic toy model, no torch/network).
    * - ``examples/calibrated_report_demo.py``
-     - Execute with optional-dependency status recorded.
+     - Blocked on ``torch`` in a base install (``solve_structured`` distils its
+       claim scorer through ``mixle.task.distill``, which has no classical
+       fallback); execute with ``torch`` installed.
    * - ``examples/capability_layer_example.py``
      - Execute. Base install.
    * - ``examples/copula_vine_example.py``
@@ -438,7 +446,9 @@ Inventory
    * - ``examples/frontier_family_showcase.py``
      - Manual/integration.
    * - ``examples/geoscience_inversion_report.py``
-     - Execute or mark blocked on scientific dependencies.
+     - Blocked on ``torch`` in a base install (``learn_inverse(family="mdn")``
+       trains its amortized posterior through ``mixle.task.inverse``); execute
+       with ``torch`` installed.
    * - ``examples/frontier_ecosystem_demo.py``
      - Manual/integration.
    * - ``examples/gallery_combinators_example.py``
@@ -460,7 +470,9 @@ Inventory
    * - ``examples/heterogeneous_correctness_example.py``
      - Execute.
    * - ``examples/heterogeneous_representation_example.py``
-     - Execute with optional-dependency status recorded.
+     - Blocked on ``torch`` in a base install (the script imports ``torch`` at
+       module level for its learned representation); execute with ``torch``
+       installed.
    * - ``examples/hidden_association_example.py``
      - Execute.
    * - ``examples/hierarchical_mixture_example.py``

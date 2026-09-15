@@ -201,10 +201,14 @@ def project(
     started from the closed-form solution improved monotonically past it (P10-F03). Passing the
     closed-form projection, or any other good guess, is the usual way to use this.
 
-    ``delta`` is the fitter's convergence tolerance, or ``None`` for exactly ``max_its`` iterations
-    with no early stop and no unconverged-fit note -- what a budget-matched comparison between two
-    projections wants, since a run that stopped early and one that used its whole budget are not
-    comparable on wall-clock.
+    ``delta`` is the fitter's convergence tolerance, or ``None`` to remove the convergence stop so the
+    fit may use all ``max_its`` iterations -- what a budget-matched comparison between two projections
+    wants, since a run that stopped early and one that used its whole budget are not comparable on
+    wall-clock. ``None`` does not guarantee the whole budget runs: a rejected update (a non-improving
+    or non-finite step) still ends the loop, and the fit then warns with how many of the ``max_its``
+    iterations ran. The mixture-reduction benchmark's own ``delta=None`` projections stopped well short
+    of their 50 this way (Q10-F03), so compare runs by ``fit_provenance().iterations`` rather than by
+    the budget that was requested.
     """
     import numpy as np
 

@@ -220,7 +220,7 @@ def act2() -> None:
 
 
 def act3() -> None:
-    _line("ACT 3 — 'neural integration is hype': a torch flow EM-fit INSIDE a mixture, and it pays")
+    _line("ACT 3 — 'neural integration is hype': a torch flow EM-fit INSIDE a mixture, measured against both baselines")
     import torch
 
     from mixle.models.neural_density import NeuralDensity, build_coupling_flow
@@ -281,7 +281,7 @@ def act3() -> None:
     print(f"  -> hybrid vs classical: {ll_h - ll_c:+.3f} nats/row;  hybrid vs pure-neural: {ll_h - ll_n:+.3f} nats/row")
     print(
         f"  -> mixture weights learned by EM: {np.round(hybrid.w, 3).tolist()}"
-        f" (flow took the curved 85%, the Gaussian took the rare tight mode)"
+        f" (the simulation put 85% of rows on the curved banana, 15% on the tight cluster)"
     )
     print("  in raw torch this is: hand-written EM, hand-written responsibility weighting, and no")
     print("  composability with the 100+ classical families, samplers, and conformal layers above.")

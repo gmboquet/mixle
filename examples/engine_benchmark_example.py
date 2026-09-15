@@ -8,11 +8,16 @@ Times three representative workloads across engines and prints a table:
 
 Takeaway: an engine is a placement decision, not a rewrite. The same ``optimize`` call and the same
 model run on each engine in the table below, and each workload is parity-checked against the numpy
-result before its timing is reported -- so the table compares equal work, and a speedup that came from
-silently doing something different would fail the check instead of appearing as a win.
+result before its timing is reported (the fitted models score the same records to within 2e-4), so a
+speedup that came from silently computing something different fails the check instead of appearing
+as a win.
 
-The fits are budgeted (a fixed ``max_its``) so the timings compare equal work; ``optimize`` reports the
-budget stop in a ``UserWarning`` on stderr, which is expected here, not a failure.
+Parity is of the RESULT, not of the work. Each fit is capped at a fixed ``max_its``, but EM also stops
+when it converges or when an update is rejected, and engines do not stop at the same iteration: on
+the GMM row of one Apple-silicon run, numpy and torch-cpu converged at iteration 5 while float32 on
+MPS rejected a last-digit update at iteration 3. The table therefore prints the iterations each engine actually ran under its
+timings -- read a timing as the time that engine took to stop, not as equal work. A stop before the
+cap is reported in a ``UserWarning`` on stderr, which is expected here, not a failure.
 
 The table reports current-run measurements without assuming which engine wins. Sizes scale with
 ``--scale`` so the crossover can be measured on the named hardware. Apple-silicon (MPS) runs float32
@@ -99,6 +104,12 @@ def _as_numpy(value) -> np.ndarray:
     return np.asarray(value)
 
 
+def _iterations(model) -> int | None:
+    """The EM iterations a fit actually ran, from its own receipt."""
+    provenance = model.fit_provenance() if callable(getattr(model, "fit_provenance", None)) else None
+    return getattr(provenance, "iterations", None)
+
+
 def _time(fn, engine, repeat: int = 3) -> tuple[float, object]:
     warm = fn()
     _consume(warm)
@@ -131,7 +142,7 @@ def bench_gmm(n: int, engines) -> dict[str, float]:
     for name, model in fitted.items():
         score = model.seq_log_density(model.dist_to_encoder().seq_encode(data[:256]))
         np.testing.assert_allclose(score, reference, rtol=2e-4, atol=2e-4, err_msg=f"GMM parity failed for {name}")
-    return timings
+    return timings, {name: _iterations(model) for name, model in fitted.items()}
 
 
 def bench_hmm(n_seq: int, seq_len: int, engines) -> dict[str, float]:
@@ -152,7 +163,7 @@ def bench_hmm(n_seq: int, seq_len: int, engines) -> dict[str, float]:
     for name, model in fitted.items():
         score = model.seq_log_density(model.dist_to_encoder().seq_encode(seqs[:32]))
         np.testing.assert_allclose(score, reference, rtol=2e-4, atol=2e-4, err_msg=f"HMM parity failed for {name}")
-    return timings
+    return timings, {name: _iterations(model) for name, model in fitted.items()}
 
 
 def bench_scoring(n: int, engines) -> dict[str, dict[str, float]]:
@@ -211,17 +222,18 @@ def main() -> None:
     engines = _engines()
     print("engines:", ", ".join(nm for nm, _ in engines))
 
-    _table(
-        "EM fits (10 its GMM / 5 its default-HMM)",
-        {
-            "gmm n=%d" % (20_000 * a.scale): bench_gmm(20_000 * a.scale, engines),
-            "hmm %dx%d" % (400 * a.scale, 20): bench_hmm(400 * a.scale, 20, engines),
-        },
-    )
+    gmm_row, hmm_row = "gmm n=%d" % (20_000 * a.scale), "hmm %dx%d" % (400 * a.scale, 20)
+    gmm_times, gmm_its = bench_gmm(20_000 * a.scale, engines)
+    hmm_times, hmm_its = bench_hmm(400 * a.scale, 20, engines)
+    _table("EM fits (GMM capped at max_its=10, default-HMM at max_its=5)", {gmm_row: gmm_times, hmm_row: hmm_times})
+    cols = sorted(gmm_its)
+    for row, its in ((gmm_row, gmm_its), (hmm_row, hmm_its)):
+        print("  %-16s" % "  iterations run" + "".join("%12s" % its.get(c, "-") for c in cols) + "   (%s)" % row)
     _table("batch scoring (n=%d)" % (200_000 * a.scale), bench_scoring(200_000 * a.scale, engines))
     print(
-        "\nInterpret only this synchronized, parity-checked run. Crossover depends on workload, device,"
-        "\ntransfer, and precision; MPS is float32 by construction."
+        "\nInterpret only this synchronized, parity-checked run, and read each EM timing beside the iterations"
+        "\nthat engine ran. Crossover depends on workload, device, transfer, and precision; MPS is float32 by"
+        "\nconstruction."
     )
 
 
