@@ -1,0 +1,200 @@
+[
+  {
+    "id": "Q08-F01",
+    "severity": "real",
+    "title": "Fused EM declares convergence one iteration late: a fit that settles on its last permitted iteration is returned with converged=False and a cap note reading 'before the objective settled (last objective gain 0)'",
+    "surface": "mixle.inference.optimize (fused EM route used by closed-form families: CategoricalEstimator, GaussianEstimator, PoissonEstimator ...); fit_provenance().converged; the cap UserWarning; reached by README's solve(..., student='generative') through mixle/task/generative_text.py:177",
+    "reproduction": "cd /tmp && <review-root>/venv-full/bin/python - <<'EOF'\nimport warnings, numpy as np\nfrom mixle.inference import optimize\nfrom mixle.stats import CategoricalEstimator, GaussianEstimator\nwords = [\"a\", \"b\", \"a\", \"c\", \"b\", \"a\"] * 10\nnormal = list(np.random.RandomState(0).normal(size=100))\nfor est, data, k in ((CategoricalEstimator(), words, 2), (CategoricalEstimator(), words, 3), (GaussianEstimator(), normal, 2), (GaussianEstimator(), normal, 10)):\n    with warnings.catch_warnings(record=True) as c:\n        warnings.simplefilter(\"always\")\n        m = optimize(data, est, max_its=k, out=None)\n    fp = m.fit_provenance()\n    print(type(est).__name__, \"max_its=%d\" % k, \"converged=%s iterations=%s objective_gain=%r\" % (fp.converged, fp.iterations, fp.objective_gain), [str(w.message)[:110] for w in c])\nEOF",
+    "observed": "CategoricalEstimator max_its=2 -> converged=False iterations=2 objective_gain=0.0 with UserWarning 'optimize() stopped at the max_its cap (2) before the objective settled (last objective gain 0, delta=1e-09) ... Raise max_its ...'; the same call with max_its=3 -> converged=True iterations=3 and no note. GaussianEstimator max_its=2 -> converged=False, gain 0.0, same note; at the default max_its it converges at iteration 3. Poisson identical. Same output on the published 0.8.1 (repairs/out_gain0_capnote_081.txt), on venv-full and venv-base (repairs/out_gain0_capnote_venv-full.txt).",
+    "expected": "A run whose last iteration gained less than delta is converged: fit_provenance().converged=True and no cap note. The note must not say the objective did not settle while quoting a gain of 0.",
+    "notes": "Mechanism (mixle/inference/estimation.py, fused loop ~1340-1390): each iteration scores its INPUT model (ll_model) and tests dll = ll_model - prev_ll, i.e. the gain of the previous step, so convergence reached at step k is only observed at step k+1; when the loop exhausts at max_its the post-loop fold recomputes objective_gain = final_ll - prev_ll (0.0 here) but never re-evaluates converged against delta, so the receipt contradicts itself. Pre-existing on 0.8.1; not ledgered (P03-F05 is the delta=0 case). Costs every closed-form fit one extra iteration to be called converged, and it is what README's solve(student='generative') surfaces (Q08-F02).",
+    "repairs_attacked": ["P08-F05", "R07-F06"]
+  },
+  {
+    "id": "Q08-F02",
+    "severity": "real",
+    "title": "README's torch-free route solve(teacher, inputs, student='generative') emits two library-internal cap notes per call that the caller cannot silence, contradicting the migration guide's 'library-internal capped calls no longer warn from inside distill'",
+    "surface": "mixle.task.solve(student='generative') (README Quickstart 'Distill' paragraph); mixle/task/generative_text.py:177 optimize(by_class[lab] or [_UNK], est, max_its=2, out=None); docs/migrations/0.8.2.md lines 39-40",
+    "reproduction": "cd /tmp && <review-root>/venv-base/bin/python - <<'EOF'\nimport warnings\nfrom mixle.task import solve\nwords = [\"alpha beta\", \"gamma delta\", \"beta gamma\", \"delta alpha\", \"alpha gamma\", \"beta delta\"]\ninputs = [words[i % len(words)] + \" \" + str(i % 7) for i in range(120)]\ndef teacher(text): return \"first\" if text.startswith((\"alpha\", \"beta\")) else \"second\"\nfor kw in ({}, {\"max_its\": 50}, {\"delta\": None}):\n    with warnings.catch_warnings(record=True) as c:\n        warnings.simplefilter(\"always\")\n        sol = solve(teacher, inputs, seed=0, student=\"generative\", **kw)\n    caps = [str(w.message) for w in c if \"max_its cap\" in str(w.message)]\n    print(kw, \"cap notes:\", len(caps), \"|\", caps[0][:200] if caps else None)\nEOF",
+    "observed": "Every call prints 2 x 'solve() stopped at the max_its cap (2) before the objective settled (last objective gain 0, delta=1e-09): the returned model is an unconverged fit, and its fit_provenance() reports converged=False.' -- with solve(max_its=50) and solve(delta=None) as well (repairs/out_generative_capnote_venv-base.txt). The README block-2 snippet with student='generative' shows the same 2 notes on venv-full and venv-base (readme/out/s2_solve_venv-*_generative.txt). The note is attributed to the reader's own line and names solve(), which takes neither max_its nor delta for that internal call.",
+    "expected": "No note: the call is library-internal, capped on purpose (max_its=2 on a closed-form categorical), and the objective had settled (gain 0). docs/migrations/0.8.2.md says such calls 'no longer warn from inside distill'.",
+    "notes": "The internal call passes max_its=2 without delta=None, so it hits Q08-F01 (one-iteration convergence lag) on every class and warns through _caller_stacklevel onto the reader's line; R07-F06 then strips the 'Raise max_its / pass delta=None' clauses because solve() has neither, leaving a note that states a falsehood and offers no action. Does not occur on the default torch MLP student (readme/out/s2_solve_venv-full_default.txt: 0 cap notes).",
+    "repairs_attacked": ["P08-F05", "R07-F06", "R07-F07"]
+  },
+  {
+    "id": "Q08-F03",
+    "severity": "real",
+    "title": "The A-02 'less data than parameters' note gives the caller-built remedy (restarts= / MixtureEstimator(..., init='dirichlet')) on routes where the caller built nothing, and restarts= is not accepted by optimize(), MixtureEstimator() or Mix().fit()",
+    "surface": "A-02 note (MixtureDistribution.component_row_mass disclosure) via optimize(data) with no estimator (README Quickstart route), mixle.ppl Mix([...]).fit(data) (README PPL block line 241), optimize(data, MixtureEstimator(...)), best_of(); regression test UnidentifiedComponentRemedyTest in adversarial_review_082_repairs_test.py",
+    "reproduction": "cd /tmp && <review-root>/venv-full/bin/python - <<'EOF'\nimport warnings, numpy as np\nfrom mixle.inference import optimize, best_of\nfrom mixle.stats import MixtureEstimator, GaussianEstimator\nfrom mixle.ppl import Normal, Mix, free\nrows = list(np.random.RandomState(0).normal(0.0, 1.0, 400)) + [40.0]\ndef remedy(call):\n    with warnings.catch_warnings(record=True) as c:\n        warnings.simplefilter(\"always\")\n        call()\n    n = [str(w.message) for w in c if \"less data than they have parameters\" in str(w.message)]\n    return (len(n), n[0][-170:]) if n else (0, None)\nprint(\"optimize(rows) no estimator      :\", remedy(lambda: optimize(rows, max_its=60, out=None, rng=np.random.RandomState(0))))\nprint(\"Mix([N,N]).fit(rows)             :\", remedy(lambda: Mix([Normal(free, free), Normal(free, free)]).fit(rows)))\nprint(\"optimize(rows, MixtureEstimator) :\", remedy(lambda: optimize(rows, MixtureEstimator([GaussianEstimator(), GaussianEstimator()]), max_its=60, out=None, rng=np.random.RandomState(0))))\nprint(\"best_of(rows, ..., MixtureEst)   :\", remedy(lambda: best_of(rows, rows[:50], MixtureEstimator([GaussianEstimator(), GaussianEstimator()]), 2, 60, 1.0, 1e-8, np.random.RandomState(0))))\nfor label, fn in ((\"optimize(..., restarts=3)\", lambda: optimize(rows, MixtureEstimator([GaussianEstimator()] * 2), restarts=3, max_its=5)),\n                  (\"MixtureEstimator(..., restarts=3)\", lambda: MixtureEstimator([GaussianEstimator()] * 2, restarts=3)),\n                  (\"Mix([N,N]).fit(rows, restarts=3)\", lambda: Mix([Normal(free, free), Normal(free, free)]).fit(rows, restarts=3, max_its=5)),\n                  (\"Mix([N,N]).fit(rows, init='dirichlet')\", lambda: Mix([Normal(free, free), Normal(free, free)]).fit(rows, init=\"dirichlet\", max_its=5))):\n    try: fn(); print(label, \"-> accepted\")\n    except Exception as e: print(label, \"->\", type(e).__name__, str(e)[:90])\nEOF",
+    "observed": "optimize(rows) with NO estimator (the library's get_estimator built the mixture) and ppl Mix([...]).fit(rows) both end their note with '... an initialization that latched onto a small group, and restarts= or MixtureEstimator(..., init='dirichlet') distinguishes the two.' -- the caller-built form. optimize(rows, MixtureEstimator(...)) gets the same advice, but optimize(..., restarts=3) -> TypeError 'unexpected keyword argument restarts', MixtureEstimator(restarts=3) -> TypeError, Mix.fit(restarts=3) -> TypeError, Mix.fit(init='dirichlet') -> TypeError. best_of(rows, ..., MixtureEstimator(...)) says 'best_of() built this mixture itself' although the caller passed the estimator. (repairs/out_r07f07_routes_venv-full.txt, repairs/out_r07f07_knobs_venv-full.txt.)",
+    "expected": "R07-F07's own rule: the remedy names only knobs the reader can turn. On optimize(data)/create()/Mix.fit() the library chose the mixture, so the library-built form applies; where the caller did build a MixtureEstimator the advice must be a knob that exists (init='dirichlet' on the estimator; restarts= only exists on Model.fit / learn_mixture_structure / best_of's trials).",
+    "notes": "Mechanism: _calling_verb decides 'caller-built' from the verb's signature (optimize takes an estimator) rather than from whether the caller supplied one; ppl fit lowers to optimize() so it inherits the caller-built form. The regression test test_a_caller_who_built_the_estimator_is_told_which_knobs_to_turn asserts the literal 'restarts= or MixtureEstimator(..., init='dirichlet')' string on the optimize route, pinning the nonexistent knob. Closes the R07-F07 claim only for solve()/create()/learn_* routes.",
+    "repairs_attacked": ["R07-F07", "A-02", "R07-F06"]
+  },
+  {
+    "id": "Q08-F04",
+    "severity": "real",
+    "title": "learn_mixture_structure prints 1533 A-02 warning lines to stderr for one call on 401 rows under the default warning filters",
+    "surface": "mixle.inference.structure.learn_mixture_structure (library-built route of the A-02 note, R07-F07)",
+    "reproduction": "cd /tmp && R=<review-root> && $R/tools/pyt.py 600 $R/venv-full/bin/python $R/pass-08/repairs/p_lms_default_filters.py > /tmp/q08f04.txt; grep -c 'UserWarning: this mixture fit left' /tmp/q08f04.txt; grep -c 'built this mixture itself' /tmp/q08f04.txt",
+    "observed": "1533 stderr lines 'UserWarning: this mixture fit left 1 of 2 component(s) with less data than they have parameters ... learn_mixture_structure() built this mixture itself ...' for learn_mixture_structure(pairs, 2, restarts=1, seed=0, max_its=60) on 400 N(0,1) pairs plus one outlier (repairs/out_lms_default_filters_venv-full.txt, PYTHONWARNINGS=default). Under simplefilter('always') the same call records 2206 notes with 6 distinct texts (repairs/out_r07f07_routes_venv-full.txt, out_r07f07_knobs_venv-full.txt); a direct optimize(rows, MixtureEstimator) shows 1.",
+    "expected": "One note per returned model (or one per distinct text), not one per internal candidate fit; the default once-per-location filter should collapse repeats.",
+    "notes": "Every candidate/restart fit inside the structure search raises the note with _caller_stacklevel, and the repeats are not collapsed by the default filter (1533 shown for 6 distinct texts, so they are being attributed to different locations); mechanism in the registry/stacklevel not traced further. The surface belongs to pass 07; reached here while verifying R07-F07's library-built branch.",
+    "repairs_attacked": ["R07-F07", "A-02", "A-03"]
+  },
+  {
+    "id": "Q08-F05",
+    "severity": "real",
+    "title": "backend='mp' changes the EM trajectory with the worker count: at the default num_workers the README block-5 two-Gaussian mixture needs 182 iterations and is returned unseparated and unconverged at max_its=30, while local and num_workers=2/4/8 converge in 7-19",
+    "surface": "mixle.inference.optimize(backend='mp') (README 'Engines & scale' one-liner), base install; mixle/utils/parallel/multiprocessing.py",
+    "reproduction": "cd /tmp && R=<review-root> && PYT_CWD=$R/pass-08/readme/out $R/tools/pyt.py 900 $R/venv-base/bin/python $R/pass-08/readme/s10_mp_workers.py",
+    "observed": "os.cpu_count()=18. Same data (300 N(0,1) + 300 N(6,1)), MixtureEstimator([Gaussian, Gaussian]), rng=RandomState(0): local max_its=30 -> converged=True its=8 objective -1249.4711 (components 0.033/1.019 and 6.079/0.880); mp num_workers=2/4/8 -> converged=True its=19/7/12, same objective and components; mp default workers max_its=30 -> converged=False its=30 objective -1544.7422 with components (2.83, var 10.05) and (3.32, var 10.00), weights 0.547/0.453, plus the cap note; mp default workers max_its=300 -> converged only at its=182 (objective -1249.4711). Also readme/out/s5b_mp_venv-base.txt ('same as ref: False') and s5c (unguarded, max_its=5). On venv-full every mp attempt hit 'parallel worker 0 timed out after 30.000s during setup' under load average 58 (inconclusive there).",
+    "expected": "The same seed, data and estimator give the same trajectory whatever the shard count, or at least converge in a comparable number of iterations; README readers pin the seed, not the CPU count.",
+    "notes": "Not root-caused: the symptom (two near-identical components that take ~180 iterations to separate) is what a symmetric/degenerate initialization produces, which suggests the initial estimate is formed per shard when the 600 rows are split 18 ways. The 30 s worker setup timeout is the MPWorkerPool response_timeout default (multiprocessing.py:150) and is not reachable from optimize().",
+    "repairs_attacked": []
+  },
+  {
+    "id": "Q08-F06",
+    "severity": "real",
+    "title": "EM step acceptance uses an absolute 1e-12 tolerance, below one ulp of the objective, so rounding noise ends a run as a 'rejected update': tutorial latent_variable_models cell 7 stops at iteration 8 of 200 with converged=False on a 5.46e-12 wobble, and the README TorchEngine(dtype='float32') one-liner stops at 5 of 30 on a 1e-3 float32 wobble",
+    "surface": "mixle/inference/estimation.py _em_loop (accepted = ... dll >= -1.0e-12 ...) and the fused loop; tutorials/latent_variable_models.ipynb code cell 7; README 'Engines & scale' TorchEngine(device=..., dtype='float32') line",
+    "reproduction": "cd /tmp && R=<review-root> && $R/tools/pyt.py 900 $R/venv-full/bin/python $R/pass-08/probes/p_lvm_cell7_rejected.py; $R/venv-full/bin/python - <<'EOF'\nimport warnings, numpy as np\nfrom mixle.inference import optimize\nfrom mixle.stats import GaussianEstimator, MixtureEstimator\nfrom mixle.engines import TorchEngine\nd = list(np.random.RandomState(0).normal(0, 1, 300)) + list(np.random.RandomState(1).normal(6, 1, 300))\nest = MixtureEstimator([GaussianEstimator(), GaussianEstimator()])\nfor kw in ({}, {\"engine\": TorchEngine(device=\"cpu\", dtype=\"float32\")}):\n    with warnings.catch_warnings(record=True) as c:\n        warnings.simplefilter(\"always\")\n        m = optimize(d, est, max_its=30, rng=np.random.RandomState(0), out=None, **kw)\n    fp = m.fit_provenance(); print(kw, \"converged=%s its=%s\" % (fp.converged, fp.iterations), [str(w.message)[:150] for w in c])\nEOF",
+    "observed": "Cell 7 (composite 3-component mixture, 800 rows, max_its=200): note 'optimize() stopped at iteration 8 of max_its=200 on a rejected update: the proposal fell 5.46e-12 below the last accepted objective while the last accepted step still gained 0.731 > delta=1e-09 ... More of the same update would not help.'; fit_provenance: converged=False iterations=8 final_objective=-10797.659647, np.spacing(final_objective)=1.82e-12 (the 'decrease' is 3 ulps); continuing from the returned model with prev_estimate= moves the objective by exactly 0 and leaves every parameter unchanged (the model is a fixed point), and the Gaussian fields equal the stored notebook output to all printed digits (probes/out_lvm_cell7_rejected_venv-full.txt). float32 TorchEngine on CPU: 'stopped at iteration 5 of max_its=30 on a rejected update: the proposal fell 0.000998 below the last accepted objective while the last accepted step still gained 0.000623 > delta=1e-09 ... converged=False', while the float64 run converges (readme/out/s5_engines_venv-full.txt).",
+    "expected": "Monotonicity is judged at the precision of the objective (relative to |ll| and to the engine dtype); a step within rounding noise is accepted or treated as converged, the receipt says converged=True, and no note claims a genuine descent or that 'more of the same update would not help'.",
+    "notes": "The stored corpus copy of cell 7 prints the same parameters with no warning, so the truncation existed before and the new R-round note now discloses a stop that is itself wrong. The post-loop fold in the fused loop already uses 'final_ll - prev_ll >= -1.0e-12', the same absolute constant. fit_provenance() exposes no rejected_decrease field although the note quotes one.",
+    "repairs_attacked": ["P02-F06"]
+  },
+  {
+    "id": "Q08-F07",
+    "severity": "real",
+    "title": "Migration guide says how='map' is refused when parameters are unpinned; Normal(free, free).fit([1.0], how='map') is not refused -- venv-full returns a 1e-8-variance point mass and venv-base raises a raw RuntimeError; how='vi', which the guide says still fits, also raises RuntimeError on venv-base",
+    "surface": "mixle.ppl RandomVariable.fit(how='map'|'vi') (docs/migrations/0.8.2.md 'Probabilistic programs and surrogates', last bullet; CHANGELOG P10-F13)",
+    "reproduction": "cd /tmp && for V in <review-root>/venv-full/bin/python <review-root>/venv-base/bin/python; do $V - <<'EOF'\nimport mixle; print(mixle.__path__[0])\nfrom mixle.ppl import Normal, free\nfor how in (\"map\", \"vi\", \"mcmc\", \"laplace\"):\n    try: print(how, \"->\", Normal(free, free).fit([1.0], how=how))\n    except Exception as e: print(how, \"->\", type(e).__name__, str(e)[:150])\nEOF\ndone",
+    "observed": "venv-full: map -> GaussianDistribution(1.0, 1.0000000000000017e-08); vi -> GaussianDistribution(0.92, 1563624565.68); mcmc and laplace -> ValueError 'RandomVariable has 2 parameter(s) with no prior (arg0, arg1) but was given 1 observation(s): nothing pins them ...'. venv-base: map -> RuntimeError 'inference model construction or likelihood evaluation failed at unconstrained coordinates [1.0, -374.6974625775336]'; vi -> RuntimeError '... at unconstrained coordinates [-7.6e+115, 365.9]'; mcmc/laplace refused as on venv-full (probes/out_migration_venv-full.txt vs out_migration_venv-base.txt).",
+    "expected": "The guide lists how='map' among the refused routes ('mcmc'|'nuts'|'hmc'|'ensemble'|'map'|'laplace'), so the named ValueError on both installs; and identical behaviour on the base and full installs for a numpy-only model.",
+    "notes": "Surface owned by pass 06/07; reported here because the migration guide as a whole is in scope and the sentence is false on the wheel. On venv-full the MAP route evidently resolves to closed-form EM (variance floored at 1e-8) and skips the guard in the numerical-target builder; on venv-base it goes numerical and blows up before the guard. how='vi' on venv-base contradicts the guide's 'still fit'.",
+    "repairs_attacked": ["P10-F13"]
+  },
+  {
+    "id": "Q08-F08",
+    "severity": "blocking",
+    "title": "R05-F07 claims every family that defines quantile refuses an out-of-domain q; UniformDistribution and LaplaceDistribution still return NaN for q=-0.5, 1.5 and NaN, unchanged from 0.8.1",
+    "surface": "UniformDistribution.quantile, LaplaceDistribution.quantile (CHANGELOG 0.8.2 R05-F07: 'Every family that defines quantile refuses an out-of-domain q the same way'; docs/migrations/0.8.2.md 'quantile(q) refuses a q outside [0, 1] on every family')",
+    "reproduction": "cd /tmp && R=<review-root> && $R/tools/pyt.py 300 $R/venv-full/bin/python $R/pass-08/probes/p_quantile_uniform_laplace.py; $R/tools/pyt.py 300 <review-store>/candidate-081/venv/bin/python $R/pass-08/probes/p_quantile_uniform_laplace.py",
+    "observed": "0.8.2 (venv-full): UniformDistribution(0,1).quantile(-0.5) -> nan, (1.5) -> nan, (nan) -> nan; LaplaceDistribution(0,1).quantile(-0.5/1.5/nan) -> nan; GaussianDistribution(0,1).quantile(1.5) -> ValueError 'GaussianDistribution.quantile: q must be in [0, 1].' 0.8.1: Uniform and Laplace identical (nan), Gaussian nan (probes/out_quantile_uniform_laplace_venv-full.txt, _081.txt). Also in probes/out_migration_venv-full.txt ('UniformDistribution q=-0.5:nan ...', 'LaplaceDistribution q=-0.5:nan ...').",
+    "expected": "ValueError naming the family, as the eleven other probed families now raise and as the CHANGELOG and migration guide state for every family.",
+    "notes": "Rated blocking because it is a 0.8.2 repair claim (R05-F07) that is false on two documented families reachable by an ordinary user; the consequence is the pre-repair silent NaN, so the fix is small (route the two through validated_quantile_probability). Surface owned by pass 01; the migration-guide sentence is in this pass's scope.",
+    "repairs_attacked": ["R05-F07"]
+  },
+  {
+    "id": "Q08-F09",
+    "severity": "real",
+    "title": "docs quickstart 'Create a Certified Artifact': create(rows, calibrate=0.2, quantify_uq=True, seed=0) on the page's own rows fails its requested UQ internally (NotImplementedError on the SequenceDistribution field), records it only in postconditions with no warning, and prints Guarantee.UNVERIFIED (0) and is_calibrated() False that the page never explains",
+    "surface": "mixle.inference.create (docs/quickstart.rst lines 219-231); CreatedModel.guarantee / is_calibrated() / postconditions",
+    "reproduction": "cd /tmp && R=<review-root> && $R/tools/pyt.py 600 $R/venv-full/bin/python $R/pass-08/probes/p_quickstart_create.py",
+    "observed": "warnings: []; guarantee: <Guarantee.UNVERIFIED: 0>; is_calibrated(): False; is_certified(): False; postconditions: calibration performed=True, uq requested=True performed=False error='NotImplementedError: laplace_posterior cannot flatten a SequenceDistribution; add it to _leaf_flatteners (the same per-family extend point as register_family), or use the model's bespoke inference.'; calibration report: n=48, method='log-density', note 'model has no scalar predictive CDF; PIT calibration not applicable (multivariate/latent)'; certificate blocks: field[0] GLOBAL_UNIQUE(5), field[1]mixture 0, field[1]component[0] 0, field[1]component[1] 0, field[2] 0 (probes/out_quickstart_create_venv-full.txt; same values printed by the page transcription in probes/out_quickstart_venv-full.txt and venv-base).",
+    "expected": "A requested post-condition that could not be performed is reported to the caller (the code comment in create.py says 'non-fatal, but never silent'), and the quickstart shows or explains what its two print lines produce on its own data (a certificate of UNVERIFIED and a not-calibrated verdict).",
+    "notes": "The page's rows carry a count sequence per record, which is exactly the leaf the UQ lowering cannot flatten, so the documented call never delivers the UQ it asks for. Surface owned by pass 10; the quickstart prose is in this pass's scope.",
+    "repairs_attacked": []
+  },
+  {
+    "id": "Q08-F10",
+    "severity": "docs",
+    "title": "README nested-HMM budget note: at the README's own max_its=300 the flagship snippet is still capped and unconverged and the transition matrix still has both rows pointing at one state, on 3 of 3 seeds, identically on 0.8.1 and 0.8.2",
+    "surface": "README.md 'Compose to any depth' block (max_its=300) and the paragraph 'max_its is the one knob that is not optional here ... the number to raise is max_its' (P08-F02 repair)",
+    "reproduction": "cd /tmp && R=<review-root> && $R/tools/pyt.py 1500 $R/venv-full/bin/python $R/pass-08/readme/s4_hmm_nest.py 3; $R/tools/pyt.py 1500 <review-store>/candidate-081/venv/bin/python $R/pass-08/readme/s4_hmm_nest_sum.py 1",
+    "observed": "Data as in the P08-F02 ledger entry (60 sequences x 30 steps; state A = five clusters at -20/-10/0/10/20, state B = N(12,1), switch 0.15). Default max_its: converged=False, T=[[0.88,0.12],[0.818,0.182]], neural sigma 3.66 -- both rows point at one state and the scale is several times too wide, as the prose says. max_its=300: seed 0 converged=False its=300 T=[[0.911,0.089],[0.834,0.166]] mixture means [-20.72,-19.72,-10.08,-0.02,11.49] neural mu=19.92 sigma=1.04 (a cap note fires); seeds 1 and 2 likewise unconverged with both rows pointing at state 0 (readme/out/s4_hmm_nest_venv-full.txt). The published 0.8.1 gives digit-identical numbers for seed 0 (readme/out/s4_hmm_nest_sum_081_seed0.txt vs s4_hmm_nest_sum_venv-full_seed0.txt).",
+    "expected": "The README's remedy produces what its prose implies: a converged two-state HMM with a transition matrix near [[0.85,0.15],[0.15,0.85]] and the neural leaf on the N(12,1) regime; or the prose says that 300 iterations may still stop at the cap in a different basin and what to do then.",
+    "notes": "Not a library change (0.8.1 identical), so docs only; the fit lands in a basin where the neural leaf models the +20 cluster and the mixture absorbs the 12-regime, and is still moving at 300. The README's default-budget description is confirmed.",
+    "repairs_attacked": ["P08-F02"]
+  },
+  {
+    "id": "Q08-F11",
+    "severity": "docs",
+    "title": "README enumeration snippet's printed numbers (rank=6, cumulative_prob=0.114, 'here: 6, not 5') only reproduce with float32 weights; as written, from_pretrained loads SmolLM2-135M in bfloat16 and prints rank=4, cumulative_probability=0.0915",
+    "surface": "README.md 'Enumeration & ranking' block (AutoregressiveEnumerable on HuggingFaceTB/SmolLM2-135M)",
+    "reproduction": "cd /tmp && R=<review-root> && $R/tools/pyt.py 900 $R/venv-full/bin/python $R/pass-08/readme/s6_enum.py; $R/tools/pyt.py 900 $R/venv-full/bin/python $R/pass-08/readme/s6_enum_f32.py",
+    "observed": "Verbatim snippet: llm dtype torch.bfloat16; top_k(3) -> [' located in the', ' the city of', ' the capital of'] (matches); unrank(5) -> ' situated in the' log_prob -4.490; rank(unrank(5)[0]) -> DensityRankResult(cumulative_probability=0.0915, rank=4, exact=True). With dtype=torch.float32: unrank(5) -> ' Paris, the' log_prob -4.651; rank=6, cumulative_probability=0.11396, matching the README comment (readme/out/s6_enum_venv-full.txt, s6_enum_f32_venv-full.txt).",
+    "expected": "The snippet pins the dtype it was measured with (or the comment states the bf16 numbers).",
+    "notes": "P08-F01 (bf16 logits rejected) is repaired -- the snippet now runs in bf16 -- but its documented numbers moved with the precision. Off-by-a-near-tie is within what the README's own caveat allows; the concrete numbers are what is stale.",
+    "repairs_attacked": ["P08-F01"]
+  },
+  {
+    "id": "Q08-F12",
+    "severity": "docs",
+    "title": "README 'Tests' command python -m pytest -m full -m \"\" is described as 'everything non-optional', but pytest keeps only the last -m, so it selects every test including optional and benchmark tiers",
+    "surface": "README.md 'Tests' section; mixle/tests/README.md (whose own full-gate spelling is -m \"slow and not optional and not benchmark\")",
+    "reproduction": "cd <review-root>/pass-08/tests/mdemo && V=<review-root>/venv-full/bin/python; $V -m pytest -p no:randomly -p no:cacheprovider -m full -m \"\" --collect-only -q demo_test.py; $V -m pytest -p no:randomly -p no:cacheprovider -m full --collect-only -q demo_test.py; $V -m pytest -p no:randomly -p no:cacheprovider -m \"not optional\" --collect-only -q demo_test.py",
+    "observed": "On a 3-test file (one @pytest.mark.full, one @pytest.mark.optional, one unmarked): -m full -m \"\" collects 3/3 (identical to -m \"\"); -m full collects 1/3; -m \"not optional\" collects 2/3 (tests/mdemo_out.txt).",
+    "expected": "A command whose selection matches its description ('everything non-optional'), e.g. -m \"not optional\" or the tests README's spelling.",
+    "notes": "pytest registers -m with action='store', so repeated -m options overwrite. The readme-review record (release-checklists/0.8.2-reviews/readme-review.md) did not check this command.",
+    "repairs_attacked": []
+  },
+  {
+    "id": "Q08-F13",
+    "severity": "docs",
+    "title": "Migration guide sentences not true of the wheel: potentials= is listed among optimize() arguments that raise TypeError by name (optimize has no such parameter), and 'No name was added, renamed, or removed' while the guide itself lists added names (+79/-3 module-level names measured)",
+    "surface": "docs/migrations/0.8.2.md lines 5 and 33; mixle.inference.optimize signature; module-level names of the 779 importable mixle modules",
+    "reproduction": "cd /tmp && R=<review-root> && $R/venv-full/bin/python -c \"import inspect; from mixle.inference import optimize; print('potentials' in inspect.signature(optimize).parameters)\n\"; $R/venv-base/bin/python $R/pass-08/probes/names_diff.py $R/pass-08/probes/names_081.json $R/pass-08/probes/names_082.json | tail -n 4",
+    "observed": "'potentials' in optimize's parameters -> False; optimize(data, potentials=5) -> TypeError \"optimize() got an unexpected keyword argument 'potentials'\" (Python's generic message; probes/out_migration_venv-full.txt). Names dump 0.8.1 vs 0.8.2: 779 modules each, 0 modules added/removed, 79 module-level names added (e.g. mixle.ppl.regression.predict_at, mixle.stats.compute.kernel.HAS_NUMBA, mixle.inference.production.drift.validate_drift_thresholds, BayesOptResult.surrogate_repairs/numerical_repairs per the guide itself) and 3 removed (stdlib re-exports Real, math, Mapping) (probes/out_names_diff.txt).",
+    "expected": "The optimize() bullet names the surface that actually takes potentials= (the PPL sampler fit, per CHANGELOG P04-F11); the 'no name added' sentence is scoped to the documented public API, since the same page lists numerical_repairs(), surrogate_repairs, filtered= and tie_tolerance as new.",
+    "notes": "The added names are helper functions and constants, not renames of existing API; every 0.8.1 pickle/JSON/str model the cross-version probe wrote loads and scores identically on 0.8.2 (probes/xver/out_load_venv-*.txt), so the compatibility half of the sentence holds.",
+    "repairs_attacked": ["P04-F11"]
+  },
+  {
+    "id": "Q08-F14",
+    "severity": "docs",
+    "title": "mixle-notebooks d99d296 stored outputs still show the pre-repair numbers for P08-F04, P08-F08 and P08-F14 that the wheel now prints correctly",
+    "surface": "corpus tutorials/probabilistic_programming.ipynb cells 3 and 8; tutorials/latent_variable_models.ipynb cells 3/10/12/14/16 and estimation_using_spark.ipynb cell 6 (print_iter cells)",
+    "reproduction": "cd /tmp && R=<review-root> && W=$R/pass-08 && $R/venv-full/bin/python $W/nb/nbdiff.py $R/corpus/notebooks/tutorials/probabilistic_programming.ipynb $W/corpus/notebooks/tutorials/probabilistic_programming.ipynb --show 4; $R/venv-full/bin/python $W/nb/nbdiff.py $R/corpus/notebooks/tutorials/latent_variable_models.ipynb $W/corpus/notebooks/tutorials/latent_variable_models.ipynb --show 3",
+    "observed": "probabilistic_programming cell 3: stored 'HMC  acc 1.00  ESS 3000', fresh 'ESS 1000' (1000 draws); cell 8: stored '3·N(0,1)+1 mean=1.02 var=8.95', fresh 'mean=1.00 var=9.00' beside the comment '-> Normal(1, 9), exact'. latent_variable_models cells 3/10/12/14/16 and spark cell 6: stored outputs have no progress lines although the cells pass print_iter=50/25/10; fresh copies print them (nb/diff_probabilistic_programming.txt, nb/diff_latent_variable_models.txt, nb/diff_estimation_using_spark.txt).",
+    "expected": "Stored outputs that match the wheel the corpus is pinned to; the repaired numbers are the claims the tutorials should now carry.",
+    "notes": "Stale in the direction opposite to 0.8.1's P08-F16: the library is right and the corpus is behind. Every other stored-vs-fresh difference across the 17 notebooks is timing, a swapped state label (latent_variable_models cell 19 Viterbi path [1 0 0 ...] vs [0 1 1 ...] for the same segmentation) or sampler noise.",
+    "repairs_attacked": ["P08-F04", "P08-F08", "P08-F14"]
+  },
+  {
+    "id": "Q08-F15",
+    "severity": "minor",
+    "title": "An (n, 1) column into PoissonEstimator raises numpy's 'shapes (50,1) and (50,) not aligned' instead of the named numpy.ravel message the CHANGELOG claims for all thirty univariate families",
+    "surface": "PoissonEstimator via optimize (CHANGELOG 0.8.2 P01-F13/P06-F08: 'An (n, 1) column array into a univariate estimator is refused by an error naming the estimator, the row shape, and numpy.ravel ... for all thirty families'; docs/migrations/0.8.2.md 'Latent models' bullet 2)",
+    "reproduction": "cd /tmp && <review-root>/venv-full/bin/python - <<'EOF'\nimport numpy as np\nfrom mixle.inference import optimize\nfrom mixle.stats import GaussianEstimator, PoissonEstimator\nfor est, col in ((GaussianEstimator(), np.random.RandomState(0).normal(size=(50, 1))), (PoissonEstimator(), np.random.RandomState(0).poisson(3.0, size=(50, 1)))):\n    try: print(type(est).__name__, \"->\", optimize(col, est, out=None))\n    except Exception as e: print(type(est).__name__, \"->\", type(e).__name__, str(e)[:170])\nEOF",
+    "observed": "GaussianEstimator -> ValueError 'GaussianDataEncoder expects a one-dimensional sequence of scalar observations, but the data has shape (50, 1). Flatten it with numpy.ravel(data) ...'; PoissonEstimator -> ValueError 'shapes (50,1) and (50,) not aligned: 1 (dim 1) != 50 (dim 0)' (probes/out_migration_venv-full.txt, identical on venv-base).",
+    "expected": "The named message on Poisson as on Gaussian.",
+    "notes": "Only Gaussian and Poisson were probed; other families may share the gap. Surface owned by pass 01.",
+    "repairs_attacked": ["P01-F13", "P06-F08"]
+  },
+  {
+    "id": "Q08-F16",
+    "severity": "minor",
+    "title": "The README's five base-install examples print nine 'stopped at the max_its cap' UserWarnings in a fresh process (gallery_structured_example 7, scaling_example 2), from deliberate max_its=1/10/40 calls that do not pass delta=None as the note instructs",
+    "surface": "examples/gallery_structured_example.py lines 53, 60, 82, 89, 105, 156, 164; examples/scaling_example.py line 37 (README 'Examples' section); P08-F05",
+    "reproduction": "cd /tmp && R=<review-root> && mkdir -p $R/pass-08/examples/cwd && for ex in gallery_structured_example scaling_example; do PYT_CWD=$R/pass-08/examples/cwd $R/tools/pyt.py 1800 $R/venv-base/bin/python $R/source/examples/$ex.py > /tmp/q08_$ex.txt; echo \"$ex: $(grep -c 'UserWarning: optimize() stopped' /tmp/q08_$ex.txt) cap notes, $(tail -n 1 /tmp/q08_$ex.txt)\"; done",
+    "observed": "All five examples exit 0 on venv-base (examples/base5/summary.txt). gallery_structured_example: 7 notes, six 'stopped at the max_its cap (1|40) before the objective settled' and one at line 105 'stopped at iteration 9 of max_its=10 on a rejected update ... an unconverged fit'; scaling_example: 2 notes at max_its=1 (examples/base5/*.venv-base.out).",
+    "expected": "Examples the README sends a new user to run clean: a deliberately fixed iteration count passes delta=None (the library's own advice), and the one genuinely unconverged fit gets the budget it needs.",
+    "notes": "The CHANGELOG says R07-F07 'closes the open half of P08-F05'; the examples' own capped calls were the other half of that finding's expectation ('a tutorial that deliberately caps iterations ... does not warn').",
+    "repairs_attacked": ["P08-F05"]
+  },
+  {
+    "id": "Q08-F17",
+    "severity": "minor",
+    "title": "The P08-F17 regression tests (TorchModuleShapeTest) fail with ModuleNotFoundError instead of skipping on an install without torch",
+    "surface": "mixle/tests/notebook_surface_repairs_test.py TorchModuleShapeTest (2 tests); RegressionSurfaceTest in the same file skips correctly without pandas",
+    "reproduction": "cd <review-root>/pass-08/tests && <review-root>/venv-base/bin/python -m pytest -p no:randomly -q -m \"\" -n 0 notebook_surface_repairs_test.py -k TorchModuleShapeTest",
+    "observed": "venv-base: 2 failed ('torch = __import__(\"torch\")' -> ModuleNotFoundError: No module named 'torch'), 20 passed, 4 skipped for the whole file; venv-full: 26 passed (tests/pytest_results.txt).",
+    "expected": "@unittest.skipUnless(HAS_TORCH, ...) like the file's pandas-gated class and the torch-gated classes of adversarial_review_082_repairs_test.py.",
+    "notes": "Tests are not shipped in the wheel (no mixle/tests in site-packages), so this bites only a base-environment run of the source suite.",
+    "repairs_attacked": ["P08-F17"]
+  },
+  {
+    "id": "Q08-F18",
+    "severity": "minor",
+    "title": "Fitted regression predict(given) raises a raw KeyError for a missing covariate, while fit(given=) names the missing field",
+    "surface": "mixle.ppl RandomVariable.predict on a RegressionResult fit (P08-F15 repair: predict() takes the covariates it is predicting at)",
+    "reproduction": "cd /tmp && <review-root>/venv-base/bin/python - <<'EOF'\nimport numpy as np\nfrom mixle.ppl import Normal, Field, free\nrng = np.random.RandomState(0); x, z = rng.normal(size=300), rng.normal(size=300)\ny = (2.0 * x - 1.0 * z + 0.5 + rng.normal(0.0, 0.3, 300)).tolist()\nm = Normal(free * Field(\"x\") + free * Field(\"z\") + free, free)\nf = m.fit(y, given={\"x\": x, \"z\": z}); print(f)\nfor label, fn in ((\"fit(given missing z)\", lambda: m.fit(y, given={\"x\": x})), (\"predict(given missing z)\", lambda: f.predict({\"x\": [1.0]})), (\"predict(scalars)\", lambda: f.predict({\"x\": 1.0, \"z\": 0.0}))):\n    try: print(label, \"->\", fn())\n    except Exception as e: print(label, \"->\", type(e).__name__, str(e)[:120])\nEOF",
+    "observed": "fit(given missing z) -> ValueError \"given is missing required field(s): ['z'].\"; predict(given missing z) -> KeyError 'z'; predict scalars -> ValueError \"given['x'] must be a non-empty finite numeric one-dimensional sequence.\" (repairs/out_f15_venv-full.txt, out_f15_venv-base.txt). The repair itself holds: repr 'RV(fitted RegressionResult: x=1.986, z=-0.9743, intercept=0.4753)', given=DataFrame (including a filtered, non-0..n index) matches the dict fit, predict(DataFrame|dict) draws at the covariates (mean of 2000 draws at x=1,z=0: 2.471 for truth 2.5).",
+    "expected": "predict validates given the way fit does and names the missing field.",
+    "notes": "log_density(y, given=...) remains unsupported (TypeError), as on 0.8.1; the CHANGELOG does not claim it.",
+    "repairs_attacked": ["P08-F15"]
+  }
+]

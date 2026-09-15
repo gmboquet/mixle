@@ -47,3 +47,25 @@ and the standalone-release paragraph were all moved to 0.8.2 when the release br
 two counted claims (16,849 collected against a "15,000+" badge, and 40/34 in `base_dist_test`) both
 hold with room. This is a shorter record than 0.8.1's because 0.8.1's review repaired three stale
 items and this one had none to repair.
+
+## Addendum, 2026-09-15: what the ten-pass review of the candidate found here
+
+The review above found nothing stale, and three README items were wrong all the same. Pass 08 of the
+ten-pass review of the candidate (`pass-08/report.md`) found them by running the snippets harder
+than this record did: to convergence, at their stated precision, and with the selection arithmetic
+of the test command checked. All three are repaired in `c836cbf1`, each against a fresh measurement:
+
+- **Q08-F10 — the nested-HMM budget note.** It said the number to raise is `max_its`. At the
+  snippet's own `max_its=300` the fit still stopped at the cap with both transition rows pointing at
+  one state, on three of three seeds and identically on 0.8.1. The note now says a larger budget is
+  necessary but not sufficient, and to check `converged` and the transition matrix and compare
+  restarts.
+- **Q08-F11 — the enumeration snippet's numbers.** `rank=6, cumulative_prob=0.114` reproduce only
+  in float32, and `from_pretrained` loads SmolLM2-135M in bfloat16, which gives `rank=4`. The snippet
+  now loads with `.float()`, and on this tree it prints `rank=6, cumulative_probability=0.11396`.
+- **Q08-F12 — the "everything non-optional" test command.** `pytest -m full -m ""` keeps only the last
+  `-m`, so it selects every test, optional tiers included: 51 of 51 on a sample where `-m full`
+  selects 47. The README and `mixle/tests/README.md` now give `-m full`.
+
+The lesson for the next record of this kind: executing a snippet once shows that it runs, not that
+its printed numbers or its prose still hold.

@@ -37,3 +37,26 @@ when the branch was cut, so this review had far less to repair than 0.8.1's (whi
 across 16 pages). The remaining `0.8.0`/`0.8.1` mentions outside `api/` are release-history entries,
 migration notes for those versions, deprecation windows that legitimately name the release that
 announced them, and the frozen audit ledgers.
+
+## Addendum, 2026-09-15: what the ten-pass review of the candidate found here
+
+The ten-pass review of the candidate (`release-checklists/0.8.2-reviews/`) found documentation this
+review had passed that was not true of the wheel. The items in `docs/` and in library docstrings are
+repaired in `c836cbf1`, each against a measurement:
+
+- **`docs/migrations/0.8.2.md`.** It listed `how='map'` among the routes the no-prior guard refuses
+  (Q04-F04), and `potentials=` among `optimize()`'s arguments, which has no such parameter (Q08-F13).
+  It said models and posteriors used as prompts seed exactly as before (Q05-F09), and that every 0.8.1
+  artifact loads unchanged without mentioning the eight re-serialized families' changed hashes
+  (Q05-F11). It omitted `datetime64` arrays from the new refusals (Q06-F13), stated the HMM
+  initialization change without its scope (Q07-F05), and promised that `delta=None` runs exactly
+  `max_its` iterations (Q10-F03). It also gains the behaviour changes the campaign's own repairs
+  made.
+- **`docs/example-execution-manifest.rst`.** It did not name `torch` as the base-install blocker for
+  three examples (confirmed on a numpy+scipy environment), and its geoscience note still described
+  the abstention the P09-F04 repair removed (Q09-F15).
+- **`mixle.ops.project`.** Its docstring promised exactly `max_its` iterations under `delta=None`
+  (Q10-F03).
+
+The examples' own docstrings and banners (Q03-F24, Q09-F16, Q10-F04, Q10-F10) are repaired in the same
+commit, and the six notebook-corpus findings are repaired in `mixle-notebooks`.

@@ -1,0 +1,325 @@
+[
+ {
+  "id": "Q03-F01",
+  "severity": "real",
+  "title": "Fused EM loop stamps a fit that settled exactly at the cap converged=False and warns 'before the objective settled (last objective gain 0)'; P03-F04 extended this to composites and the auto route, which reported converged=True on 0.8.1",
+  "surface": "mixle.inference.optimize (fused-em route: every closed-form family, CompositeEstimator, CategoricalEstimator, PoissonEstimator, WeibullEstimator, the candidates optimize(rows) fits on the auto-structure route), Model.fit, propose(max_its=...); fit_provenance().converged / objective_gain; the max_its-cap UserWarning",
+  "reproduction": "import warnings, numpy as np\nfrom mixle.inference import optimize, fit\nfrom mixle.stats import GaussianEstimator, CompositeEstimator, CategoricalEstimator\nvals = [float(v) for v in np.random.RandomState(0).normal(3, 2, 300)]\nrows = [(str(c), v) for c, v in zip(np.random.RandomState(1).choice(['a', 'b', 'c'], 300), vals)]\nwarnings.simplefilter('always')\nfor label, f in ((\"optimize Gaussian max_its=2\", lambda: optimize(vals, GaussianEstimator(), max_its=2)),\n                 (\"fit Gaussian max_its=2\", lambda: fit(vals, GaussianEstimator(), max_its=2)),\n                 (\"optimize(rows) auto max_its=2\", lambda: optimize(rows, max_its=2)),\n                 (\"optimize Composite max_its=2\", lambda: optimize(rows, CompositeEstimator([CategoricalEstimator(), GaussianEstimator()]), max_its=2))):\n    fp = f().fit_provenance()\n    print(label, \"it=%s/%s converged=%s gain=%s alg=%s\" % (fp.iterations, fp.max_iterations, fp.converged, fp.objective_gain, fp.algorithm))\ng = optimize(vals, GaussianEstimator())\nprint(\"converged warm start, max_its=1:\", optimize(vals, GaussianEstimator(), prev_estimate=g, max_its=1).fit_provenance().converged)",
+  "observed": "0.8.2 (probes/p22_zero_gain_cap.full.out): optimize Gaussian max_its=2 -> it=2/2 converged=False gain=0.0 alg=fused-em, with UserWarning 'optimize() stopped at the max_its cap (2) before the objective settled (last objective gain 0, delta=1e-09): the returned model is an unconverged fit ... Raise max_its to fit to convergence'; fit Gaussian max_its=2 -> it=2/2 converged=True gain=0.0 alg=em, no warning; optimize Composite max_its=2 and optimize(rows) max_its=2 -> converged=False gain=0.0 alg=fused-em, whereas on 0.8.1 (p22_zero_gain_cap.081.out) the same two calls took the 'em' loop and reported converged=True. A converged warm start re-run with max_its=1 -> converged=False gain=0.0 (fit(): converged=True). With max_its=3 the same fits report it=3/3 converged=True: one extra iteration is spent to notice. Same shape for Categorical, Poisson and Weibull. probes/p05_capnotes.full.out: optimize(rows, max_its=2) and Model().fit(rows, max_its=2) emit the gain-0 cap note for a candidate model while fit(rows, max_its=2) and learn_bayesian_network(rows, max_its=2) emit none. probes/p16_model.full.out and p22: Model(MixtureEstimator(...)).fit(data, max_its=2) with restarts='auto' emits 13-21 such notes, most reading 'last objective gain 0'.",
+  "expected": "A run whose last objective gain is 0 (below delta) is a converged fit: converged=True and no cap note, as fit() reports for the identical call and as optimize() itself reports when granted one more iteration. A note must not assert 'before the objective settled' while printing 'last objective gain 0'.",
+  "notes": "Mechanism: mixle/inference/estimation.py _fused_em_loop; its docstring (lines 1305-1313) documents that the convergence test 'lags the standard loop by one iteration'. At the cap the exhausted exit (lines 1374-1391) scores the final model and writes final_objective and objective_gain (0.0) into the receipt but never re-evaluates `converged`, so the receipt carries gain=0.0 and converged=False together and the cap note fires. Regression component: P03-F04 routed prior-free CompositeEstimator, and therefore optimize(rows)/Model.fit(rows) on tabular data, from the 'em' loop onto 'fused-em', so a cap that reported converged=True on 0.8.1 reports converged=False on 0.8.2. Not ledgered. Concerns P03-F04, P03-F06 (cap-note wording), P09-F09/P10-F09/R07-F06 (cap-note routing).",
+  "repairs_attacked": [
+   "P03-F04",
+   "P03-F06",
+   "P09-F09",
+   "P10-F09",
+   "R07-F06"
+  ]
+ },
+ {
+  "id": "Q03-F02",
+  "severity": "real",
+  "title": "Monotone acceptance gate uses an absolute 1e-12 tolerance: a converged fit whose fused log-likelihood dips by a few ulps is stopped on a 'rejected update', stamped converged=False and told 'More of the same update would not help'",
+  "surface": "mixle.inference.optimize (fused-em route) with engine=NUMPY_ENGINE / FUSED_NUMPY_ENGINE / NumpyEngine(dtype=float32) / TorchEngine (float32, mps), and the default route at n>=200000; fit_provenance().converged; the rejected-update UserWarning; examples/engine_benchmark_example.py",
+  "reproduction": "import warnings, numpy as np\nfrom mixle.inference import optimize\nfrom mixle.stats import MixtureEstimator, MixtureDistribution, GaussianEstimator, GaussianDistribution\nfrom mixle.engines import NUMPY_ENGINE\nest = MixtureEstimator([GaussianEstimator(), GaussianEstimator()])\ninit = MixtureDistribution([GaussianDistribution(-1.0, 1.0), GaussianDistribution(1.0, 1.0)], [0.5, 0.5])\nfor seed in range(6):\n    rng = np.random.RandomState(seed)\n    data = np.concatenate([rng.normal(-4, 1, 10000), rng.normal(4, 1, 10000)]).tolist()\n    for label, kw in ((\"NUMPY_ENGINE\", dict(engine=NUMPY_ENGINE)), (\"unfused\", dict(reuse_estep_ll=False))):\n        with warnings.catch_warnings(record=True) as w:\n            warnings.simplefilter('always')\n            fp = optimize(data, est, max_its=30, prev_estimate=init, out=None, **kw).fit_provenance()\n        print(seed, label, \"it=%d converged=%s gain=%.3g\" % (fp.iterations, fp.converged, fp.objective_gain),\n              [str(x.message)[:140] for x in w if 'rejected' in str(x.message)])",
+  "observed": "probes/p27_recovery_confirm.full.out (a): NUMPY_ENGINE seeds 1, 3, 4 -> it=5 converged=False with 'optimize() stopped at iteration 5 of max_its=30 on a rejected update: the proposal fell 3.64e-11 below the last accepted objective while the last accepted step still gained 1.34e-08 > delta=1e-09. The returned model is the last accepted one, an unconverged fit, and its fit_provenance() reports converged=False. More of the same update would not help.' The unfused loop on the same data and start: 6/6 converged=True. probes/p23_roundoff_reject.full.out: spurious rejections FUSED_NUMPY_ENGINE 3/6, 3/6, 2/6 at n=2000/20000/200000; NUMPY_ENGINE 2/6, 3/6, 1/6; default route 0/6, 0/6, 2/6; unfused fit() 0/6 everywhere; rejected amounts 3.6e-12 .. 1.2e-10, i.e. a few ulps of an objective of magnitude 4e3 .. 4e5. Float32 engines are rejected on every run at 3e-4 .. 2e-2 (probes/p21_engine_gmm.full.out: NumpyEngine(float32) it=4, torch cpu float32 it=4, torch mps it=3 'fell 0.0232 ... still gained 27.3'), and examples/engine_benchmark_example.out carries that MPS note from the example's own GMM benchmark (line 127). Present on 0.8.1 too (probes/p27_recovery_confirm.081.out: NUMPY_ENGINE seeds 1, 3, 4 converged=False; its note additionally advised 'a different initialization or restarts=...').",
+  "expected": "An acceptance tolerance scaled to the objective's magnitude and the engine's dtype (a decrease of a few ulps after a step that gained 1e-8 is roundoff, not a failed update): continue to the delta test and report converged=True as the unfused loop does; at minimum the note must not claim 'More of the same update would not help' when the unfused loop converges from the same state.",
+  "notes": "Mechanism: mixle/inference/estimation.py:1230 (_em_loop) and :1335 (_fused_em_loop) accept a step only when dll >= -1.0e-12, and :1251/:1352 make `converged` require acceptance, so a rejected step can never be converged. The fused E-step normalizer and the separate score pass sum in different orders, which is why the fused route sees dips the unfused route never does; float32 engines cannot pass an absolute 1e-12 gate near an optimum at all, so their fits are never 'converged' at the default delta. Not a 0.8.2 regression and not ledgered (0.8.2-followups.md has no 'rejected'/'roundoff' entry); the 0.8.2 disclosure of the rejected-step exit is what makes it visible. Consequence for the shipped example: its GMM row bills every engine for '10 its' while the numpy and torch-cpu fits converge at iteration 5 and the MPS fit stops at 3 with a different log-likelihood (Q03-F24). Concerns P03-F06, R02-F05, R07-F07.",
+  "repairs_attacked": [
+   "P03-F06",
+   "R02-F05",
+   "R07-F07"
+  ]
+ },
+ {
+  "id": "Q03-F03",
+  "severity": "real",
+  "title": "An empty validation set is not refused: fit(data, est, vdata=[]) returns the INITIAL model stamped converged=True, optimize() silently ignores the same argument, best_of() reports a validation log-likelihood of 0.0",
+  "surface": "mixle.inference.fit / optimize(reuse_estep_ll=False) / optimize (fused) / best_of / Model.fit with vdata=[] | () | np.array([]) | an empty generator | enc_vdata=[] | ()",
+  "reproduction": "import warnings, numpy as np\nfrom mixle.inference import optimize, fit, best_of\nfrom mixle.stats import GaussianEstimator, MixtureEstimator\nvals = [float(v) for v in np.random.RandomState(0).normal(3, 2, 300)]\nwarnings.simplefilter('always')\nfor label, f in ((\"fit vdata=[]\", lambda: fit(vals, GaussianEstimator(), vdata=[])),\n                 (\"optimize vdata=[]\", lambda: optimize(vals, GaussianEstimator(), vdata=[])),\n                 (\"fit no vdata\", lambda: fit(vals, GaussianEstimator()))):\n    m = f(); fp = m.fit_provenance()\n    print(label, \"mu=%.4f sigma2=%.4f it=%s converged=%s final=%.3f\" % (m.mu, m.sigma2, fp.iterations, fp.converged, fp.final_objective))\nprint(\"sample mean/var\", np.mean(vals), np.var(vals))\nbim = [float(v) for v in np.concatenate([np.random.RandomState(0).normal(-4, 1, 300), np.random.RandomState(1).normal(4, 1, 300)])]\nest = MixtureEstimator([GaussianEstimator()] * 2)\nvll, m = best_of(bim, [], est, 3, 30, 0.1, 1e-6, rng=np.random.RandomState(1))\nprint(\"best_of vdata=[] validation ll:\", vll)\nprint(\"fit vdata=[] final:\", fit(bim, est, max_its=30, rng=np.random.RandomState(1), vdata=[]).fit_provenance())",
+  "observed": "probes/p27_recovery_confirm.full.out (d): fit vdata=[] -> mu=2.6446 sigma2=2.3063 it=2 converged=True final=-672.510, no warning; optimize vdata=[] -> mu=3.0551 sigma2=4.0056 final=-633.836; fit without vdata -> mu=3.0551 (the sample mean), i.e. fit(vdata=[]) hands back the initialization, 39 nats below the MLE, as a converged fit. probes/p20_vdata_deep.full.out: on a 2-component mixture fit(vdata=[]) returns the iteration-1 model (final -1320.4188, weights [0.636, 0.364]) where optimize(vdata=[]) and the reference fit return -1267.3151 ([0.5, 0.5]); its receipt reads converged=True with last_accepted_objective=-1267.3151; every spelling ([], (), np.array([]), empty generator, enc_vdata=[]/()) behaves the same; best_of(vdata=[]) -> validation ll 0.0. The reproduction block's own mixture case (a different draw) shows the same shape: fit(vdata=[]) -> it=2 converged=True final_objective=-1276.205 with last_accepted_objective=-1250.123 (repro_check/Q03-F03.full.out). Identical on 0.8.1 (p20_vdata_deep.081.out, p27_recovery_confirm.081.out).",
+  "expected": "An empty validation set refused by name, the way empty data and empty enc_data are since P03-F02/P03-F03 (or ignored with a warning); never a converged=True receipt on the initialization with no note, and never two verbs returning different models for the same arguments.",
+  "notes": "Mechanism: mixle/inference/estimation.py _em_loop (lines 1193-1204, 1243): with a validation set the INITIAL model is made selectable with best_vll = ll_fn(enc_vdata, model) = 0.0 (an empty sum), and later iterates replace it only when best_vll < vll (strict); every iterate also scores 0.0, so the initial model is returned while trace.converged records the trajectory's convergence. _fused_em_loop selects with score >= best_score (line 1349), so there the LAST iterate wins, which is why optimize() looks right and fit() does not. Not ledgered (no 'vdata' entry in 0.8.2-followups.md). Concerns P03-F02, P03-F03 (their empty-input refusals stop at data/enc_data).",
+  "repairs_attacked": [
+   "P03-F02",
+   "P03-F03"
+  ]
+ },
+ {
+  "id": "Q03-F04",
+  "severity": "real",
+  "title": "R02-F07 stops at learn_bayesian_network(DataFrame): learn_structure(DataFrame) still fits the column names (an empty frame becomes a 2-observation tree), and both structure learners read a Mapping as its keys and a str as its characters",
+  "surface": "mixle.inference.learn_structure and learn_bayesian_network with a pandas DataFrame, a mapping of columns, a str/bytes, numpy.matrix, a 1-d ndarray / pd.Series / range / set / generator of scalars, a masked or 0-d array",
+  "reproduction": "import numpy as np, pandas as pd\nfrom mixle.inference import learn_structure, learn_bayesian_network, optimize\nrng = np.random.RandomState(0); n = 300\nplan = rng.choice(['free', 'pro'], n); usage = np.where(plan == 'pro', rng.normal(60, 5, n), rng.normal(10, 3, n)); spend = usage * 2 + rng.normal(0, 1, n)\nrows = [(str(p), float(u), float(s)) for p, u, s in zip(plan, usage, spend)]\ncols = {'p': [r[0] for r in rows], 'u': [r[1] for r in rows], 's': [r[2] for r in rows]}\ncases = ((\"empty DataFrame\", pd.DataFrame(columns=['c', 'v'])), (\"DataFrame p,u,s\", pd.DataFrame(rows, columns=['p', 'u', 's'])),\n         (\"DataFrame plan,usage,spend\", pd.DataFrame(rows, columns=['plan', 'usage', 'spend'])), (\"mapping p,u,s\", cols), (\"str\", 'hello world hello'))\nfor label, d in cases:\n    for f in (learn_structure, learn_bayesian_network):\n        try:\n            t = f(d); print(\"%-26s %-22s -> %s n_observations=%s\" % (label, f.__name__, t, t.fit_provenance().n_observations))\n        except Exception as e: print(\"%-26s %-22s -> %s: %s\" % (label, f.__name__, type(e).__name__, str(e)[:100]))\nm = optimize(cols); print(\"optimize(mapping) for comparison:\", type(m).__name__, m.fit_provenance().n_observations)",
+  "observed": "probes/p27_recovery_confirm.full.out (c), p17_structure_frontdoor.full.out, p17b_dependency_gain.full.out, p02_frontdoor.full.out: learn_structure(empty DataFrame cols c,v) -> DependencyTreeDistribution(fields=1, edges=[none]) n_observations=2 (the two column names fitted as the corpus; learn_bayesian_network refuses the same frame by name); learn_structure(DataFrame p,u,s) -> fields=1, n_observations=3 while learn_bayesian_network -> fields=3, n_observations=300; learn_structure(DataFrame plan,usage,spend) -> ValueError 'structure learning requires records of one fixed width, but record 1 has 5 field(s) where record 0 has 4' (the lengths of the names 'plan' and 'usage'); learn_structure(mapping) and learn_bayesian_network(mapping) -> fields=1, n_observations=3 (the keys); learn_structure('hello world hello') and learn_bayesian_network(str) -> n_observations=17 (the characters), where optimize/fit/best_of/Model.fit/propose refuse a str by name; np.matrix -> RecursionError (learn_structure) / TypeError unhashable 'matrix' (learn_bayesian_network); 1-d ndarray, pd.Series, range, set, generator of scalars -> TypeError \"object of type 'numpy.float64' has no len()\"; masked array -> 'len() of unsized object'; 0-d array -> 'iteration over a 0-d array'. optimize(mapping) -> HeterogeneousBayesianNetwork with n_observations=300 for the three-column mapping (the R06-F01 route; p02's two-column mapping gives CompositeDistribution n_observations=120). 0.8.1 fits the labels the same way (p17b_dependency_gain.081.out).",
+  "expected": "Both structure learners take the DataFrame/mapping conversion optimize() applies (CHANGELOG R02-F07: 'It now takes the same conversion optimize already applied'; R06-F01: a mapping of columns is materialized through column_records) and refuse str/bytes/matrix/0-d/masked/scalar-sequence inputs by name, as every other verb does since P03-F09.",
+  "notes": "Mechanism: mixle/inference/structure.py line 1060 (learn_structure) `data = list(data)` before _columns (likewise lines 804 and 976): list(DataFrame) yields the column labels, list(Mapping) its keys, list(str) its characters; the P02-F07 width check then either passes (equal-length labels: a silent wrong fit) or raises about the label lengths. learn_bayesian_network received a DataFrame branch for R02-F07 but no Mapping branch and no str refusal. The targeted re-review rated R02-F07 real; this is the same defect on the sibling verb and the sibling spellings. Concerns R02-F07, R06-F01, P03-F09, P02-F07.",
+  "repairs_attacked": [
+   "R02-F07",
+   "R06-F01",
+   "P03-F09",
+   "P02-F07"
+  ]
+ },
+ {
+  "id": "Q03-F05",
+  "severity": "minor",
+  "title": "One-shot iterators are materialized by optimize()/fit()/best_of() but not by dependency_gain(), seq_encode() or MPEncodedData, which die on a raw len() TypeError",
+  "surface": "mixle.inference.structure.dependency_gain (parent or child generator), mixle.stats.seq_encode (generator data), mixle.utils.parallel.multiprocessing.MPEncodedData (generator data)",
+  "reproduction": "import numpy as np\nfrom mixle.inference.structure import dependency_gain\nfrom mixle.stats import GaussianEstimator, seq_encode\npar = [str(c) for c in np.random.RandomState(0).choice(['a', 'b'], 100)]; ch = [float(v) for v in np.random.RandomState(1).normal(0, 1, 100)]\nfor label, f in ((\"dependency_gain parent generator\", lambda: dependency_gain((p for p in par), ch, GaussianEstimator())),\n                 (\"dependency_gain child generator\", lambda: dependency_gain(par, (c for c in ch), GaussianEstimator())),\n                 (\"seq_encode generator\", lambda: seq_encode((c for c in ch), GaussianEstimator().accumulator_factory().make().acc_to_encoder()))):\n    try: print(label, \"->\", f())\n    except Exception as e: print(label, \"->\", type(e).__name__, e)",
+  "observed": "0.8.2: all three -> TypeError: object of type 'generator' has no len() (probes/p17b_dependency_gain.full.out, p12_sequtils.full.out; MPEncodedData(generator) likewise in p13_parallel.full.out). 0.8.1 (p17b_dependency_gain.081.out): dependency_gain consumed a parent generator and raised 'fit() received no observations' and scored a child generator (573.41); the 0.8.2 TypeError is introduced by R02-F16's new length check.",
+  "expected": "Materialize one-shot iterators the way optimize()/fit()/best_of() do since P03-F02, or refuse them by name.",
+  "notes": "Concerns R02-F16 (its len()-based ragged check is where the generator now dies) and P03-F02.",
+  "repairs_attacked": [
+   "R02-F16",
+   "P03-F02"
+  ]
+ },
+ {
+  "id": "Q03-F06",
+  "severity": "minor",
+  "title": "P03-F03's zero-rows disclosure is spelling-dependent: seq_initialize/seq_estimate warn on an empty list but not on an empty tuple, initialize([]) is silent, and a single (size, x) chunk dies on 'cannot unpack non-iterable int object'",
+  "surface": "mixle.inference.seq_initialize, seq_estimate, initialize, optimize(enc_data=...) with an empty tuple of chunks, tuple(seq_encode([])), or a single (size, x) chunk",
+  "reproduction": "import warnings, numpy as np\nfrom mixle.inference import seq_initialize, seq_estimate, initialize, optimize\nfrom mixle.stats import GaussianEstimator, GaussianDistribution, seq_encode\nest = GaussianEstimator(); enc = seq_encode([], est.accumulator_factory().make().acc_to_encoder())\nfor label, e in ((\"list\", enc), (\"tuple\", tuple(enc)), (\"()\", ())):\n    with warnings.catch_warnings(record=True) as w:\n        warnings.simplefilter('always'); r = seq_initialize(e, est, np.random.RandomState(0), 0.5)\n    print(\"seq_initialize\", label, \"->\", r, \"warnings:\", len(w))\nwith warnings.catch_warnings(record=True) as w:\n    warnings.simplefilter('always'); r = initialize([], est, np.random.RandomState(0), 0.5)\nprint(\"initialize([]) ->\", r, \"warnings:\", len(w))\nfor f in (lambda: seq_initialize((0, np.array([])), est, np.random.RandomState(0), 0.5), lambda: optimize(None, est, enc_data=(0, np.array([])))):\n    try: f()\n    except Exception as ex: print(type(ex).__name__, ex)",
+  "observed": "probes/p12_sequtils.full.out: seq_initialize/seq_estimate on the empty list -> GaussianDistribution(0.0, 1e-08) with the P03-F03 warning 'received an encoded batch with zero rows ...'; on tuple(enc) or () -> the same fabricated model with NO warning; initialize([], ...) -> GaussianDistribution(0.0, 1e-08), no warning; a single (size, x) chunk -> 'TypeError: cannot unpack non-iterable int object' from seq_initialize, seq_estimate and optimize(enc_data=...). optimize(enc_data=()) is refused by name (R02-F10 verified).",
+  "expected": "The zero-rows disclosure on every spelling of an empty batch (R02-F10 made optimize count tuples; seq_initialize/seq_estimate/initialize did not follow), and a bare chunk either accepted or refused by name.",
+  "notes": "Concerns P03-F03, R02-F10, R02-F13.",
+  "repairs_attacked": [
+   "P03-F03",
+   "R02-F10",
+   "R02-F13"
+  ]
+ },
+ {
+  "id": "Q03-F07",
+  "severity": "minor",
+  "title": "engine=/precision= spellings fail on raw AttributeError/TypeError, and without numba engine=FUSED_NUMPY_ENGINE dies with ModuleNotFoundError instead of the P07-F15 refusal",
+  "surface": "mixle.inference.optimize(engine='numpy'|'torch'|'fused'|3, precision='bogus'); optimize(engine=FUSED_NUMPY_ENGINE) and fused_options= on venv-nonumba / venv-base",
+  "reproduction": "import numpy as np\nfrom mixle.inference import optimize\nfrom mixle.stats import GaussianEstimator, MixtureEstimator, MixtureDistribution, GaussianDistribution\nfrom mixle.engines import FUSED_NUMPY_ENGINE\nmix = MixtureDistribution([GaussianDistribution(-2, 1), GaussianDistribution(2, 1)], [0.5, 0.5]); data = mix.sampler(seed=1).sample(2000)\nest = MixtureEstimator([GaussianEstimator()] * 2)\nfor eng in ('numpy', 'torch', 'fused', 3, FUSED_NUMPY_ENGINE):\n    try: print(repr(eng), \"->\", optimize(data, est, prev_estimate=mix, max_its=2, engine=eng, out=None).fit_provenance().algorithm)\n    except Exception as e: print(repr(eng), \"->\", type(e).__name__, str(e)[:120])\ntry: optimize(data, est, prev_estimate=mix, max_its=2, precision='bogus', out=None)\nexcept Exception as e: print(\"precision='bogus' ->\", type(e).__name__, e)",
+  "observed": "probes/p24_engine_followup.{full,nonumba,base}.out and p14_engines.full.out: engine='numpy'/'torch' -> AttributeError: 'str' object has no attribute 'to_numpy'; engine='fused'/'x'/3 -> AttributeError: ... has no attribute 'name'; precision='bogus' -> TypeError: data type 'bogus' not understood. On venv-nonumba and venv-base, engine=FUSED_NUMPY_ENGINE (and any fused_options= with it) -> ModuleNotFoundError: No module named 'numba', where NumbaKernelFactory().build(...) on the same environments says 'numba is not installed, so a numba kernel cannot be built (install the extra: pip install mixle[numba]). Use GeneratedNumbaKernelFactory ...' (P07-F15).",
+  "expected": "engine= and precision= refused by name with the accepted objects/dtypes listed, and the fused engine without numba declined with the P07-F15 message rather than an import error from inside the loop.",
+  "notes": "Concerns P07-F15 (the sibling route that was repaired).",
+  "repairs_attacked": [
+   "P07-F15"
+  ]
+ },
+ {
+  "id": "Q03-F08",
+  "severity": "minor",
+  "title": "precision='float32' (and engine=NumpyEngine(dtype=float32)) is a silent no-op without numba while float16 is applied",
+  "surface": "mixle.inference.optimize(precision='float32'), optimize(engine=NumpyEngine(dtype=np.float32)) on venv-nonumba and venv-base",
+  "reproduction": "import numpy as np\nfrom mixle.inference import optimize\nfrom mixle.stats import GaussianEstimator, MixtureEstimator, MixtureDistribution, GaussianDistribution\nmix = MixtureDistribution([GaussianDistribution(-2, 1), GaussianDistribution(2, 1)], [0.5, 0.5]); data = mix.sampler(seed=1).sample(5000)\nest = MixtureEstimator([GaussianEstimator()] * 2)\nfor p in ('float64', 'float32', 'float16'):\n    m = optimize(data, est, prev_estimate=mix, max_its=5, precision=p, out=None)\n    print(p, [repr(c.mu) for c in m.components])",
+  "observed": "venv-full (numba): float64 mu=-2.0008092790678464, float32 mu=-2.000809263921426 (differs at the 8th digit), float16 mu=-2.0. venv-nonumba and venv-base: float32 mu=-2.0008092790678424, identical to float64 to all 16 digits (also with engine=NumpyEngine(dtype=np.float32)), while float16 -> -1.9992766533604764 is applied (probes/p24_engine_followup.{full,nonumba,base}.out).",
+  "expected": "Either float32 arithmetic on the pure-numpy kernels too, or a note that the requested precision is not honoured on this path; not a silent no-op for one dtype and an applied cast for another.",
+  "notes": "Reproduced on both numba-less environments; the mechanism in the generic kernel path was not traced.",
+  "repairs_attacked": []
+ },
+ {
+  "id": "Q03-F09",
+  "severity": "minor",
+  "title": "Structure-search receipts read converged=False, final_objective=None and is_approximate()=True for every completed search, and Model.fit(rows) records converged=False",
+  "surface": "fit_provenance() of HeterogeneousBayesianNetwork (optimize(rows), fit(rows), learn_bayesian_network) and DependencyTreeDistribution (learn_structure); FitProvenance.is_approximate(); Model.fit(rows)._fit_info",
+  "reproduction": "import numpy as np\nfrom mixle.inference import optimize, learn_structure\nfrom mixle import Model\nrng = np.random.RandomState(0); n = 300\nplan = rng.choice(['free', 'pro'], n); usage = np.where(plan == 'pro', rng.normal(60, 5, n), rng.normal(10, 3, n)); spend = usage * 2 + rng.normal(0, 1, n)\nrows = [(str(p), float(u), float(s)) for p, u, s in zip(plan, usage, spend)]\nfor m in (optimize(rows), learn_structure(rows)):\n    fp = m.fit_provenance(); print(type(m).__name__, fp.converged, fp.iterations, fp.max_iterations, fp.delta, fp.final_objective, fp.is_approximate())\nprint(Model().fit(rows)._fit_info)",
+  "observed": "probes/p27_recovery_confirm.full.out (b), p01_ledger_replay.full.out, p05_capnotes.full.out: both receipts read converged=False iterations=1/1 delta=None final_objective=None objective_gain=None and is_approximate() -> True; Model().fit(rows)._fit_info == {'n': 300, 'n_iter': 1, 'converged': False} with notes == []; the skeptic example prints the search's BIC (25952.8 vs 35868.2) that the receipt leaves as None. FitProvenance's docstring defines converged=False as 'stopped without the gain ever falling below delta', which cannot describe a run with no delta.",
+  "expected": "A completed search reports a truthful status (converged=True with delta=None, or a search-specific field), its objective (the BIC it maximized), and is_approximate() False unless a factor was actually capped or repaired.",
+  "notes": "Concerns P03-F01 (the receipt that repair added).",
+  "repairs_attacked": [
+   "P03-F01"
+  ]
+ },
+ {
+  "id": "Q03-F10",
+  "severity": "minor",
+  "title": "The receipt's seed field is recorded only through the seed= alias: rng=<int> leaves fit_provenance().seed None",
+  "surface": "mixle.inference.optimize(rng=<int>) vs optimize(seed=<int>); FitProvenance.seed",
+  "reproduction": "import numpy as np\nfrom mixle.inference import optimize\nfrom mixle.stats import GaussianEstimator, MixtureEstimator\ndata = [float(v) for v in np.random.RandomState(0).normal(3, 2, 100)]\nest = MixtureEstimator([GaussianEstimator()] * 2)\na = optimize(data, est, max_its=5, rng=3); b = optimize(data, est, max_its=5, seed=3)\nprint([c.mu for c in a.components] == [c.mu for c in b.components], a.fit_provenance().seed, b.fit_provenance().seed)",
+  "observed": "True None 3 (probes/p07_rng.full.out): the same integer through rng= produces the same model but a receipt with seed=None.",
+  "expected": "The receipt records the integer seed whichever alias carried it.",
+  "notes": "Concerns P03-F09 (rng normalization) and the receipt work of P03-F01.",
+  "repairs_attacked": [
+   "P03-F09",
+   "P03-F01"
+  ]
+ },
+ {
+  "id": "Q03-F11",
+  "severity": "minor",
+  "title": "optimize(enc_data=<MPEncodedData>) receipts carry n_observations=None although the handle knows its length",
+  "surface": "mixle.inference.optimize with enc_data=MPEncodedData(...); FitProvenance.n_observations",
+  "reproduction": "import io, numpy as np\nfrom mixle.inference import optimize, seq_initialize\nfrom mixle.stats import *\nfrom mixle.utils.parallel.multiprocessing import MPEncodedData\ntrue = MixtureDistribution([CompositeDistribution((GaussianDistribution(-2.0, 1.0), PoissonDistribution(3.0))), CompositeDistribution((GaussianDistribution(2.0, 1.0), PoissonDistribution(8.0)))], [0.5, 0.5])\ndata = list(true.sampler(seed=1).sample(3000)); est = MixtureEstimator([CompositeEstimator((GaussianEstimator(), PoissonEstimator()))] * 2)\nif __name__ == \"__main__\":\n    with MPEncodedData(data, estimator=est, num_workers=2) as enc:\n        start = seq_initialize(enc, est, np.random.RandomState(7), 1.0)\n        print(len(enc), optimize(None, est, enc_data=enc, prev_estimate=start, max_its=3, out=io.StringIO()).fit_provenance().n_observations)\n    print(optimize(data, est, prev_estimate=start, max_its=3, out=io.StringIO()).fit_provenance().n_observations)",
+  "observed": "3000 None, then 3000 for the local route (probes/p13_parallel.full.out): the parallel handle reports len 3000 but its receipt records n_observations=None (algorithm 'em'); the mp and local fits agree to 0.0 in log-likelihood.",
+  "expected": "n_observations=3000 on both routes; R02-F10 closed the same gap for the tuple-of-chunks spelling.",
+  "notes": "Concerns R02-F10, R06-F02.",
+  "repairs_attacked": [
+   "R02-F10",
+   "R06-F02"
+  ]
+ },
+ {
+  "id": "Q03-F12",
+  "severity": "minor",
+  "title": "objective='map' with no prior and objective='vb' with no variational family run plain EM but the receipt records 'map'/'vb'",
+  "surface": "mixle.inference.optimize(objective='map'|'vb') on a prior-free estimator; FitProvenance.objective",
+  "reproduction": "import numpy as np\nfrom mixle.inference import optimize\nfrom mixle.stats import GaussianEstimator\nvals = [float(v) for v in np.random.RandomState(0).normal(0, 1, 300)]\nfor obj in ('mle', 'map', 'vb'):\n    m = optimize(vals, GaussianEstimator(), objective=obj); fp = m.fit_provenance()\n    print(obj, fp.objective, fp.algorithm, fp.final_objective, sum(m.log_density(x) for x in vals))",
+  "observed": "mle -> objective 'mle', fused-em, -441.1708; map -> objective 'map', em, -441.1708 (equal to the plain log-likelihood; no prior anywhere); vb -> objective 'vb', em, -441.1708 (probes/p06_objective.full.out; the reproduction block's own draw prints -425.8919 for all three, repro_check/Q03-F12.full.out). The receipt labels a MAP or VB fit that ran plain EM on the plain likelihood.",
+  "expected": "objective='map' without a prior and objective='vb' without a variational family refused by name, or recorded as 'mle' -- P03-F04's own rule is that the receipt names the objective actually maximized.",
+  "notes": "Concerns P03-F04.",
+  "repairs_attacked": [
+   "P03-F04"
+  ]
+ },
+ {
+  "id": "Q03-F13",
+  "severity": "minor",
+  "title": "best_of() silently coerces max_its=0/-1/True to one iteration and trials=0/-3/True to a run, and dies on a raw TypeError for trials=1.5, where optimize() refuses the same max_its spellings by name",
+  "surface": "mixle.inference.best_of(max_its=..., trials=...)",
+  "reproduction": "import numpy as np\nfrom mixle.inference import best_of, optimize\nfrom mixle.stats import GaussianEstimator, MixtureEstimator\ndata = [float(v) for v in np.random.RandomState(0).normal(3, 2, 200)]; est = MixtureEstimator([GaussianEstimator()] * 2)\nfor mi in (0, -1, True):\n    print(\"best_of max_its=%r -> iterations\" % mi, best_of(data, None, est, 2, mi, 0.1, 1e-6, rng=np.random.RandomState(0))[1].fit_provenance().iterations)\nfor tr in (0, -3, True, 1.5):\n    try: print(\"best_of trials=%r -> ok, iterations\" % tr, best_of(data, None, est, tr, 3, 0.1, 1e-6, rng=np.random.RandomState(0))[1].fit_provenance().iterations)\n    except Exception as e: print(\"best_of trials=%r ->\" % tr, type(e).__name__, e)\ntry: optimize(data, est, max_its=0)\nexcept Exception as e: print(\"optimize max_its=0 ->\", e)",
+  "observed": "best_of max_its=0/-1/True -> runs 1 iteration (with two cap notes); trials=0/-3/True -> runs; trials=1.5 -> TypeError: 'float' object cannot be interpreted as an integer; optimize(max_its=0) -> 'optimize(): max_its must be a positive integer, got 0' (probes/p04_controls.full.out).",
+  "expected": "best_of validates max_its and trials the way optimize validates max_its (P03-F05 class).",
+  "notes": "Concerns P03-F05.",
+  "repairs_attacked": [
+   "P03-F05"
+  ]
+ },
+ {
+  "id": "Q03-F14",
+  "severity": "minor",
+  "title": "Cap notes routed through Model.fit still open with 'optimize()', and a restarts='auto' fit at a small cap emits one note per internal trial (21 for one call)",
+  "surface": "mixle.Model.fit (restarts=None and restarts='auto') cap notes; R07-F06's verb naming",
+  "reproduction": "import warnings, numpy as np\nfrom mixle import Model\nfrom mixle.inference import fit\nfrom mixle.stats import GaussianEstimator, MixtureEstimator\ndata = [float(v) for v in np.concatenate([np.random.RandomState(0).normal(-3, 1, 200), np.random.RandomState(1).normal(3, 1, 200)])]\nfor label, f in ((\"fit\", lambda: fit(data, MixtureEstimator([GaussianEstimator()] * 3), max_its=2, rng=np.random.RandomState(0))),\n                 (\"Model.fit restarts=None\", lambda: Model(MixtureEstimator([GaussianEstimator()] * 3)).fit(data, max_its=2, restarts=None)),\n                 (\"Model.fit restarts=auto\", lambda: Model(MixtureEstimator([GaussianEstimator()] * 3)).fit(data, max_its=2))):\n    with warnings.catch_warnings(record=True) as w:\n        warnings.simplefilter('always'); f()\n    caps = [str(x.message) for x in w if 'max_its cap' in str(x.message)]\n    print(label, len(caps), caps[0][:60] if caps else None)",
+  "observed": "fit -> 1 note 'fit() stopped at the max_its cap ...'; Model.fit restarts=None -> 1 note 'optimize() stopped at the max_its cap ...'; Model.fit restarts='auto' -> 21 notes, all reading 'optimize()' or 'best_of()' (probes/p05_capnotes.full.out, p16_model.full.out). The notes do land on the caller's line (P09-F09 verified).",
+  "expected": "R07-F06's rule applied to the lifecycle verb: the note names Model.fit and the knobs Model.fit takes; one summary note per Model.fit call rather than one per internal restart trial.",
+  "notes": "Concerns R07-F06, P09-F09, P10-F09.",
+  "repairs_attacked": [
+   "R07-F06",
+   "P09-F09",
+   "P10-F09"
+  ]
+ },
+ {
+  "id": "Q03-F15",
+  "severity": "minor",
+  "title": "Model.fit(calibrate=True) on fewer than 8 records reports status 'not_applicable' with reason 'no calibration holdout requested'",
+  "surface": "mixle.Model.fit(calibrate=True | fraction) evidence['calibration'] on small n",
+  "reproduction": "import numpy as np\nfrom mixle import Model\nfrom mixle.stats import GaussianEstimator\nfor n in (5, 7, 8):\n    m = Model(GaussianEstimator()).fit([float(v) for v in np.random.RandomState(0).normal(size=n)], calibrate=True, restarts=None)\n    print(n, type(m.calibration).__name__, m.evidence.get('calibration'))",
+  "observed": "n=5 and n=7: calibration None and evidence {'status': 'not_applicable', 'n_holdout': 0, 'reason': 'no calibration holdout requested', ...} although calibrate=True was passed (also with calibrate=0.5 at n=7); n=8: CalibrationReport, status 'succeeded', n_holdout=2 (probes/p19_calibration.full.out).",
+  "expected": "A reason that names the cause (too few records for a calibration holdout at this fraction) and a warning; 'no calibration holdout requested' is false.",
+  "notes": "",
+  "repairs_attacked": []
+ },
+ {
+  "id": "Q03-F16",
+  "severity": "minor",
+  "title": "Model.fit(calibrate=0.99) trains the model on a single row and reports the calibration as 'succeeded'",
+  "surface": "mixle.Model.fit(calibrate=<large fraction>)",
+  "reproduction": "import numpy as np\nfrom mixle import Model\nfrom mixle.stats import GaussianEstimator\nm = Model(GaussianEstimator()).fit([float(v) for v in np.random.RandomState(0).normal(size=100)], calibrate=0.99, restarts=None)\nprint(m._fit_info['n'], m.evidence['calibration'], m.fitted)",
+  "observed": "n=1: the returned model is fitted on one row (a variance-floored point mass) and the evidence reads status 'succeeded' with n_holdout=99 (probes/p19_calibration.full.out); propose() refuses exactly this single-row training since P03-F11.",
+  "expected": "Refuse a holdout that leaves fewer training rows than the estimator can identify, the way propose() does.",
+  "notes": "Concerns P03-F11 (sibling route).",
+  "repairs_attacked": [
+   "P03-F11"
+  ]
+ },
+ {
+  "id": "Q03-F17",
+  "severity": "minor",
+  "title": "HeterogeneousBayesianNetwork and DependencyTreeDistribution, the returns of optimize(data) and learn_structure, have no to_json/to_dict/from_json",
+  "surface": "mixle.stats.HeterogeneousBayesianNetwork, mixle.inference.structure.DependencyTreeDistribution; to_json / to_dict / from_json",
+  "reproduction": "import numpy as np\nfrom mixle.inference import optimize, learn_structure\nfrom mixle.stats import dump_models, load_models\nrng = np.random.RandomState(0); n = 300\nplan = rng.choice(['free', 'pro'], n); usage = np.where(plan == 'pro', rng.normal(60, 5, n), rng.normal(10, 3, n)); spend = usage * 2 + rng.normal(0, 1, n)\nrows = [(str(p), float(u), float(s)) for p, u, s in zip(plan, usage, spend)]\nfor m in (optimize(rows), learn_structure(rows)):\n    print(type(m).__name__, hasattr(m, 'to_json'), hasattr(m, 'to_dict'), type(load_models(dump_models([m]))[0]).__name__)",
+  "observed": "HeterogeneousBayesianNetwork False False HeterogeneousBayesianNetwork; DependencyTreeDistribution False False DependencyTreeDistribution (probes/p18_hbn_serial.full.out, p08_receipts.full.out): m.to_json() raises AttributeError on the flagship optimize(data) return while every other fitted family answers; dump_models/load_models, pickle and Model.deploy (model.json carrying fit_provenance) do round-trip both with their receipts.",
+  "expected": "The to_json/from_json surface the other fitted families have, or a docstring/explain() line naming the routes that work.",
+  "notes": "Not ledgered (the to_json entries in 0.8.2-followups.md concern ChowLiuTree, P02-F02). Concerns P03-F01.",
+  "repairs_attacked": [
+   "P03-F01"
+  ]
+ },
+ {
+  "id": "Q03-F18",
+  "severity": "minor",
+  "title": "seq_initialize/initialize refuse rng=None while optimize(rng=None) resolves to a fixed seed, and the CHANGELOG's R02-F13 bullet says seq_initialize takes None",
+  "surface": "mixle.inference.seq_initialize(enc, est, None, p), initialize(data, est, None, p); CHANGELOG 0.8.2 R02-F13",
+  "reproduction": "import numpy as np\nfrom mixle.inference import optimize, seq_initialize, initialize\nfrom mixle.stats import GaussianEstimator, seq_encode\ndata = [float(v) for v in np.random.RandomState(0).normal(3, 2, 100)]; est = GaussianEstimator()\nprint(optimize(data, est, rng=None).fit_provenance().converged)\nfor f in (lambda: seq_initialize(seq_encode(data, est.accumulator_factory().make().acc_to_encoder()), est, None, 0.5), lambda: initialize(data, est, None, 0.5)):\n    try: print(f())\n    except Exception as e: print(type(e).__name__, e)",
+  "observed": "optimize(rng=None) fits; seq_initialize(..., None, ...) and initialize(..., None, ...) -> TypeError '...(): rng must be a numpy.random.RandomState, a numpy.random.Generator, or an integer seed, got NoneType' (probes/p07_rng.full.out, p12_sequtils.full.out). CHANGELOG 0.8.2, R02-F13: 'initialize took only a RandomState where seq_initialize takes an int, a Generator or None'. 0.8.1 refused None with a bare AttributeError, so the sentence was never true.",
+  "expected": "Either None accepted with the optimize semantics on both, or the CHANGELOG sentence corrected.",
+  "notes": "Concerns R02-F13, P03-F09.",
+  "repairs_attacked": [
+   "R02-F13",
+   "P03-F09"
+  ]
+ },
+ {
+  "id": "Q03-F19",
+  "severity": "minor",
+  "title": "MPEncodedData / backend='mp' front door: worker counts 0, -1, 1.5 and True run silently, 10**6 dies on a raw TimeoutError, and a str is encoded as its characters",
+  "surface": "mixle.utils.parallel.multiprocessing.MPEncodedData(data, num_workers=...), optimize(backend='mp', num_workers=...)",
+  "reproduction": "import numpy as np\nfrom mixle.inference import optimize\nfrom mixle.stats import *\nfrom mixle.utils.parallel.multiprocessing import MPEncodedData\nif __name__ == \"__main__\":\n    true = MixtureDistribution([CompositeDistribution((GaussianDistribution(-2.0, 1.0), PoissonDistribution(3.0))), CompositeDistribution((GaussianDistribution(2.0, 1.0), PoissonDistribution(8.0)))], [0.5, 0.5])\n    data = list(true.sampler(seed=1).sample(200)); est = MixtureEstimator([CompositeEstimator((GaussianEstimator(), PoissonEstimator()))] * 2)\n    for nw in (0, -1, 1.5, True):\n        print(\"num_workers=%r ->\" % nw, optimize(data, est, max_its=2, backend='mp', num_workers=nw, out=None).fit_provenance().iterations)\n    print(\"str data ->\", len(MPEncodedData('hello', estimator=CategoricalEstimator(), num_workers=2)))",
+  "observed": "num_workers=0/-1/1.5/True all run silently; num_workers=10**6 -> TimeoutError: parallel worker 0 timed out after 30.000s during setup; MPEncodedData('hello', ...) -> 5 rows (the characters) where optimize('hello') is refused by name (probes/p13_parallel.full.out). backend='' and backend='nope' are refused by name (verified).",
+  "expected": "Worker counts validated as positive integers the way max_its/print_iter are, and P03-F09's str refusal applied at the parallel front door.",
+  "notes": "Concerns R06-F02 (sibling guard on the same class), P03-F09.",
+  "repairs_attacked": [
+   "R06-F02",
+   "P03-F09"
+  ]
+ },
+ {
+  "id": "Q03-F20",
+  "severity": "minor",
+  "title": "JointMixtureEstimator over length-less SequenceEstimators dies in optimize() with 'JointMixtureDataEncoder must implement row_count()' instead of the likelihood-factor refusal Mixture/HMM give",
+  "surface": "mixle.inference.optimize with JointMixtureEstimator([SequenceEstimator(GaussianEstimator())]*2, [SequenceEstimator(GaussianEstimator())]*2)",
+  "reproduction": "import numpy as np\nfrom mixle.inference import optimize\nfrom mixle.stats import *\nrng = np.random.RandomState(0); seqs = [list(rng.normal(0, 1, rng.randint(3, 9))) for _ in range(200)]\nfor est in (MixtureEstimator([SequenceEstimator(GaussianEstimator())] * 2),\n            JointMixtureEstimator([SequenceEstimator(GaussianEstimator())] * 2, [SequenceEstimator(GaussianEstimator())] * 2)):\n    try: optimize(list(zip(seqs, seqs)) if isinstance(est, JointMixtureEstimator) else seqs, est, max_its=2)\n    except Exception as e: print(type(est).__name__, \"->\", type(e).__name__, str(e)[:120])",
+  "observed": "MixtureEstimator -> TypeError: MixtureDistribution components must be generative probability laws; likelihood factors found at indices [0, 1] (SequenceDistribution) ... (the P03-F13 advice naming len_estimator); JointMixtureEstimator -> NotImplementedError: JointMixtureDataEncoder must implement row_count() for its encoded payload layout (probes/p15_p10_items.full.out). A well-formed JointMixture over Gaussians fits through optimize/fit/enc_data on both wheels (probes/p28_jointmixture.{full,081}.out).",
+  "expected": "The same likelihood-factor refusal, with the len_estimator advice, on the JointMixture family.",
+  "notes": "Concerns P03-F13, P10-F13 and R02-F10 (the row_count contract the error names). 0.8.1 was not compared on this spelling.",
+  "repairs_attacked": [
+   "P03-F13",
+   "P10-F13",
+   "R02-F10"
+  ]
+ },
+ {
+  "id": "Q03-F21",
+  "severity": "minor",
+  "title": "Model('x') and Model.fit(out='x') fail on raw AttributeErrors while the class spelling Model(GaussianEstimator) is refused by name",
+  "surface": "mixle.Model(spec=<str>), Model.fit(out=<str>)",
+  "reproduction": "import numpy as np\nfrom mixle import Model\nfrom mixle.stats import GaussianEstimator\nd = [float(v) for v in np.random.RandomState(0).normal(size=50)]\nfor f in (lambda: Model('x').fit(d), lambda: Model(GaussianEstimator).fit(d), lambda: Model(GaussianEstimator()).fit(d, out='x')):\n    try: f()\n    except Exception as e: print(type(e).__name__, str(e)[:110])",
+  "observed": "Model('x') -> AttributeError: 'str' object has no attribute 'accumulator_factory'; Model(GaussianEstimator) -> TypeError 'Model spec must be a distribution or estimator INSTANCE ...'; fit(out='x') -> AttributeError: 'str' object has no attribute 'write' (probes/p16_model.full.out).",
+  "expected": "Both wrong spellings refused by name like the class spelling is.",
+  "notes": "",
+  "repairs_attacked": []
+ },
+ {
+  "id": "Q03-F22",
+  "severity": "docs",
+  "title": "bayesian_workflow_predictive_checks: the prose promises 90% intervals and a 0.90 hit-rate, the cell computes 95% intervals and prints 'target 0.95'",
+  "surface": "notebooks/data_science/bayesian_workflow_predictive_checks.ipynb, section 3 (coverage cell)",
+  "reproduction": "# Read the markdown before the coverage cell against the cell (executed_txt/data_science_bayesian_workflow_predictive_checks.txt lines 110-125):\n#   markdown: \"## 3. Calibration: do 90% intervals contain the truth 90% of the time?\" ... \"record whether the central 90% credible interval\n#             contains the truth. Over many replications that hit-rate should be ~0.90\"\n#   code:     lo, hi = np.percentile(draws, [2.5, 97.5])   # 95% credible interval\n#             print('95%% credible-interval coverage over 400 replications: %.3f (target 0.95)' % np.mean(hits))",
+  "observed": "The prose and the code disagree on the interval level (90% vs 95%). Fresh output 0.938 (stored 0.927), KS p=0.26 (stored 0.30): Monte Carlo drift, both consistent with a calibrated posterior.",
+  "expected": "Prose and code agree on the interval level.",
+  "notes": "Corpus text, not the wheel.",
+  "repairs_attacked": []
+ },
+ {
+  "id": "Q03-F23",
+  "severity": "docs",
+  "title": "em_and_map_strategies: the prose says the 60-restart log-likelihoods are 'bimodal, and only some runs find the good optimum' while the notebook's own output prints 'fraction of starts within 1 nat of the best optimum: 1.00'",
+  "surface": "notebooks/data_science/em_and_map_strategies.ipynb, the 60-random-starts section",
+  "reproduction": "# Execute the notebook, or probes/p26b_emmap_restarts.py, and read the markdown above the 60-restart cell against the cell output:\n#   markdown (executed_txt/data_science_em_and_map_strategies.txt line 546): \"... from 60 random initializations and look at the\n#             distribution of final log-likelihoods - it is bimodal, and only some runs find the good optimum.\"\n#   stored and fresh output: \"fraction of starts within 1 nat of the best optimum: 1.00\"",
+  "observed": "probes/p26b_emmap_restarts.full.out: the 60 finals span -1824.593 .. -1824.355 (0.24 nats); all 60 fits stop at the max_its=60 cap with converged=False (0/60 converged, 60/60 cap notes, last gains ~1e-3). The stored corpus output already said 1.00.",
+  "expected": "Prose that matches the notebook's own numbers (a unimodal spread within a quarter nat, all runs unconverged at the cap), or a workload that actually shows the bimodality.",
+  "notes": "Same class as the 0.8.1 P03-F10 (corpus text vs the candidate's own run output), on a different cell.",
+  "repairs_attacked": []
+ },
+ {
+  "id": "Q03-F24",
+  "severity": "docs",
+  "title": "engine_benchmark_example bills its GMM row as '10 its' and 'parity-checked' equal work, but its fits converge at 5 (numpy, torch-cpu) and stop at 3 on a rejected update (torch-mps) with a different log-likelihood",
+  "surface": "examples/engine_benchmark_example.py (docstring line 14, header line 215, footer line 223) and its printed output",
+  "reproduction": "# Run examples/engine_benchmark_example.py (examples/engine_benchmark_example.out) and probes/p21_engine_gmm.py, which replays its GMM\n# workload (n=20000, init means (-1, 1), max_its=10) per engine and records the iterations each engine actually ran.",
+  "observed": "The example prints 'EM fits (10 its GMM / 5 its default-HMM)' and 'Interpret only this synchronized, parity-checked run', and its docstring says 'The fits are budgeted (a fixed max_its) so the timings compare equal work'; its own stderr carries 'optimize() stopped at iteration 3 of max_its=10 on a rejected update: the proposal fell 0.0232 below the last accepted objective while the last accepted step still gained 27.3' from line 127 (the GMM row on torch-mps) and the HMM row's 'stopped at iteration 4 of max_its=5 ... fell 0.000477'. The replay (probes/p21_engine_gmm.full.out): numpy and torch-cpu float64 converge at iteration 5 (final -42042.8828); torch-mps stops at iteration 3 with final -42042.8680.",
+  "expected": "Either delta=None so every engine runs the stated budget (the example's own stated intent), or a header that states the iterations each engine actually ran.",
+  "notes": "The library-side cause is Q03-F02. Concerns P03-F06's disclosure only as the messenger.",
+  "repairs_attacked": [
+   "P03-F06"
+  ]
+ }
+]

@@ -1,0 +1,279 @@
+[
+  {
+    "id": "Q06-F01",
+    "severity": "real",
+    "title": "`vdata=` bypasses the 0.8.2 front door: a mapping of columns, a structured array, a single-column mapping, a timedelta64/masked/0-d array and a `str` reach the encoder raw, on `optimize`, `fit` and `best_of`",
+    "surface": "`mixle.inference.optimize(vdata=)`, `fit(vdata=)`, `best_of(data, vdata, ...)`.",
+    "reproduction": "import numpy as np, pandas as pd\nfrom mixle.inference import optimize, best_of\nfrom mixle.stats import GaussianEstimator, CompositeEstimator, CategoricalEstimator\nrng = np.random.RandomState(0)\nxs = [float(v) for v in rng.normal(size=200)]; ks = ['a', 'b'] * 100\nrows = list(zip(xs, ks)); est2 = CompositeEstimator([GaussianEstimator(), CategoricalEstimator()])\nprint(type(optimize({'x': xs, 'k': ks}, est2, max_its=3)).__name__)        # data route: fits\nfor v in ({'x': xs, 'k': ks}, np.array(rows, dtype=[('x', 'f8'), ('k', 'U1')]), 'hello'):\n    try: optimize(rows, est2, vdata=v, max_its=3)\n    except Exception as e: print('vdata', type(v).__name__, '->', type(e).__name__, str(e)[:90])\nfor v in ({'x': xs}, np.arange(200) * np.timedelta64(1, 's'), 'hello', np.array(1.0)):\n    try: print('univariate vdata', type(v).__name__, '->', optimize(xs, GaussianEstimator(), vdata=v, max_its=3))\n    except Exception as e: print('univariate vdata', type(v).__name__, '->', type(e).__name__, str(e)[:80])\nfor v in ((r for r in rows), pd.DataFrame({'x': xs, 'k': ks})):\n    try: best_of(rows, v, est2, 1, 3, 0.1, 1e-6, rng=1)\n    except Exception as e: print('best_of vdata', type(v).__name__, '->', type(e).__name__, str(e)[:90])",
+    "observed": "(`out/p03_vdata_venv-full.txt`): `optimize(rows, est2, vdata={'x':..,'k':..})` ->\n`ContractError: CompositeDistribution.dists (row 0): expected a tuple of 2 fields (one per component\ndistribution), got str`; structured array -> the same with `got void`; `vdata='hello'` ->\n`ContractError: ... expected a sequence of 2-tuples, got str`; on the univariate route\n`vdata={'x': xs}` -> `ValueError: could not convert string to float: 'x'` (the field NAME is being\nscored -- the P06-F10 defect), `vdata=timedelta64 array` -> fits silently and the run reports a\nvalidation log-likelihood computed on whatever the encoder made of `timedelta64` values (the data\nroute refuses the same array by name), `vdata='hello'` -> `could not convert string to float:\n'hello'`, `vdata=np.array(1.0)` -> `TypeError: len() of unsized object`, a masked array -> the NaN\nmessage rather than the masked-array refusal. `best_of(rows, vdata=generator)` -> `TypeError: object\nof type 'generator' has no len()`; `best_of(rows, vdata=DataFrame)` -> `ContractError: ... got\nDataFrame`. The same inputs as `data` fit or are refused by name on every verb\n(`out/p01_frontdoor_venv-full.txt`).",
+    "expected": "The validation set is \"the same shape as data\" (docstring: \"Optional validation\nset\"); the CHANGELOG says the fit verbs normalize what they are handed before anything reads it\n(P06-F06/F07/F09/F10, R06-F03). A mapping of columns, a structured array, a DataFrame or a\ngenerator handed as `vdata` should be normalized exactly like `data`, and the newly refused inputs\nshould be refused by name on the `vdata` route too.",
+    "notes": "Mechanism: `optimize` sends `vdata` through `_data_records_for_encoding`\n(`mixle/inference/estimation.py:594`, reached at line 2217), which only handles DataFrame-like\ninputs, Series and one-shot iterators; the front-door normalizer that materializes mappings and\nstructured arrays and refuses `str`/`timedelta64`/masked/0-d inputs runs on `data` alone.\n`best_of` does not even do that for `vdata`. Repairs concerned: P06-F06, P06-F07, P06-F09,\nP06-F10, R06-F03.",
+    "repairs_attacked": [
+      "P06-F06",
+      "P06-F07",
+      "P06-F09",
+      "P06-F10",
+      "R06-F03"
+    ]
+  },
+  {
+    "id": "Q06-F02",
+    "severity": "real",
+    "title": "`best_of(data=DataFrame)` and `best_of(data=dict_values)` are refused with a `ContractError` about \"2-tuples, got DataFrame\" while `optimize`, `fit`, `propose` and `Model.fit` fit the same frame",
+    "surface": "`mixle.inference.best_of`.",
+    "reproduction": "import numpy as np, pandas as pd\nfrom mixle.inference import optimize, best_of\nrng = np.random.RandomState(0)\nxs = [float(v) for v in rng.normal(size=200)]; ks = ['a', 'b'] * 100\ndf = pd.DataFrame({'x': xs, 'k': ks})\nprint(type(optimize(df, max_its=2)).__name__)                                   # CompositeDistribution\ntry: best_of(df, None, None, 1, 2, 0.1, 1e-6, rng=1)\nexcept Exception as e: print('best_of(DataFrame) ->', type(e).__name__, str(e)[:120])\ntry: best_of({i: r for i, r in enumerate(zip(xs, ks))}.values(), None, None, 1, 2, 0.1, 1e-6, rng=1)\nexcept Exception as e: print('best_of(dict_values) ->', type(e).__name__, str(e)[:120])\nprint(type(best_of({'x': xs, 'k': ks}, None, None, 1, 2, 0.1, 1e-6, rng=1)[1]).__name__)  # mapping: fits",
+    "observed": "(`out/p01_frontdoor_venv-full.txt`, `best_of` section): `best_of(DataFrame)` ->\n`ContractError: CompositeDistribution.seq_encode: expected a sequence of 2-tuples, got DataFrame.\nFix: pass a list/tuple of observations`; `best_of(dict.values)` -> the same with `got dict_values`.\nThe same call with a mapping of columns, a structured array, a generator, a `map`/`zip`/`filter`\nobject or a Series fits, and a masked array / `numpy.matrix` / `timedelta64` / `str` is refused by\na message that names `best_of()` -- so `best_of` is wired into the front door for everything except\nthe frame and a mapping view. `optimize`, `fit`, `propose`, `Model.fit` all fit the frame.",
+    "expected": "One table gets one answer whichever verb reads it (CHANGELOG, R06-F03). `best_of`\nshould fit a DataFrame (and a `dict_values` view) exactly as `optimize` does.",
+    "notes": "The reviewer's trail records that `best_of` infers the estimator from the normalized\nrecords but encodes the raw `data` object (its \"encode path\" was read in\n`mixle/inference/estimation.py`); a `dict_values` view is a non-list iterable the encoder refuses\nfor the same reason. Repairs concerned: P06-F03, P06-F10, R06-F03.",
+    "repairs_attacked": [
+      "P06-F03",
+      "P06-F10",
+      "R06-F03"
+    ]
+  },
+  {
+    "id": "Q06-F03",
+    "severity": "real",
+    "title": "`learn_bayesian_network` bypasses the front door: a mapping of columns is fit as a one-field network over its two KEYS, a `str` is fit as its characters, and masked / matrix / Series / DataSource inputs surface raw `TypeError`s",
+    "surface": "`mixle.inference.bayesian_network.learn_bayesian_network`.",
+    "reproduction": "import numpy as np, warnings\nfrom mixle.inference.bayesian_network import learn_bayesian_network\nwarnings.simplefilter('ignore')\nrng = np.random.RandomState(0)\nxs = [float(v) for v in rng.normal(size=200)]; ks = [int(v) for v in rng.poisson(3, 200)]\nrows = list(zip(xs, ks))\nfor label, d in (('rows', rows), ('mapping of columns', {'x': xs, 'k': ks}), ('str', 'hello world hello')):\n    m = learn_bayesian_network(d, max_its=2)\n    print(label, '->', m, 'n_observations =', m.fit_provenance().n_observations)\nfor label, d in (('masked', np.ma.masked_array(np.array(rows), mask=np.zeros((200, 2), bool) | (np.arange(200) % 10 == 0)[:, None])), ('np.matrix', np.matrix(np.array(rows)))):\n    try: learn_bayesian_network(d, max_its=2)\n    except Exception as e: print(label, '->', type(e).__name__, str(e)[:80])",
+    "observed": "(`out/p04_learn_bn_venv-full.txt`, `out/p01_frontdoor_venv-full.txt` `learn_bn`\nsection): rows -> `HeterogeneousBayesianNetwork(fields=2, edges=[none])`, n_observations=200;\nmapping of columns -> `HeterogeneousBayesianNetwork(fields=1, ...)`, **n_observations=2** (the two\nkeys `'x'`, `'k'` were the records); `'hello world hello'` -> `fields=1`, n_observations=17 (its\ncharacters); `{'x': sub.x, 'k': sub.k}` (a filtered-index Series pair, R06-F01's case) ->\nfields=1, n=2; masked array -> `TypeError: unhashable type: 'MaskedConstant'`; `numpy.matrix` ->\n`TypeError: unhashable type: 'matrix'`; `as_source(rows)` -> `TypeError: 'MaterializedSource' object\nis not iterable`; a Series -> `TypeError: object of type 'float' has no len()`; `range(200)` ->\n`TypeError: object of type 'int' has no len()`. A DataFrame, a structured array and a generator fit\ncorrectly.",
+    "expected": "The CHANGELOG's front-door repairs (\"a mapping of equal-length columns fits the\ncolumns rather than a categorical over their field NAMES\", \"a bare string ... [is] named instead of\n... fitting something nobody asked for\", masked/matrix named) and R06-F03's \"one table gets one\nanswer whichever verb reads it\" should hold for this verb, or it should refuse what it does not\nnormalize instead of silently fitting a two-record network.",
+    "notes": "The docstring types `data` as `Sequence[tuple]`, but the function accepts a DataFrame\nand a structured array (normalized), so users will reasonably hand it the same containers the fit\nverbs take; the silent wrong model is the P06-F10 / R06-F03 defect surviving on one verb. Repairs\nconcerned: P06-F05, P06-F06, P06-F09, P06-F10, R06-F01, R06-F03.",
+    "repairs_attacked": [
+      "P06-F05",
+      "P06-F06",
+      "P06-F09",
+      "P06-F10",
+      "R06-F01",
+      "R06-F03"
+    ]
+  },
+  {
+    "id": "Q06-F04",
+    "severity": "real",
+    "title": "the production routes (`detect_drift`, `Service.score`, `Monitor.check/update`) read a DataFrame, a mapping of columns, a structured array or a `str` as its column names: a model fitted from a frame cannot score or drift-check that frame",
+    "surface": "`mixle.inference.production.drift.detect_drift`, `production.serving.Service.score`,\n`production.monitor.Monitor.check/update`.",
+    "reproduction": "import numpy as np, pandas as pd, warnings\nimport mixle, mixle.stats as S\nfrom mixle.inference import optimize\nfrom mixle.inference.production.drift import detect_drift\nfrom mixle.inference.production.serving import Service\nwarnings.simplefilter('ignore')\nrng = np.random.RandomState(0)\ndf = pd.DataFrame({'x': rng.normal(size=300), 'k': ['a', 'b', 'c'] * 100})\nm = optimize(df, max_its=5)                       # fits from the frame\nprint(mixle.Model().fit(df, max_its=5).evaluate(df))   # the lifecycle verb reads the frame\nfor label, a, b in (('df, df', df, df), ('records, df', list(df.itertuples(index=False, name=None)), df), ('dict of cols', {'x': df.x, 'k': df.k}, {'x': df.x, 'k': df.k}), ('structured', df.to_records(index=False), df.to_records(index=False))):\n    try: print(label, '->', detect_drift(m, a, b).drift)\n    except Exception as e: print('detect_drift', label, '->', type(e).__name__, str(e)[:80])\ntry: Service(m).score(df)\nexcept Exception as e: print('Service.score(df) ->', type(e).__name__, str(e)[:100])\ng = optimize(df['x'], S.GaussianEstimator(), max_its=3)\ntry: detect_drift(g, df[['x']], df[['x']])\nexcept Exception as e: print(\"detect_drift(g, df[['x']], ...) ->\", type(e).__name__, str(e)[:80])",
+    "observed": "(`out/p18_drift_frame_venv-full.txt`): `detect_drift(m, df, df)`, `(rows, df)`,\n`(df, rows)`, the mapping pair, the structured pair and `('hello', 'hello')` all raise `TypeError:\nCompositeDistribution observation must be a tuple-like sequence`; `Service.score(df)` /\n`(structured)` / `(dict of cols)` / `('hello')` raise `ContractError: CompositeDistribution.dists\n(row 0): expected a tuple of 2 fields ..., got str` (resp. `got record`); `Monitor(m, est, rows).check(df)`,\n`Monitor(m, est, df).check(df)` and `.update(df)` raise the same `TypeError`;\n`detect_drift(g, df[['x']], df[['x']])` and `Service(g).score(df[['x']])` -> `ValueError: could not\nconvert string to float: 'x'`. `detect_drift(m, rows, rows)` and a generator pair work\n(`drift=False`, ks 0.0); `Model.evaluate(df)` works. Identical on 0.8.1 (`out/p18_drift_frame_v081.txt`).",
+    "expected": "A model fitted by `optimize(df)` should be able to score / drift-check the same\nframe; the scoring verbs should read a DataFrame, a mapping of columns and a structured array\nthrough the same front door as the fit verbs, or refuse them by name instead of by \"row 0 ... got\nstr\".",
+    "notes": "Mechanism: `detect_drift` does `reference = list(reference); current = list(current)`\n(`mixle/inference/production/drift.py:331-332`) and `Service.score` does `recs = list(records)`\n(`serving.py:137`) -- exactly the bare `list(data)` fall-through R06-F03 removed from the lifecycle\nverbs. Not a regression (same on 0.8.1). Repairs concerned: R06-F03, P06-F10.",
+    "repairs_attacked": [
+      "P06-F10",
+      "R06-F03"
+    ]
+  },
+  {
+    "id": "Q06-F05",
+    "severity": "real",
+    "title": "a `RecordEstimator`/`RecordDistribution` cannot be used on the lifecycle and production routes: `Model.fit(df)`, `Model.evaluate(df)`, `Service.score(df)` refuse the frame `optimize(df, est)` fits (P06-F02 covers `optimize`/`fit` only), and `detect_drift`/`Monitor` reject dict rows outright, so no input form works and identical frames report `drift=True`",
+    "surface": "`mixle.Model.fit/evaluate`, `Service.score`, `detect_drift`, `Monitor` with a record\nestimator/model; `RecordEstimator` plain and aliased.",
+    "reproduction": "import numpy as np, pandas as pd, warnings\nimport mixle, mixle.stats as S\nfrom mixle.inference import optimize\nfrom mixle.stats.combinator.record import RecordEstimator, field\nfrom mixle.inference.production.drift import detect_drift\nfrom mixle.inference.production.serving import Service\nwarnings.simplefilter('ignore')\nrng = np.random.RandomState(0)\ndf = pd.DataFrame({'x': rng.normal(size=200), 'k': ['a', 'b'] * 100})\nrows = df.to_dict('records')\nfor label, est in (('plain', RecordEstimator(['x', 'k'], [S.GaussianEstimator(), S.CategoricalEstimator()])), ('aliased', RecordEstimator([field('mean', 'x'), field('kind', 'k')], [S.GaussianEstimator(), S.CategoricalEstimator()]))):\n    m = optimize(df, est, max_its=3); print(label, 'optimize(df, est) ->', type(m).__name__)\n    for name, fn in (('Model(est).fit(df)', lambda: mixle.Model(est).fit(df, max_its=2)), ('Model(est).fit(rows).evaluate(df)', lambda: mixle.Model(est).fit(rows, max_its=2).evaluate(df)), ('Service(m).score(df)', lambda: Service(m).score(df)), ('detect_drift(m, rows, rows)', lambda: detect_drift(m, rows, rows))):\n        try: fn(); print(label, name, '-> ok')\n        except Exception as e: print(label, name, '->', type(e).__name__, str(e)[:80])\n    r = detect_drift(m, df, df); print(label, 'detect_drift(m, df, df) -> drift =', r.drift, r.reasons)",
+    "observed": "(`out/p16_routes_serial_venv-full.txt`, `out/p10_dataframe_venv-full.txt`,\n`out/p19_recovery_bool_labels_record_venv-full.txt`): for both the plain and the aliased record,\n`optimize(df, est)` and `fit(df, est)` return a `RecordDistribution`, but `Model(est).fit(df)`,\n`Model(est).fit(rows).evaluate(df)` and `Service(m).score(df)` raise `TypeError: record observation\nat row 0 must be a mapping.`; `detect_drift(m, rows, rows)` and `Monitor(m, est, rows).check(rows)`\nraise `TypeError: unhashable type: 'dict'`; `detect_drift(m, df, df)` and `Monitor(m, est,\ndf).check(df)` return `drift=True` with reasons `['score KS 1.000 > 0.2', 'mean log-likelihood\nshift -inf < -0.5', 'only 0.000 of current records were scorable (< 0.5); ...']` on two identical\nframes (the frame was read as its two column names, which the record scores `-inf`, see Q06-F06);\ntuple rows also give `drift=True` (0 % scorable). `Service(m).score(rows)` and `Model(est).fit(rows)`\nwork. On 0.8.1 `optimize(df, aliased)` itself failed (`missing=['x', 'k']`), and the other routes\nbehave as on 0.8.2 (`out/p16_routes_serial_v081.txt`, `out/p19_..._v081.txt`).",
+    "expected": "P06-F02's \"a `RecordEstimator` with aliased fields can be fit from a DataFrame, whose\nrows now arrive keyed by the sources the record encoder asks for\" should hold on `Model.fit`,\n`Model.evaluate` and `Service.score`, which read their data \"through the same front door\"\n(migration guide); and `detect_drift`/`Monitor` should accept the dict rows a record model is\ndefined on.",
+    "notes": "Mechanism: `Model.fit`/`Service.score` convert the frame to tuple rows regardless of the\nestimator (the reviewer's trail: \"how Model.fit forwards rows\"), while `optimize` consults\n`_recordish(estimator)` in `_data_records_for_encoding` and keys the rows by source;\n`detect_drift` builds a hashable set/counter of observations and cannot take dicts. Repairs\nconcerned: P06-F02, R06-F03.",
+    "repairs_attacked": [
+      "P06-F02",
+      "R06-F03"
+    ]
+  },
+  {
+    "id": "Q06-F06",
+    "severity": "real",
+    "title": "`RecordDistribution.log_density` returns `-inf` (`density` 0.0) for any malformed or mis-keyed observation -- a tuple/list row, a dict missing a source, an empty dict, a dict with an extra key, `None`, a `str`, or a dict keyed by the model's own logical field names -- where `seq_encode` raises a named error for the same row",
+    "surface": "`RecordDistribution.log_density` / `density` (all record models, plain or aliased).",
+    "reproduction": "import numpy as np, warnings\nimport mixle.stats as S\nfrom mixle.inference import optimize\nfrom mixle.stats.combinator.record import RecordEstimator, field\nwarnings.simplefilter('ignore')\nrng = np.random.RandomState(0)\nrows = [{'x': float(v), 'k': k} for v, k in zip(rng.normal(size=200), ['a', 'b'] * 100)]\nm = optimize(rows, RecordEstimator(['x', 'k'], [S.GaussianEstimator(), S.CategoricalEstimator()]), max_its=3)\nprint('good', m.log_density({'x': 0.1, 'k': 'a'}))\nfor bad in ((0.1, 'a'), [0.1, 'a'], {'x': 0.1}, {}, {'x': 0.1, 'k': 'a', 'extra': 1}, None, 'x'):\n    print(repr(bad)[:30], '-> log_density', m.log_density(bad))\n    try: m.seq_log_density(m.dist_to_encoder().seq_encode([bad]))\n    except Exception as e: print('   seq path ->', type(e).__name__, str(e)[:90])\nal = optimize(rows, RecordEstimator([field('mean', 'x'), field('kind', 'k')], [S.GaussianEstimator(), S.CategoricalEstimator()]), max_its=3)\nprint(al, '\\nkeyed by its own field names ->', al.log_density({'mean': 0.1, 'kind': 'a'}))",
+    "observed": "(`out/p19_recovery_bool_labels_record_venv-full.txt` section (b),\n`out/p16_routes_serial_venv-full.txt`): the good dict scores -1.6337; every malformed row above\nscores `-inf` with no exception (`density` -> 0.0), including the aliased model scored by its own\ndisplayed field names (`RecordDistribution({'mean': ..., 'kind': ...})` -> `-inf`), while\n`seq_encode` of the same rows raises `TypeError: record observation at row 0 must be a mapping.` or\n`ValueError: record observation at row 0 must contain exactly the configured sources;\nmissing=['k'], extra=[]` (resp. `missing=['x', 'k'], extra=['mean', 'kind']`). Same on 0.8.1.",
+    "expected": "The scalar and vectorized paths describe the same model (the P02-F03 principle):\na malformed observation should raise the same named error from `log_density`, not be reported as\nimpossible. A user iterating `log_density` over `df.itertuples()` rows, or keying rows by the field\nnames the repr shows, gets `-inf` everywhere and no signal.",
+    "notes": "This is what turns Q06-F05's `detect_drift(record model, tuple rows / df, ...)` into a\nsilent `drift=True` (0 % scorable). Repairs concerned: P06-F02 (the aliased-fields case).",
+    "repairs_attacked": [
+      "P06-F02"
+    ]
+  },
+  {
+    "id": "Q06-F07",
+    "severity": "real",
+    "title": "a DataFrame whose column labels are booleans silently loses the `False`-labelled column: the fit has one component and `dataframe_records` returns 1-tuples, even when `fields=[True, False]` names both columns",
+    "surface": "`mixle.data.sources.pandas_source.dataframe_records`; every verb that reads a DataFrame\n(`optimize`, `fit`, `Model.fit`, `propose`, ...).",
+    "reproduction": "import numpy as np, pandas as pd, warnings\nfrom mixle.inference import optimize\nfrom mixle.data.sources.pandas_source import dataframe_records\nwarnings.simplefilter('ignore')\nrng = np.random.RandomState(0)\nfor cols in ([True, False], [False, True], [0, 1], ['', 'k']):\n    f = pd.DataFrame({'x': rng.normal(size=200), 'k': ['a', 'b'] * 100}); f.columns = cols\n    m = optimize(f, max_its=2)\n    print(cols, 'record 0 =', dataframe_records(f)[0], '| fitted components =', len(m.dists), '| with fields=cols:', len(optimize(f, fields=list(f.columns), max_its=2).dists))",
+    "observed": "(`out/p19_recovery_bool_labels_record_venv-full.txt` section (a)): `[True, False]` ->\nrecord 0 = `(1.764,)`, 1 fitted component, 1 with `fields=[True, False]`; `[False, True]` -> record\n0 = `('a',)`, 1 component (the OTHER column survives); `[np.False_, np.True_]` likewise;\n`[0, 1]`, `[1, 0]`, `[0.0, 1.0]`, `['', 'k']` -> 2-tuples, 2 components. No warning, no error.\nSame on 0.8.1 (`..._v081.txt`).",
+    "expected": "Both columns fit (a Composite of two), or the frame is refused by name; a column\nexplicitly requested through `fields=` must never vanish silently.",
+    "notes": "Mechanism: `dataframe_records` selects `df.loc[:, source_list]`\n(`mixle/data/sources/pandas_source.py`, the `.itertuples` line inside `dataframe_records`); pandas\nreads a list of booleans in `.loc` as a boolean MASK over the columns, not as labels, so\n`[True, False]` keeps column 0 and `[False, True]` keeps column 1. The `missing` check just above it\n(`name not in df.columns`) passes because the labels do exist. Boolean column labels are what\n`pd.crosstab`/`pivot` produce from a boolean column, so the input is reachable; rated `real`\nrather than `blocking` because such labels are uncommon, but the loss is silent even when the\nuser names the column.",
+    "repairs_attacked": []
+  },
+  {
+    "id": "Q06-F08",
+    "severity": "real",
+    "title": "a zero-weight out-of-support row, which P02-F03 says is exempt, still cannot be fit: `optimize()` refuses every family with \"fused EM did not produce a finite objective from its non-finite initial model\", and the scalar `update()`/`estimate()` route refuses seven families by support regardless of weight",
+    "surface": "`WeightedObservation`/`WeightedEstimator`/`WeightedDistribution` with a zero-weight\nrow outside the base family's support; `optimize`, `estimate`, the accumulators' `update()`.",
+    "reproduction": "import numpy as np, warnings\nimport mixle.stats as S\nfrom mixle.inference import optimize, estimate\nfrom mixle.stats import WeightedObservation as WO, seq_log_density_sum\nwarnings.simplefilter('ignore')\nrng = np.random.RandomState(0)\nfor name, est, pos, bad in (('Exponential', S.ExponentialEstimator(), rng.exponential(2, 100), -5.0), ('Gamma', S.GammaEstimator(), rng.gamma(2, 2, 100), -5.0), ('Beta', S.BetaEstimator(), rng.beta(2, 3, 100), 1.5), ('Poisson', S.PoissonEstimator(), rng.poisson(3, 100).astype(float), -5.0)):\n    wrows = [WO(float(v), 1.0) for v in pos] + [WO(bad, 0.0)]\n    acc = est.accumulator_factory().make()\n    try: acc.update(bad, 0.0, None); print(name, 'update(x_out, w=0) ok')\n    except Exception as e: print(name, 'update(x_out, w=0) ->', str(e)[:60])\n    try: print(name, 'estimate ->', estimate(wrows, S.WeightedEstimator(est)))\n    except Exception as e: print(name, 'estimate ->', str(e)[:70])\n    try: print(name, 'optimize ->', optimize(wrows, S.WeightedEstimator(est), max_its=3, out=None))\n    except Exception as e: print(name, 'optimize ->', str(e)[:90])\nwd = S.WeightedDistribution(S.ExponentialDistribution(2.0))\nenc = wd.dist_to_encoder().seq_encode([WO(1.0, 1.0), WO(-5.0, 0.0)])\nprint('WeightedDistribution scores the zero-weight row:', wd.seq_log_density(enc), seq_log_density_sum([(2, enc)], wd))",
+    "observed": "(`out/p15_zero_weight_matching_venv-full.txt`, `out/p14_support_siblings_venv-full.txt`,\n`out/p16_routes_serial_venv-full.txt`): the vectorized accumulator honours the exemption\n(`seq_update` with weights `[1, 0]` succeeds for 13 of 14 families), but `optimize(...)` raises\n`ValueError: fused EM did not produce a finite objective from its non-finite initial model.` for\nExponential, Gamma, Weibull, LogGaussian, Beta, HalfNormal, Rayleigh, InverseGamma,\nInverseGaussian, Poisson, Geometric, LogSeries and Uniform (also with `objective='mle'` and with\n`reuse_estep_ll=False`, where the message loses the word \"fused\"); the scalar `update(x, 0.0)` and\n`estimate(wrows, WeightedEstimator(...))` refuse Gamma, Weibull, Beta, HalfNormal, Rayleigh,\nInverseGamma and InverseGaussian by support (`GammaDistribution has support x > 0.`) although the\nrow's weight is zero, while Exponential, LogGaussian, Poisson and Uniform accept them; Pareto\nrefuses at the encoder on every route. `WeightedDistribution.seq_log_density` scores the zero-weight\nrow `-inf` and `seq_log_density_sum` is `-inf`, which is why the objective is non-finite. On 0.8.1\nevery route refused at the encoder with the family's own support message\n(`out/p14_support_siblings_v081.txt`).",
+    "expected": "The CHANGELOG (P02-F03 and its follow-up repair): \"`refuse_unsupported_observations`\ndeliberately exempts a row whose weight is zero\" and \"A zero-weight row contributes exactly zero to\na sufficient statistic, on all ten continuous families that exempt one\". A row the accumulator\nexempts must also contribute zero to the weighted log-likelihood (0 x -inf treated as 0), so the\nfit proceeds; the scalar and `estimate` routes should apply the same exemption as `seq_update`;\nand a refusal, if any, should name the row and its weight rather than blame a \"non-finite initial\nmodel\" that is in fact finite.",
+    "notes": "Repairs concerned: P02-F03 (the zero-weight exemption). The reviewer's trail read\n`WeightedDistribution` scoring and the Gamma/Beta `estimate`-route support refusals.",
+    "repairs_attacked": [
+      "P02-F03"
+    ]
+  },
+  {
+    "id": "Q06-F09",
+    "severity": "real",
+    "title": "P02-F03's encoder admission stops at the ten tested families: Pareto, GeneralizedPareto, Nakagami, Rician and Tweedie still refuse an out-of-support value in `seq_log_density` where `log_density` returns `-inf`, so `Mixture[Gaussian, Pareto]` cannot be encoded or fit; the discrete families refuse a fractional value the same way",
+    "surface": "`ParetoDistribution`, `GeneralizedParetoDistribution`, `NakagamiDistribution`,\n`RicianDistribution`, `TweedieDistribution` encoders (continuous); `PoissonDistribution`,\n`GeometricDistribution`, `LogSeriesDistribution`, `BinomialDistribution`, `SkellamDistribution`,\n`BernoulliDistribution`, `SymmetricDirichletDistribution` encoders; `MixtureDistribution` /\n`HeterogeneousMixtureDistribution` over them.",
+    "reproduction": "import numpy as np, warnings\nimport mixle.stats as S\nfrom mixle.inference import optimize\nwarnings.simplefilter('ignore')\np = S.ParetoDistribution(2.0, 1.0)\nprint('scalar', p.log_density(-1.0), p.log_density(0.5))\nfor x in ([-1.0, 2.0], [0.5, 2.0]):\n    try: print('vectorized', x, p.seq_log_density(p.dist_to_encoder().seq_encode(x)))\n    except Exception as e: print('vectorized', x, '->', type(e).__name__, str(e)[:60])\nrng = np.random.RandomState(0)\ndata = np.concatenate([rng.normal(-2, 0.5, 200), (rng.pareto(3, 200) + 1)])\nfor est in (S.MixtureEstimator([S.GaussianEstimator(), S.ParetoEstimator()]), S.HeterogeneousMixtureEstimator([S.GaussianEstimator(), S.ParetoEstimator()]), S.MixtureEstimator([S.GaussianEstimator(), S.GammaEstimator()])):\n    try: print(type(est).__name__, '->', str(optimize(data, est, max_its=5, rng=np.random.RandomState(1), out=None))[:70])\n    except Exception as e: print(type(est).__name__, '->', type(e).__name__, str(e)[:80])\npo = S.PoissonDistribution(2.0); print('Poisson scalar', po.log_density(2.5))\ntry: po.seq_log_density(po.dist_to_encoder().seq_encode([2.5]))\nexcept Exception as e: print('Poisson vectorized ->', str(e))",
+    "observed": "(`out/p14_support_siblings_venv-full.txt`, `out/p06_support_mix_venv-full.txt`):\n`Pareto.log_density(-1.0)` = `-inf` but `seq_log_density([-1, 2])` -> `ValueError:\nParetoDistribution requires observations x > 0.` (while `[0.5, 2]`, also outside the support\n`x >= x_m = 1`, is admitted and scores `-inf`); `Mixture[Gaussian, Pareto]` -> `TypeError:\nMixtureDistribution could not encode the data with all of its component encoders. A finite mixture\ntreats the component as LATENT ...`; `HeterogeneousMixture[Gaussian, Pareto]` -> `ValueError:\nParetoDistribution requires observations x > 0.`; the same data with a Gamma component fits. The\nreviewer's survey of every registered family (scalar `-inf` vs encoder refusal at x = -1.0 and\nx = 2.5) lists the continuous mismatches GeneralizedPareto, Nakagami, Pareto, Rician, Tweedie and\nthe discrete/simplex ones Bernoulli, Binomial, Geometric, LogSeries, Poisson, Skellam,\nSymmetricDirichlet (`Poisson.log_density(2.5)` = `-inf`, `seq_log_density([2.5])` -> `Poisson\nobservations must be finite exact integers.`; `Mixture[Gaussian, Poisson].seq_log_density([2.5, 2])`\ncannot encode). Rayleigh, LogGaussian, InverseGaussian, Gumbel, Uniform, Beta and the ten families\nof the regression test agree on both paths. On 0.8.1 the mismatch list was longer (Exponential,\nGamma, Weibull, Beta, HalfNormal, ... -- the repaired ones) and Pareto/Nakagami/Rician/Tweedie were\nalready on it.",
+    "expected": "\"The encoders now admit out-of-support observations and the vectorized scorers return\nthe `-inf` the scalar path returns\" (CHANGELOG, P02-F03) -- for every support-limited family,\nsince a mixture with a Pareto (or Tweedie, Nakagami, Rician, GeneralizedPareto) component on data\nthat has a non-positive row is exactly the P02-F03 symptom.",
+    "notes": "The P02-F03 regression test enumerates its families (`adversarial_review_082_repairs_test.py`,\n`_families()`: Exponential, Gamma, Beta, Weibull, HalfNormal, Rayleigh, Uniform, ...); the sibling\nfamilies were never in it. For the discrete families a fractional observation is a type mismatch as\nmuch as a support miss, but the scalar path answers `-inf` for it, so the two routes still describe\ndifferent models. Repairs concerned: P02-F03.",
+    "repairs_attacked": [
+      "P02-F03"
+    ]
+  },
+  {
+    "id": "Q06-F10",
+    "severity": "real",
+    "title": "`StudentTCopulaDistribution` and `KnowledgeGraphDistribution` are write-only for `to_json`/`dump_models` (constructed and fitted; a `CopulaDistribution` with a Student-t core too), while the manifest registers both as codec `constructor-validated` and the CHANGELOG discloses only the directional and matrix modules",
+    "surface": "`StudentTCopulaDistribution.to_json/from_json`, `KnowledgeGraphDistribution.to_json/from_json`,\n`mixle.stats.dump_models/load_models`, `CopulaDistribution(..., StudentTCopulaDistribution)`;\n`manifests/serialization_schema_manifest.json`.",
+    "reproduction": "import numpy as np, pickle\nimport mixle.stats as S\nfrom mixle.inference import estimate\nfrom mixle.stats import dump_models, load_models\nrng = np.random.RandomState(0)\nu = S.ClaytonCopulaDistribution(3, theta=4.0).sampler(0).sample(500)\nfor d, fit_data in ((S.StudentTCopulaDistribution(np.eye(3), 4.0), u), (S.KnowledgeGraphDistribution(rng.randn(6, 3), rng.randn(2, 3)), None)):\n    if fit_data is None: fit_data = list(d.sampler(1).sample(200))\n    m = estimate(fit_data, d.estimator()); print(type(m).__name__, 'fitted:', m)\n    for label, fn in (('to_json', lambda: d.to_json()), ('fitted dump_models', lambda: dump_models([m])), ('fitted dump(verify=False)+load', lambda: load_models(dump_models([m], verify=False)))):\n        try: fn(); print('  ', label, 'ok')\n        except Exception as e: print('  ', label, '->', type(e).__name__, str(e)[:150])\n    print('   pickle round trip ok:', type(pickle.loads(pickle.dumps(m))).__name__)",
+    "observed": "(`out/p16_routes_serial_venv-full.txt`, `out/p17_json_writeonly_venv-full.txt`,\n`out/p11_copulas_venv-full.txt`, `out/p13_graphs_procs_venv-full.txt`): both families raise\n`SerializationError: to_json produced JSON that from_json cannot read back (SerializationError:\nregistered class 'mixle.stats.multivariate.student_t_copula.StudentTCopulaDistribution' requires a\nclass-owned __pysp_setstate__ hook; constructor fields are absent: corr...` (resp. `...knowledge_graph.\nKnowledgeGraphDistribution' ... constructor fields are absent: entity_embedding...`) from `to_json()`\nand `dump_models()`, constructed or fitted; `dump_models(verify=False)` writes text that\n`load_models` cannot read; a fitted `CopulaDistribution([Gamma, Gaussian, Gamma], StudentTCopula)`\ncannot be dumped either; pickle works. The Clayton, Gaussian-copula and R-vine fits and the ER/SBM/\nRDPG graph fits round-trip bit-exactly. Identical on 0.8.1 (`out/p17_json_writeonly_v081.txt`).\n`serialization_schema_manifest.json` lists both classes with `\"codec\": \"constructor-validated\"`.",
+    "expected": "Per the CHANGELOG (0.8.0 disclosure, reaffirmed by the P05-F17 repair \"Eight more\nfamilies round-trip through JSON\") the only families that cannot round-trip are the directional and\nmatrix modules; a Student-t copula reached through the copula core search and a knowledge-graph\nmodel reached through `optimize()` should serialize to JSON, or be named in the disclosure and\ncarry a manifest codec that says so.",
+    "notes": "Same defect class as P05-F17 / P10-F05 (rated `real` there for the same reason: every\nsave path costs these families a code-executing pickle, and `Model.deploy` silently falls back to\nit). The fitted directional laws also fail (`does not match its constructor-owned schema`) but the\ndirectional module is disclosed; the constructed directional laws do round-trip on 0.8.2, so that\ndisclosure is now over-broad rather than wrong. Repairs concerned: P05-F17 (the disclosure claim).",
+    "repairs_attacked": [
+      "P05-F17",
+      "P10-F05"
+    ]
+  },
+  {
+    "id": "Q06-F11",
+    "severity": "minor",
+    "title": "the row-numbered ordering refusal was added to Mallows, Plackett-Luce, Bradley-Terry and Thurstone-Mosteller only: Thurstone, GeneralizedMallows, GeneralizedMallowsModel, LowRankPermutation, SpearmanRanking, Matching and Ewens still raise Python's \"'NoneType' object is not iterable\" and numpy's \"inhomogeneous shape\" for a None/scalar/string/ragged row, and Davidson/Rao-Kupper for a None/scalar tie row; every family reads a dict row as its keys",
+    "surface": "`ThurstoneEstimator`, `GeneralizedMallowsEstimator`, `GeneralizedMallowsModelEstimator`,\n`LowRankPermutationEstimator`, `SpearmanRankingEstimator`, `MatchingEstimator`, `EwensEstimator`,\n`DavidsonEstimator`, `RaoKupperEstimator` (and their encoders).",
+    "reproduction": "import numpy as np, warnings\nimport mixle.stats as S\nfrom mixle.inference import optimize\nwarnings.simplefilter('ignore')\nrng = np.random.RandomState(0); perms = [list(rng.permutation(4)) for _ in range(60)]\nfor name, mk in (('Mallows', lambda: S.MallowsEstimator(4)), ('Thurstone', lambda: S.ThurstoneEstimator(4)), ('GeneralizedMallows', lambda: S.GeneralizedMallowsEstimator(4)), ('LowRankPermutation', lambda: S.LowRankPermutationEstimator(4, 2)), ('SpearmanRanking', lambda: S.SpearmanRankingEstimator(4)), ('Ewens', lambda: S.EwensEstimator(4))):\n    for bad in (None, [0, 1], 7, 'abc'):\n        try: optimize(perms + [bad], mk(), max_its=2)\n        except Exception as e: print('%-19s %-8r -> %s: %s' % (name, bad, type(e).__name__, str(e)[:70]))\n    print(name, 'dict row ->', str(optimize(perms + [{0: 1, 1: 0, 2: 3, 3: 2}], mk(), max_its=2))[:60] if name != 'LowRankPermutation' else '(see Q06-F12)')",
+    "observed": "(`out/p02_rankings_venv-full.txt`, identical in venv-base): Mallows -> `ValueError:\nMallows orderings row 60 is not a ordering (NoneType); every ordering must be a sequence of exactly\n4 items.` / `row 60 has 2 items ...` (P06-F09 repaired; note \"a ordering\"); Plackett-Luce ->\n`Plackett-Luce observations are orderings ... but row 60 is None` (R06-F07 repaired); Thurstone,\nGeneralizedMallows, GeneralizedMallowsModel, LowRankPermutation, SpearmanRanking, Matching, Ewens ->\n`TypeError: 'NoneType' object is not iterable` / `'int' object is not iterable` and `ValueError:\nsetting an array element with a sequence. The requested array has an inhomogeneous shape after 1\ndimensions ...` for the ragged, string and nested rows, on the fit verb and on the encoder directly;\nDavidson/Rao-Kupper `None`/scalar tie row -> `'NoneType' object is not iterable` (their 2-item and\noutcome-5 rows are named). A dict row is silently read as its keys `[0, 1, 2, 3]` by every family\n(the fitted theta moves). Unchanged from 0.8.1 for these families.",
+    "expected": "The sibling families of the same shape get the same row-numbered message\n(the fractional-entry check `... row 60 must contain exact integer item identifiers` is already\nshared by all of them, so the helper exists).",
+    "notes": "Repairs concerned: P06-F09, R06-F07 (verified for the families they name).",
+    "repairs_attacked": [
+      "P06-F09",
+      "R06-F07"
+    ]
+  },
+  {
+    "id": "Q06-F12",
+    "severity": "minor",
+    "title": "`LowRankPermutationEstimator` raises `RuntimeError` from inside `optimize()` when its inner solver misses its tolerance by 27 % at 300 iterations, instead of returning the unconverged fit with `converged=False` as the `max_its` cap does",
+    "surface": "`LowRankPermutationEstimator` via `optimize`/`estimate`.",
+    "reproduction": "import numpy as np, warnings\nimport mixle.stats as S\nfrom mixle.inference import optimize\nwarnings.simplefilter('ignore')\nrng = np.random.RandomState(0); perms = [list(rng.permutation(4)) for _ in range(60)]\ntry: print(optimize(perms + [[0, 1, 2, 3]], S.LowRankPermutationEstimator(4, 2), max_its=2))\nexcept Exception as e: print(type(e).__name__, str(e))",
+    "observed": "(`out/p02_rankings_venv-full.txt`, the `LowRankPermutation + dict row` case, whose dict\nrow is read as the ordering `[0, 1, 2, 3]`): `RuntimeError: Low-rank permutation fitting did not\nconverge in 300 iterations (gradient norm 1.26696e-06, tolerance 1e-06).` -- the user asked for two\nEM iterations and gets no model at all. Same on 0.8.1.",
+    "expected": "The library's own convention for a capped fit: return the last accepted model,\nwarn, and report `converged=False` in `fit_provenance()` (the cap note that `optimize()` itself\nemits), or expose the inner cap/tolerance as arguments.",
+    "notes": "If this reproduction's data happens not to trip the tolerance on another BLAS, the\nrecorded case in `out/p02_rankings_venv-full.txt` (same seed, `numpy 2.5.3`) is the evidence.",
+    "repairs_attacked": []
+  },
+  {
+    "id": "Q06-F13",
+    "severity": "docs",
+    "title": "the migration guide's list of newly refused inputs omits `datetime64` and `timedelta64` arrays: a `datetime64` array that 0.8.1 fitted (as an Ignored categorical over its timestamps) is now refused, and the CHANGELOG names only `timedelta64`",
+    "surface": "`docs/migrations/0.8.2.md` (\"A bare `str` or `bytes` raises ... along with the\nrefusals of a masked array, a `numpy.matrix` and a 0-dimensional array, and the normalization of a\none-shot iterator, a structured array and a mapping of columns\"); CHANGELOG \"Data adapters (pass 06)\".",
+    "reproduction": "import numpy as np\nfrom mixle.inference import optimize\ndt = np.datetime64('2020-01-01') + np.arange(200) * np.timedelta64(1, 'D')\nfor d in (dt, np.arange(200) * np.timedelta64(1, 's')):\n    try: print(d.dtype, '->', str(optimize(d, max_its=2))[:80])\n    except Exception as e: print(d.dtype, '->', type(e).__name__, str(e)[:110])",
+    "observed": "(`out/p08_datetime_venv-full.txt` vs `out/p08_datetime_v081.txt`): 0.8.2 ->\n`ValueError: optimize() received a numpy datetime64[D] array. Fit its numeric representation instead\n-- e.g. data.astype('int64') ...` and the same for `timedelta64[s]`; 0.8.1 -> the `datetime64`\narray fitted `IgnoredDistribution(CategoricalDistribution({np.datetime64('2020-01-01'): 0.005, ...}))`\nand the `timedelta64` array crashed with `TypeError: int() argument must be ... not\n'datetime.timedelta'`. Neither dtype appears in `docs/migrations/0.8.2.md` (grep: no `datetime64`,\nno `timedelta64`); the CHANGELOG names `timedelta64` only.",
+    "expected": "R06-F06 made the guide's list \"the full list it claims to be\"; a behaviour change\nfrom \"fits\" to \"raises\" for `datetime64` arrays belongs in it, and the CHANGELOG entry should name\n`datetime64` beside `timedelta64`.",
+    "notes": "Repairs concerned: R06-F06, P06-F06, P06-F09, P06-F10. The related container inconsistency is\nQ06-F20.",
+    "repairs_attacked": [
+      "P06-F06",
+      "P06-F09",
+      "P06-F10",
+      "R06-F06"
+    ]
+  },
+  {
+    "id": "Q06-F14",
+    "severity": "minor",
+    "title": "the `(n, 1)` refusal is `(n, 1)`- and estimator-route-specific: an `(n, 2)` or `(1, n)` array, an `(n, 1)` list of lists, `log_density(col)` and `detect_drift(model, x, col)` still surface numpy's \"only 0-dimensional arrays can be converted to Python scalars\" (for `detect_drift` a worse message than 0.8.1's), Bernoulli accepts the column silently, and the message names \"row 199\" for three families",
+    "surface": "Univariate estimators' `seq_encode`/`estimate`; `GaussianDistribution.log_density`;\n`detect_drift`.",
+    "reproduction": "import numpy as np, warnings\nimport mixle.stats as S\nfrom mixle.inference import optimize, estimate\nfrom mixle.inference.production.drift import detect_drift\nwarnings.simplefilter('ignore')\nrng = np.random.RandomState(0); x = rng.normal(size=200); col = x.reshape(-1, 1)\ng = optimize(x, S.GaussianEstimator())\nfor label, fn in (('estimate((n,1), Gamma)', lambda: estimate(np.abs(x).reshape(-1, 1) + 0.1, S.GammaEstimator())), ('estimate((1,n))', lambda: estimate(x.reshape(1, -1), S.GaussianEstimator())), ('estimate((n,2))', lambda: estimate(np.stack([x, x], 1), S.GaussianEstimator())), ('estimate(list of [v])', lambda: estimate(col.tolist(), S.GaussianEstimator())), ('g.log_density(col)', lambda: g.log_density(col)), ('detect_drift(g, x, col)', lambda: detect_drift(g, x, col))):\n    try: print(label, '->', fn())\n    except Exception as e: print(label, '->', type(e).__name__, str(e)[:110])\nprint('Bernoulli (n,1) ->', estimate((rng.poisson(3, 200) > 2).astype(float).reshape(-1, 1), S.BernoulliEstimator()))",
+    "observed": "(`out/p07_col_array_venv-full.txt` vs `out/p07_col_array_v081.txt`): the 19 univariate\nfamilies refuse an `(n, 1)` array with `<Family>Estimator expects a scalar observation per row, but\nrow 0 is an array of shape (1,). Flatten the data with numpy.ravel(data) ...` (P01-F13/P06-F08\nrepaired; Gamma, Weibull and HalfNormal say `row 199`), and the scoring routes `seq_encode(col,\nmodel=g)`, `Model(Gaussian).fit(col)`, `Model.evaluate(col)`, `Service.score(col)`,\n`optimize(vdata=col)` refuse by name too. But `(1, n)` and `(n, 2)` arrays and an `(n, 1)` list of\nlists still raise `TypeError: only 0-dimensional arrays can be converted to Python scalars` /\n`float() argument must be ... not 'list'`; `g.log_density(col)` and `g.log_density(col[0])` raise\nthe numpy `TypeError`; `detect_drift(g, x, col)` raises the numpy `TypeError` where 0.8.1 said\n`ValueError: model scoring returned (200, 1) log-densities for 200 records; drift analysis needs\nexactly one score per record`; `estimate((n, 1), Bernoulli)` fits `BernoulliDistribution(0.565)`\nwithout complaint.",
+    "expected": "The same named refusal for every non-1-D array into a univariate estimator or\nscorer, on every route, with a consistent first offending row.",
+    "notes": "Repairs concerned: P01-F13, P06-F08.",
+    "repairs_attacked": [
+      "P01-F13",
+      "P06-F08"
+    ]
+  },
+  {
+    "id": "Q06-F15",
+    "severity": "minor",
+    "title": "front-door refusals are not named on every verb: a bare `float`/`np.float64` and a mapping with a 0-d array column give \"'float' object is not iterable\" / \"object of type 'float' has no len()\" on `optimize`, `fit` and `best_of` but a named `ValueError` on `propose` and `Model.fit`",
+    "surface": "`optimize`, `fit`, `best_of` vs `propose`, `Model.fit`.",
+    "reproduction": "import numpy as np, mixle\nfrom mixle.inference import optimize, fit, best_of\nfor label, d in (('float', 1.5), ('np.float64', np.float64(1.5)), ('mapping with 0-d column', {'x': np.array(1.0)})):\n    for verb, f in (('optimize', lambda d: optimize(d, max_its=2)), ('fit', lambda d: fit(d, max_its=2)), ('best_of', lambda d: best_of(d, None, None, 1, 2, 0.1, 1e-6, rng=1)), ('propose', lambda d: mixle.propose(d, max_its=2, fit=True)), ('Model.fit', lambda d: mixle.Model().fit(d, max_its=2))):\n        try: f(d)\n        except Exception as e: print('%-24s %-9s -> %s: %s' % (label, verb, type(e).__name__, str(e)[:60]))",
+    "observed": "(`out/p01_frontdoor_venv-full.txt`; `p01_table.py` flags the rows): `optimize`/`fit`/\n`best_of` -> `TypeError: 'float' object is not iterable` (resp. `'numpy.float64' ...`) and\n`TypeError: object of type 'float' has no len()` for the 0-d column; `propose`/`Model.fit` ->\n`ValueError: data must be a collection of observation records ...`. A 0-d array handed directly is\nnamed by all five (P06-F09).",
+    "expected": "\"The refusals name the verb that was called\" (R06-F03) on all five verbs.",
+    "notes": "Repairs concerned: P06-F09, R06-F03.",
+    "repairs_attacked": [
+      "P06-F09",
+      "R06-F03"
+    ]
+  },
+  {
+    "id": "Q06-F16",
+    "severity": "minor",
+    "title": "`optimize(..., backend='mp')` cannot raise the 30 s worker setup timeout: `planner.py` builds `MPEncodedData(...)` without `response_timeout`, so on a loaded machine the fit verb fails with \"parallel worker 0 timed out after 30.000s during setup\" with no argument to control it (the three `ClosedParallelHandleTest` regression tests failed the same way)",
+    "surface": "`optimize(backend='mp')`, `mixle/utils/parallel/planner.py:1118`,\n`MPEncodedData.__init__(response_timeout=30.0)`.",
+    "reproduction": "import numpy as np, inspect, warnings\nimport mixle.stats as S\nfrom mixle.inference import optimize\nfrom mixle.utils.parallel.multiprocessing import MPEncodedData\nwarnings.simplefilter('ignore')\nprint('optimize accepts response_timeout:', 'response_timeout' in inspect.signature(optimize).parameters)\nxs = [float(v) for v in np.random.RandomState(0).normal(3, 2, 400)]\nrows = list(zip(xs, ['a', 'b'] * 200)); ce = S.CompositeEstimator([S.GaussianEstimator(), S.CategoricalEstimator()])\ntry: print(optimize(rows, ce, max_its=2, backend='mp', num_workers=2))\nexcept Exception as e: print('optimize(backend=mp) ->', type(e).__name__, str(e))\nh = MPEncodedData(xs, estimator=S.GaussianEstimator(), num_workers=2, response_timeout=600.0); print('direct handle with response_timeout=600 ->', len(h)); h.close()\nfor label, fn in (('MPEncodedData(generator)', lambda: MPEncodedData((r for r in rows), estimator=ce, num_workers=2, response_timeout=600.0)), ('MPEncodedData(mapping of columns)', lambda: MPEncodedData({'x': xs, 'k': ['a', 'b'] * 200}, estimator=ce, num_workers=2, response_timeout=600.0))):\n    try: fn().close()\n    except Exception as e: print(label, '->', type(e).__name__, str(e)[:60])",
+    "observed": "(`out/p09_mp_closed_venv-full.txt`, `tests/pytest_full.txt`): `optimize(rows, ...,\nbackend='mp', num_workers=2)` -> `TimeoutError: parallel worker 0 timed out after 30.000s during\nsetup` for the rows, generator and structured inputs (one call, the mapping, happened to get\nthrough), so the local-vs-mp agreement check could not run; a handle built directly with\n`response_timeout=600.0` served `seq_initialize`/`seq_estimate`/`seq_log_density_sum`/\n`optimize(enc_data=)` correctly, and after `close()` refused every entry point with `RuntimeError:\nthis parallel encoded-data handle is closed: init/update/llsum cannot be served ...` (P06-F04,\nR06-F02 verified; a killed worker is reported as `parallel worker disconnected while sending init`\nand the handle then reads as closed). The direct handle has no front door: a generator ->\n`TypeError: object of type 'generator' has no len()`, a mapping of columns -> `KeyError: 0`; a\nclosed handle's `__enter__()` succeeds. `optimize`'s signature has `backend`/`num_workers` and no\ntimeout.",
+    "expected": "A way to set the worker timeout from the fit verb (or a setup deadline that scales\nwith `num_workers`/load), and a refusal from the direct handle that names the unsupported input.",
+    "notes": "The regression-test failures in `tests/pytest_full.txt` are this contention path, not a\ndefect in the closed-handle repair. Repairs concerned: P06-F04, R06-F02.",
+    "repairs_attacked": [
+      "P06-F04",
+      "R06-F02"
+    ]
+  },
+  {
+    "id": "Q06-F17",
+    "severity": "minor",
+    "title": "the copula domain refusal for a NaN observation reports \"observed min=0.5, max=0.7\" -- both inside (0, 1) -- and never says a NaN was found",
+    "surface": "`ClaytonCopulaDistribution`, `GaussianCopulaDistribution`, `StudentTCopulaDistribution`\n(`log_density`, `seq_log_density`, `estimate`).",
+    "reproduction": "import numpy as np, mixle.stats as S\nfor c in (S.ClaytonCopulaDistribution(3, theta=4.0), S.GaussianCopulaDistribution(np.eye(3))):\n    try: c.log_density(np.array([np.nan, 0.5, 0.7]))\n    except Exception as e: print(type(c).__name__, '->', str(e))",
+    "observed": "(`out/p11_copulas_venv-full.txt`): `ValueError: copula observations must be finite and\nlie strictly inside (0, 1); observed min=0.5, max=0.7` (Clayton, Student-t; Gaussian says\n`observation`), the same for `estimate` with a NaN row (`observed min=0.5, max=0.5`).",
+    "expected": "Name the NaN (and its row), since the reported range satisfies the stated condition.",
+    "notes": "",
+    "repairs_attacked": []
+  },
+  {
+    "id": "Q06-F18",
+    "severity": "minor",
+    "title": "`fields=` cannot address a MultiIndex / tuple-labelled column: `fields=[('num', 'x')]` is still read as an `(alias, source)` pair and fails with \"DataFrame is missing fields: x\", although P06-F03 made the frame itself fit",
+    "surface": "`optimize(df, fields=...)` (and every verb taking `fields=`) on a 2-level MultiIndex\nframe or a flat index of 2-tuples.",
+    "reproduction": "import numpy as np, pandas as pd, warnings\nfrom mixle.inference import optimize\nwarnings.simplefilter('ignore')\nrng = np.random.RandomState(0)\nmi = pd.DataFrame({'x': rng.normal(size=200), 'k': ['a', 'b'] * 100}); mi.columns = pd.MultiIndex.from_tuples([('num', 'x'), ('cat', 'k')])\nprint('whole frame ->', type(optimize(mi, max_its=2)).__name__)\nfor f in ([('num', 'x')], [('num', 'x'), ('cat', 'k')]):\n    try: optimize(mi, fields=f, max_its=2)\n    except Exception as e: print('fields=%r ->' % f, type(e).__name__, str(e))",
+    "observed": "(`out/p10_dataframe_venv-full.txt`): the whole frame fits (P06-F03 verified on\n`optimize`, `fit`, `propose`, `Model.fit`, `dataframe_records`, 2- and 3-level MultiIndex and a flat\nindex of 2-tuples); `fields=[('num', 'x')]` -> `KeyError: 'DataFrame is missing fields: x'`,\n`fields=[('num', 'x'), ('cat', 'k')]` -> `... missing fields: x, k`. A `RecordEstimator` with\n`field('mean', ('num', 'x'))` sources does fit the frame, so the tuple label is addressable only\nthrough a record estimator.",
+    "expected": "A `fields=` entry that equals a column label of the frame selects that column\n(before the `(alias, source)` interpretation), or the error says the tuple was read as an alias\npair.",
+    "notes": "Repairs concerned: P06-F03.",
+    "repairs_attacked": [
+      "P06-F03"
+    ]
+  },
+  {
+    "id": "Q06-F19",
+    "severity": "minor",
+    "title": "a closed `MPEncodedData` handle still enters as a context manager, and `len()` of it answers the old size, after `close()` made every request refuse",
+    "surface": "`MPEncodedData.__enter__`, `__len__` after `close()`.",
+    "reproduction": "import numpy as np, mixle.stats as S\nfrom mixle.utils.parallel.multiprocessing import MPEncodedData\nxs = [float(v) for v in np.random.RandomState(0).normal(3, 2, 400)]\nh = MPEncodedData(xs, estimator=S.GaussianEstimator(), num_workers=2, response_timeout=600.0); h.close()\nprint('len after close:', len(h)); print('enter after close:', h.__enter__())\ntry: __import__('mixle.inference', fromlist=['seq_estimate']).seq_estimate(h, S.GaussianEstimator(), S.GaussianDistribution(0, 1))\nexcept Exception as e: print('seq_estimate after close ->', type(e).__name__, str(e)[:70])",
+    "observed": "(`out/p09_mp_closed_venv-full.txt`): `closed len -> 400`, `closed context manager ->\n<MPEncodedData object>` (no error), while `seq_initialize`/`seq_estimate`/`seq_log_density_sum`/\n`optimize(enc_data=h)` raise the closed-handle `RuntimeError` (P06-F04 / R06-F02 verified) and\n`close()` twice is the documented no-op.",
+    "expected": "Entering a closed handle should raise the same closed-handle error (or re-open), so a\n`with` block over a closed handle fails at the `with`, not inside.",
+    "notes": "Repairs concerned: P06-F04, R06-F02.",
+    "repairs_attacked": [
+      "P06-F04",
+      "R06-F02"
+    ]
+  },
+  {
+    "id": "Q06-F20",
+    "severity": "minor",
+    "title": "the same timestamps are refused as a `datetime64` ndarray but fitted as an Ignored categorical when handed as a pandas Series, a list of `np.datetime64`, an object array, or a mapping column",
+    "surface": "`optimize` (auto path) on datetime-valued inputs.",
+    "reproduction": "import numpy as np, pandas as pd\nfrom mixle.inference import optimize\ndt = np.datetime64('2020-01-01') + np.arange(200) * np.timedelta64(1, 'D')\ndf = pd.DataFrame({'t': pd.to_datetime(dt)})\nfor label, d in (('ndarray', df['t'].to_numpy()), ('Series', df['t']), ('list of np.datetime64', list(dt)), ('object array', np.array(list(dt), dtype=object)), ('mapping column', {'t': df['t']})):\n    try: print(label, '->', str(optimize(d, max_its=2))[:70])\n    except Exception as e: print(label, '->', type(e).__name__, str(e)[:70])",
+    "observed": "(`out/p08_datetime_venv-full.txt`): ndarray -> `ValueError: optimize() received a numpy\ndatetime64[s] array. Fit its numeric representation instead ...`; Series, list, object array and\nmapping column -> `IgnoredDistribution(CategoricalDistribution({Timestamp('2020-01-01 ...'): 0.005,\n...}))` -- the \"fitting something nobody asked for\" outcome the refusal exists to prevent.",
+    "expected": "One answer per table regardless of container: either every route refuses datetimes\nby name with the numeric-representation hint, or none does.",
+    "notes": "Repairs concerned: P06-F09, P06-F10 (the timedelta64 refusal). Docs side: Q06-F13.",
+    "repairs_attacked": [
+      "P06-F09",
+      "P06-F10"
+    ]
+  }
+]

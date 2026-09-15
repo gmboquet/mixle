@@ -1,0 +1,131 @@
+[
+  {
+    "id": "Q01-F01",
+    "severity": "blocking",
+    "title": "quantile(q) still answers an out-of-domain q on 16 of the 31 families the CHANGELOG (R05-F07) and the migration guide say now refuse it; two of them answer with a number",
+    "surface": "BetaBinomialDistribution, ExponentiallyModifiedGaussianDistribution, GeneralizedExtremeValueDistribution, GeneralizedGaussianDistribution, HalfNormalDistribution, InverseGaussianDistribution, LaplaceDistribution, LogisticDistribution, NakagamiDistribution, ParetoDistribution, RayleighDistribution, RicianDistribution, SkellamDistribution, SkewNormalDistribution, StudentTDistribution, UniformDistribution .quantile(q); CHANGELOG 0.8.2 R05-F07 paragraph; docs/migrations/0.8.2.md section 'quantile(q) refuses a q outside [0, 1] on every family'; mixle/tests/adversarial_review_082_repairs_test.py::QuantileDomainTest",
+    "reproduction": "import mixle.stats as S\nS.HalfNormalDistribution(1.0).quantile(-0.1)                    # -0.12566134685507405 (a negative number from a law on x >= 0)\nS.BetaBinomialDistribution(10, 2.0, 3.0).quantile(1.1)          # 10.0\nS.BetaBinomialDistribution(10, 2.0, 3.0).quantile(float('nan')) # 10.0\nS.UniformDistribution(-1.0, 2.0).quantile(1.1)                  # nan\nS.LaplaceDistribution(0.0, 1.0).quantile(float('nan'))          # nan\nS.StudentTDistribution(5.0).quantile(-0.1)                      # nan\nS.GaussianDistribution(0.0, 1.0).quantile(-0.1)                 # ValueError: GaussianDistribution.quantile: q must be in [0, 1].  (the repaired shape)",
+    "observed": "0.8.2 (probes/quantile_domain.venv-full.txt, probes/confirm_quantile_tails.venv-full.txt): for q in {-0.1, 1.1, nan, inf} 15 families raise '<Family>.quantile: q must be in [0, 1].'; 14 families return nan (EMG, GEV, GeneralizedGaussian, InverseGaussian, Laplace, Logistic, Nakagami, Pareto, Rayleigh, Rician, Skellam, SkewNormal, StudentT, Uniform); BetaBinomial returns 0.0 at q=-0.1 and 10.0 at q=1.1, nan and inf; HalfNormal returns -0.1257 at q=-0.1 and nan at 1.1/nan. The 16 behave identically on 0.8.1 (probes/quantile_domain.c081.txt): the repair reached 15 families only. Laplace and Uniform are two of the seven continuous families R05-F07 itself listed as its surface.",
+    "expected": "CHANGELOG: 'Every family that defines quantile refuses an out-of-domain q the same way, through one shared validated_quantile_probability'; migration guide: 'quantile(q) refuses a q outside [0, 1] on every family ... All thirteen now raise ValueError naming the family'. Every quantile-bearing family raises the same ValueError for q outside [0, 1] and for NaN.",
+    "notes": "validated_quantile_probability is called by 8 continuous families (Beta, Exponential, Gamma, Gaussian, GeneralizedPareto, InverseGamma, LogGaussian, Weibull) and 6 discrete ones (Bernoulli, Binomial, Geometric, LogSeries, NegativeBinomial, Poisson); Gumbel has its own P01-F12 check; the other 16 never validate q. The regression test QuantileDomainTest._families() builds each quantile-bearing class from a fixed tuple of nine kwargs shapes and silently skips (except Exception: continue) every class whose constructor takes other names -- exactly these 16 -- and test_the_survey_reaches_every_family_it_claims_to only asserts >= 13 families, so the test passes without ever calling quantile on them. The regression tests otherwise pass (tests/pytest2.venv-full.txt).",
+    "repairs_attacked": [
+      "R05-F07",
+      "P01-F12"
+    ]
+  },
+  {
+    "id": "Q01-F02",
+    "severity": "blocking",
+    "title": "A support-limited component still cannot be mixed unless it is one of eight families: five continuous and three count encoders refuse out-of-support rows outright, and for Poisson/Geometric/LogSeries the mixture hands those rows initial responsibility so the new P01-F06/F07/F09 support guards refuse the fit and blame the data",
+    "surface": "mixle.inference.optimize / fit with MixtureEstimator whose components include ParetoEstimator, GeneralizedParetoEstimator, NakagamiEstimator, RicianEstimator, TweedieEstimator, NegativeBinomialEstimator, BetaBinomialEstimator, BernoulliEstimator (encoder refusal) or PoissonEstimator, GeometricEstimator, LogSeriesEstimator (guard refusal on the initial responsibilities); MixtureDistribution.seq_log_density on such batches; ParetoDistribution/GeneralizedParetoDistribution/NakagamiDistribution/RicianDistribution/TweedieDistribution/NegativeBinomialDistribution/BetaBinomialDistribution/BernoulliDistribution .dist_to_encoder().seq_encode",
+    "reproduction": "import numpy as np, mixle.stats as S\nfrom mixle.inference import optimize\nrng = np.random.RandomState(0)\ncounts = np.concatenate([rng.poisson(2, 200), rng.geometric(0.3, 200)])   # 28 zeros; the Poisson component explains them\noptimize(counts, S.MixtureEstimator([S.PoissonEstimator(), S.GeometricEstimator()]), max_its=20, rng=np.random.RandomState(1))\n# ValueError: GeometricDistribution has support k in {1, 2, 3, ...}, but at least 4 observation(s) carrying weight are below one, fractional, NaN, or infinite ...\nx = np.concatenate([rng.normal(-3, 1, 200), rng.pareto(3., 200) + 1.0])\noptimize(x, S.MixtureEstimator([S.GaussianEstimator(), S.ParetoEstimator()]), max_its=20, rng=np.random.RandomState(1))\n# TypeError: MixtureDistribution could not encode the data with all of its component encoders ...\nS.ParetoDistribution(1.0, 3.0).dist_to_encoder().seq_encode([-1.0, 1.5])   # ValueError: ParetoDistribution requires observations x > 0.\nS.ParetoDistribution(1.0, 3.0).log_density(-1.0)                           # -inf  (the scalar path scores it)",
+    "observed": "0.8.2 (probes/confirm_mixture_guards.venv-full.txt, probes/encoder_refusals_in_mixtures.venv-full.txt; identical on venv-base and venv-nonumba): Gaussian+{Exponential, Gamma, Beta, HalfNormal, Rayleigh, InverseGaussian, LogGaussian, Weibull} encode, batch-score and fit with out-of-support rows present. Gaussian+{Pareto, GeneralizedPareto, Nakagami, Rician, Tweedie} and IntegerCategorical+{NegativeBinomial, BetaBinomial, Bernoulli} raise the encoder TypeError from seq_log_density and optimize, while MixtureDistribution.log_density scores the same rows (-4.737...). Poisson+Geometric (seeds 1, 7, 11), Poisson+LogSeries, NegBin+Geometric, Skellam+Poisson and IntegerCategorical+Poisson raise the P01-F06/F07/F09 ValueError naming 4 to 14 'observation(s) carrying weight'. On 0.8.1 (probes/confirm_mixture_guards.c081.txt) every one of these -- the Exponential and Gamma controls included -- failed at encode time with the TypeError, so the P02-F03 repair reached 8 of the 16 support-limited families and none of the count families.",
+    "expected": "CHANGELOG P02-F03: 'A support-limited component can be mixed. ... The encoders now admit out-of-support observations and the vectorized scorers return the -inf the scalar path returns; ... mixture, heterogeneous-mixture and hidden-Markov initialization consult each component's support before handing it any responsibility.' A Poisson+Geometric mixture on counts that contain zeros, or a Gaussian+Pareto mixture on data with negative values, is an ordinary two-population model; the rows a component cannot support should get zero responsibility for it and the fit should proceed.",
+    "notes": "The support consultation is wired for the ten continuous families that use refuse_unsupported_observations; the three count families use the same helper for the refusal but mixture initialization does not consult their support, so the guard fires on the random initial responsibilities -- a fail-closed guard rejecting a state the library itself produces (the P01-F06, P01-F07, P01-F09 guards are the ones firing). The five continuous and three count encoders that still refuse never received the P02-F03 encoder change. Overlaps pass 02's area (latent models); reported here because the encoders and the guards belong to the univariate families. The trail's last pending item (which accumulators expose supported_rows and how mixture initialization consults it) was not finished; the behaviour is established by the probes, the exact code path is not cited.",
+    "repairs_attacked": [
+      "P02-F03",
+      "P01-F06",
+      "P01-F07",
+      "P01-F09"
+    ]
+  },
+  {
+    "id": "Q01-F03",
+    "severity": "real",
+    "title": "The zero-weight exemption (R05-F05) holds only on the vectorized seq_update/seq_initialize routes: the scalar update/initialize accumulator routes still turn a zero-weight non-finite row into NaN statistics, and the public initialize() verb takes the scalar route, so it reproduces the pre-repair symptom -- and for LogSeries a silent wrong fit",
+    "surface": "<Family>Accumulator.update / .initialize for Exponential, Gaussian, Weibull, Beta (NaN row), ExponentiallyModifiedGaussian, GeneralizedExtremeValue, GeneralizedGaussian, Gumbel, Logistic, SkewNormal, StudentT, Poisson, Geometric, LogSeries; mixle.inference.initialize(data, estimator, rng, p); LogisticAccumulator.seq_update (zero-weight +-inf row)",
+    "reproduction": "import numpy as np\nfrom mixle.stats import ExponentialEstimator, ExponentialDistribution, LogSeriesEstimator\nfrom mixle.inference import initialize, estimate\nest = ExponentialEstimator(); rows = [1., 2., 1., 3., 1., 2., 1., 3.]\nenc = ExponentialDistribution(1.0).dist_to_encoder().seq_encode([*rows, float('inf')]); w = np.array([1.] * 8 + [0.])\na = est.accumulator_factory().make(); a.seq_update(enc, w, None); print(a.value())   # (8.0, 14.0)  repaired route\nb = est.accumulator_factory().make()\nfor x, ww in zip([*rows, float('inf')], w): b.update(x, ww, None)\nprint(b.value())                                                                     # (8.0, nan)   unrepaired route\ninitialize([*rows, float('inf')], est, np.random.RandomState(1), 0.5)   # ValueError: ExponentialDistribution requires beta > 0.\nprint(estimate([1, 2, 1, 3, 1, 2, 1, 3], LogSeriesEstimator()))        # LogSeriesDistribution(0.6434789567977548, ...)\nm = initialize([1, 2, 1, 3, 1, 2, 1, 3, float('nan')], LogSeriesEstimator(), np.random.RandomState(1), 0.5)\nprint(m, m.numerical_repairs())                                        # LogSeriesDistribution(1.0000000000000002e-12, ...) ()",
+    "observed": "0.8.2 (probes/zero_weight.venv-full.txt, probes/zw_trace.venv-full.txt, probes/confirm_initialize_zero_weight.venv-full.txt): scalar update with a zero-weight inf/-inf/nan row leaves NaN in a moment on the 14 families listed (Exponential (8.0, nan); Gaussian (nan, nan, ..); Weibull (nan, 30.0, 8.0); Poisson (4.0, nan); ...) while seq_update and seq_initialize return the clean statistic on every one of the ten repaired families. initialize(..., p=0.5) with one non-finite row: the seeds on which the row draws weight 0 end in 'ExponentialDistribution requires beta > 0.', 'PoissonDistribution requires lam > 0.', 'GeometricDistribution requires p in (0, 1].' (2 of 6 seeds each), and LogSeries returns p = 1e-12 (clean fit 0.643) with numerical_repairs() == () on 2 of 6 seeds. Logistic's seq_update also yields NaN for a zero-weight +-inf row. 0.8.1 (probes/zero_weight.c081.txt, probes/confirm_initialize_zero_weight.c081.txt): the same scalar-route NaNs; initialize failed on all 6 seeds for Exponential/Poisson and crashed for LogSeries ('cannot convert float NaN to integer'), so 0.8.2 repaired the vectorized route and left the scalar one.",
+    "expected": "CHANGELOG R05-F05: 'A zero-weight row contributes exactly zero to a sufficient statistic, on all ten continuous families that exempt one'; migration guide: 'a zero-weight row is still exempt'; the initialize() docstring: 'Seq_initialize() is much more efficient, and should produce the same initialized model for the same data sets'. The scalar routes should mask the row exactly as weighted_statistic_sum does on the vectorized route, and a zero-weight row must never change a fitted parameter -- least of all silently with an empty numerical_repairs().",
+    "notes": "mixle/stats/compute/sequence.py:645 initialize() calls accumulator.initialize(x, w, rng) row by row (line 695), which for these families is the unmasked scalar arithmetic x * w (inf * 0.0 = nan); weighted_statistic_sum is applied inside seq_update only. The regression test ZeroWeightExemptionTest exercises seq_update alone (line 47 of the copied test), so it cannot see this. Logistic is not one of the ten (it does not use refuse_unsupported_observations) but its encoder admits +-inf, so the same NaN appears on its vectorized route too.",
+    "repairs_attacked": [
+      "R05-F05",
+      "P02-F03",
+      "P01-F05",
+      "P01-F06",
+      "P01-F07",
+      "P01-F09"
+    ]
+  },
+  {
+    "id": "Q01-F04",
+    "severity": "real",
+    "title": "The R05-F09 diagnosis fires only when every observation is unscorable; the finding's own reproduction (one out-of-support row in a two-Exponential mixture) still ends in the bare internal message it reported",
+    "surface": "mixle.inference.optimize / fit with MixtureEstimator of support-limited components; the ValueError raised from mixle/inference/estimation.py ('fused EM did not produce a finite objective from its non-finite initial model.')",
+    "reproduction": "import numpy as np, mixle.stats as S\nfrom mixle.inference import optimize\nrng = np.random.RandomState(0)\nx = np.concatenate([rng.exponential(1., 150), rng.exponential(5., 150), [-0.5]])     # the R05-F09 batch, verbatim\noptimize(x, S.MixtureEstimator([S.ExponentialEstimator(), S.ExponentialEstimator()]), max_its=10, rng=np.random.RandomState(1))\n# ValueError: fused EM did not produce a finite objective from its non-finite initial model.\noptimize(-np.abs(x), S.MixtureEstimator([S.ExponentialEstimator(), S.ExponentialEstimator()]), max_its=10, rng=np.random.RandomState(1))\n# ValueError: ... Every one of the 301 observation(s) scores -inf under it: none of them is in the support of any component. Check the sign, units or support ...",
+    "observed": "0.8.2 (probes/r05f09_variants.venv-full.txt, probes/ledger_replay.venv-full.txt): one negative row (last or first), half the rows negative, 2xBeta with one 1.5, 2xGamma with one -1.0 -> the bare message; fit() -> 'EM did not produce a finite objective from its non-finite initial model.'; only the batch in which every row is out of support gets the diagnosis. A one-component ExponentialEstimator on the same batch names the family and support; the same row inside Composite(Gaussian, Exponential) or an HMM with Exponential emissions is refused with the family-and-support message.",
+    "expected": "The CHANGELOG lists R05-F09 among the re-review findings repaired afterwards and says a fit whose objective never becomes finite 'names the cause when it is knowable'. On the finding's own batch the cause is knowable (MixtureDistribution.posterior(-0.5) is [0, 0]; exactly one row scores -inf under every component): the message should name that row, or at least say that some rows lie outside every component's support.",
+    "notes": "mixle/inference/estimation.py:198 builds the diagnosis only when the number of -inf rows equals the batch size. The CHANGELOG paragraph re-scopes the finding to 'a mixture whose components all refuse every observation', which is not the case R05-F09 reported (its rated harm was the opaque message, severity minor; the harm is unchanged and the repair claim does not cover the reported case).",
+    "repairs_attacked": [
+      "R05-F09",
+      "P02-F03"
+    ]
+  },
+  {
+    "id": "Q01-F05",
+    "severity": "real",
+    "title": "Scalar log_density disagrees with seq_log_density on large or non-finite observations: GeneralizedGaussianDistribution.log_density raises OverflowError where the vectorized path returns -inf (the P01-F04 defect on the sibling family), InverseGaussianDistribution.log_density(1e308) returns NaN, and LogGaussianDistribution.log_density(+-inf) raises where seq_log_density returns -inf",
+    "surface": "GeneralizedGaussianDistribution.log_density, InverseGaussianDistribution.log_density, LogGaussianDistribution.log_density versus the same families' seq_log_density",
+    "reproduction": "import numpy as np\nfrom mixle.stats import GeneralizedGaussianDistribution as GG, InverseGaussianDistribution as IG, LogGaussianDistribution as LG, GeneralizedGaussianEstimator\nfrom mixle.inference import estimate\nd = GG(0.0, 1.0, 2.0); e = d.dist_to_encoder()\nprint(np.asarray(d.seq_log_density(e.seq_encode([1e300]))))   # [-inf]\nd.log_density(1e300)                                           # OverflowError: (34, 'Result too large')\nGG(0.0, 1.0, 50.0).log_density(2e6)                            # OverflowError  (beta = 50 is GeneralizedGaussianEstimator's own beta_bounds ceiling)\nf = estimate(np.random.RandomState(0).normal(0, 1, 500), GeneralizedGaussianEstimator()); f.log_density(1e200)   # OverflowError on a fitted law\ng = IG(1.0, 2.0); print(g.log_density(1e308), np.asarray(g.seq_log_density(g.dist_to_encoder().seq_encode([1e308]))))   # nan [-inf]\nprint(g.log_density(1e300), np.asarray(g.seq_log_density(g.dist_to_encoder().seq_encode([1e300]))))                   # -inf [-1e+300]\nh = LG(0.0, 1.0); print(np.asarray(h.seq_log_density(h.dist_to_encoder().seq_encode([float('inf')]))))   # [-inf]\nh.log_density(float('inf'))   # UnscorableObservation: LogGaussianDistribution rejects infinite observations.",
+    "observed": "As in the comments (probes/scalar_vs_vector.venv-full.txt, probes/encoder_refusals_in_mixtures.venv-full.txt, probes/ledger_replay.venv-full.txt; identical on venv-base). GeneralizedGaussian and InverseGaussian behave the same on 0.8.1; LogGaussian's vectorized path raised on 0.8.1 ('requires support x in (0,inf)') and now returns -inf while the scalar path still raises, so the two routes were made to disagree by the 0.8.2 change.",
+    "expected": "-inf from every route for an observation of vanishing density, as P01-F04 established for WeibullDistribution and R05-F06 for the vectorized paths; the scalar and vectorized routes of one family agree on every input.",
+    "notes": "GeneralizedGaussian's scalar path evaluates (|x - mu| / alpha) ** beta in Python floats (OverflowError past ~1e(308/beta) * alpha); the vectorized path in numpy (overflow -> inf -> -inf). Any scalar scoring loop over a fitted GeneralizedGaussian crashes on a large value instead of scoring it -inf, the shape P01-F04 repaired for Weibull. The count families' scalar log_density returning -inf for NaN while the vectorized path refuses (Bernoulli, Binomial, Poisson, Geometric, NegativeBinomial, LogSeries, Skellam, BetaBinomial, IntegerUniformSpike, HalfNormal, Rayleigh, Beta, Gamma, InverseGamma, InverseGaussian, Tweedie) is unchanged from 0.8.1 and is listed under attacks that did not change, not as part of this finding.",
+    "repairs_attacked": [
+      "P01-F04",
+      "R05-F06"
+    ]
+  },
+  {
+    "id": "Q01-F06",
+    "severity": "minor",
+    "title": "The engine route backend_seq_log_density returns NaN (and +inf for LogSeries at 0) for out-of-support rows the encoders now admit, where log_density and seq_log_density return -inf",
+    "surface": "backend_seq_log_density(encoded, NUMPY_ENGINE) on BetaDistribution (x < 0, x > 1, +-inf), GammaDistribution (+inf), InverseGammaDistribution (x <= 0, -inf), LogGaussianDistribution (x <= 0, -inf), LogSeriesDistribution (x = -1 -> nan, x = 0 -> +inf), SkewNormalDistribution (1e300), WeibullDistribution (+inf); reachable through the mixle.inference.jit scorer",
+    "reproduction": "import numpy as np\nfrom mixle.stats import BetaDistribution, LogSeriesDistribution\nfrom mixle.engines.numpy_engine import NUMPY_ENGINE\nd = BetaDistribution(2.0, 3.0); e = d.dist_to_encoder().seq_encode([0.5, -1.0, 2.5])\nprint(np.asarray(d.seq_log_density(e)))                        # [ 0.47  -inf  -inf]\nprint(np.asarray(d.backend_seq_log_density(e, NUMPY_ENGINE)))  # [ 0.47   nan   nan]\nl = LogSeriesDistribution(0.5); e = l.dist_to_encoder().seq_encode([1, 0, -1])\nprint(np.asarray(l.backend_seq_log_density(e, NUMPY_ENGINE)))  # [-0.3266  inf  nan]",
+    "observed": "probes/scalar_vs_vector.venv-full.txt (identical in venv-base): the flagged 'backend!=scalar' rows for Beta, Gamma, InverseGamma, LogGaussian, LogSeries, SkewNormal and Weibull. On 0.8.1 the encoders refused these rows so the route was unreachable; the P02-F03 encoder change admits them and only the seq_log_density scorers were given the -inf rule.",
+    "expected": "-inf, the same as the other two routes (R05-F06's rule for the vectorized path).",
+    "notes": "No library caller besides mixle/inference/jit.py (backend_seq_log_density from mixle.stats.compute.backend), so optimize/estimate never see it; the +inf for LogSeries at x = 0 is nevertheless a wrong number from a public capability method (capability.py lists backend_seq_log_density()).",
+    "repairs_attacked": [
+      "P02-F03",
+      "R05-F06"
+    ]
+  },
+  {
+    "id": "Q01-F07",
+    "severity": "minor",
+    "title": "entropy() crashes at extreme but constructible parameters (P01-F10's shape): NegativeBinomial with p <= 1e-160 and Poisson(1e300)",
+    "surface": "NegativeBinomialDistribution.entropy, PoissonDistribution.entropy",
+    "reproduction": "from mixle.stats import NegativeBinomialDistribution as NB, PoissonDistribution\nNB(1.0, 1e-150).entropy()             # 346.387763949  (matches the closed form)\nNB(1.0, 1e-160).entropy()             # OverflowError: cannot convert float infinity to integer\nNB(3.0, 1e-300).entropy()             # ZeroDivisionError: float division by zero  (mean() is a finite 3e300)\nPoissonDistribution(1e300).entropy()  # OverflowError: (34, 'Result too large')",
+    "observed": "probes/entropy_accuracy.venv-full.txt: every other case checked agrees with an exact float64 block sum, the r = 1 closed form or the Gamma-limit reference to <= 4.5e-7 (most to 1e-9 or better), across the Poisson asymptotic switch at lam = 1e3, the negative binomial Gaussian-limit and blocked+tail branches and r = 1 down to p = 1e-150; the constructors accept the crashing parameters. Not compared with 0.8.1, whose entropy at these supports is the P01-F02 memory bomb.",
+    "expected": "The limit or a finite number, as P01-F10 established for mean/variance at extreme but constructible parameters.",
+    "notes": "The summation cap is computed as an integer from mean + k*sd, which is inf at these parameters.",
+    "repairs_attacked": [
+      "P01-F02",
+      "P01-F10"
+    ]
+  },
+  {
+    "id": "Q01-F08",
+    "severity": "minor",
+    "title": "GeneralizedGaussianDistribution.quantile returns -+inf for q < 5.6e-17 or q > 1 - 1.1e-16 and loses digits near those limits, because it inverts through 2|q - 1/2|",
+    "surface": "GeneralizedGaussianDistribution.quantile",
+    "reproduction": "from mixle.stats import GeneralizedGaussianDistribution, GaussianDistribution\ng = GeneralizedGaussianDistribution(0.0, 1.0, 2.0)               # a Normal(0, sigma = 1/sqrt(2))\nprint(g.quantile(1e-16), g.quantile(1e-17), g.quantile(1e-20))   # -5.805018683193453 -inf -inf\nprint(GaussianDistribution(0.0, 0.5).quantile(1e-17))            # -6.006018786764246",
+    "observed": "probes/confirm_quantile_tails.venv-full.txt (scipy norm.ppf(scale=1/sqrt(2)): -6.006 at 1e-17, -5.814 at 1e-16, -15.04 at 1e-100). Same on 0.8.1 (probes/quantile_domain.c081.txt, q = 1e-300).",
+    "expected": "A finite quantile, as the Gaussian route returns for the same q.",
+    "notes": "generalized_gaussian.py:272-274: 2 * abs(q - 0.5) rounds to 1.0 for q below ~5.6e-17, and gammaincinv(1/beta, 1.0) is inf. StudentTDistribution(5).quantile(1e-300) = +inf was also observed but matches scipy.stats.t.ppf exactly (scipy's own limitation), so it is not reported.",
+    "repairs_attacked": []
+  },
+  {
+    "id": "Q01-F09",
+    "severity": "minor",
+    "title": "Boolean observations are refused by PoissonEstimator with a message that misdescribes them ('negative, fractional, NaN, or infinite'); 0.8.1 accepted them as 0/1 counts",
+    "surface": "PoissonEstimator through mixle.inference.estimate (and GeometricEstimator / LogSeriesEstimator via the shared is_whole_number; only Poisson was reproduced)",
+    "reproduction": "import numpy as np\nfrom mixle.stats import PoissonEstimator\nfrom mixle.inference import estimate\nestimate([True, False, True], PoissonEstimator())\n# ValueError: PoissonDistribution has support x in {0, 1, 2, ...}, but at least 1 observation(s) carrying weight are negative, fractional, NaN, or infinite ...\nestimate(np.array([True, False, True]), PoissonEstimator())   # same",
+    "observed": "probes/ledger_replay.venv-full.txt (R05-F02 block), identical on venv-base; 0.8.1 returned PoissonDistribution(0.6666666666666666) (probes/ledger_replay.c081.txt).",
+    "expected": "Either accept bool as the integer subtype numpy treats it as (0.8.1's behaviour, and what the R05-F02 repair says it does for 'an integer typed as int or numpy.integer'), or refuse with a message naming the actual cause (boolean dtype); the migration guide lists no such refusal.",
+    "notes": "A behaviour change relative to 0.8.1 that neither the CHANGELOG nor the migration guide mentions; the message names four causes, none of which applies.",
+    "repairs_attacked": [
+      "R05-F02",
+      "P01-F06"
+    ]
+  }
+]
