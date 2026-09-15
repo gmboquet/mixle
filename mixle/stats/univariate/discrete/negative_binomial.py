@@ -31,6 +31,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import refuse_unsupported_observations
 from mixle.stats.univariate.discrete._count_contracts import (
     ENTROPY_TERM_CAP,
     blocked_entropy,
@@ -55,6 +56,14 @@ def _fisher_encoded(enc_data):
     if isinstance(enc_data, tuple):
         return np.asarray(enc_data[0], dtype=np.float64)
     return np.asarray(enc_data, dtype=np.float64)
+
+
+_NEGATIVE_BINOMIAL_SUPPORT_MESSAGE = (
+    "NegativeBinomialDistribution has support x in {0, 1, 2, ...}, but at least %d observation(s) "
+    "carrying weight are negative (estimation encodes in chunks; the first offending chunk refuses). "
+    "The encoder admits them so a mixture can score one batch against every component; they cannot "
+    "contribute to this component's sufficient statistics."
+)
 
 
 class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
@@ -208,9 +217,15 @@ class NegativeBinomialDistribution(SequenceEncodableProbabilityDistribution):
         )
 
     def seq_log_density(self, x: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
-        """Return vectorized log-density values for sequence-encoded observations."""
+        """Return vectorized log-density values for sequence-encoded observations (``-inf`` off support).
+
+        The encoder admits a negative count so a mixture can encode one batch against every component
+        (P02-F03); the scalar path already scored it -inf, and so does the engine path below.
+        """
         xx, lgx1 = x
-        return gammaln(xx + self.r) - self.log_gamma_r - lgx1 + self.r * self.log_p + xx * self.log_1p
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rv = gammaln(xx + self.r) - self.log_gamma_r - lgx1 + self.r * self.log_p + xx * self.log_1p
+        return np.where(np.asarray(xx) >= 0, rv, -np.inf)
 
     @staticmethod
     def backend_log_density_from_params(vals: Any, log_fact: Any, r: Any, p: Any, engine: Any) -> Any:
@@ -455,15 +470,37 @@ class NegativeBinomialAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
+    def supported_rows(self, x) -> np.ndarray:
+        """Encoded rows this law can be fitted on: non-negative counts.
+
+        The encoder admits a negative count so a mixture can encode one batch against every component
+        (P02-F03); this is the predicate that keeps it out of the statistics and the one a latent
+        model's initialization consults before handing this component any responsibility. The
+        encoder used to refuse it outright, so an integer-categorical-plus-negative-binomial mixture
+        could not be encoded on data the categorical owns (Q01-F02).
+        """
+        return np.asarray(x[0]) >= 0
+
     def seq_update(
         self, x: tuple[np.ndarray, np.ndarray], weights: np.ndarray, estimate: NegativeBinomialDistribution | None
     ) -> None:
-        """Accumulate weighted statistics from encoded observations."""
+        """Accumulate weighted statistics from encoded observations.
+
+        A negative count carrying weight is refused. One with zero weight -- a row EM gave another
+        component -- contributes nothing and is kept out of the histogram, whose keys the dispersion
+        solve reads.
+        """
         weights = np.asarray(weights, dtype=np.float64)
+        supported = self.supported_rows(x)
+        refuse_unsupported_observations(supported, weights, message=_NEGATIVE_BINOMIAL_SUPPORT_MESSAGE)
+        values = x[0]
+        if not np.all(supported):
+            values = values[supported]
+            weights = weights[supported]
         self.count += np.sum(weights, dtype=np.float64)
-        self.sum += np.dot(x[0], weights)
-        if x[0].size:
-            vals = np.rint(x[0]).astype(np.int64)
+        self.sum += np.dot(values, weights)
+        if values.size:
+            vals = np.rint(values).astype(np.int64)
             uniq, inv = np.unique(vals, return_inverse=True)
             wsum = np.zeros(uniq.shape[0], dtype=np.float64)
             np.add.at(wsum, inv, weights)
@@ -631,10 +668,12 @@ class NegativeBinomialDataEncoder(DataSequenceEncoder):
         return isinstance(other, NegativeBinomialDataEncoder)
 
     def seq_encode(self, x: Sequence[int]) -> tuple[np.ndarray, np.ndarray]:
-        """Encode counts with precomputed ``log(x!)`` values."""
-        rv = exact_integer_observations(
-            x,
-            label="Negative-binomial observations",
-            minimum=0,
-        )
-        return rv, gammaln(rv + 1.0)
+        """Encode counts with precomputed ``log(x!)`` values, admitting negative counts.
+
+        Being an exact integer is a type contract and stays enforced; being non-negative is a
+        probability question, answered -inf by the scorer, so a negative count is admitted and a
+        mixture whose other component owns it can encode the whole batch (P02-F03, Q01-F02).
+        """
+        rv = exact_integer_observations(x, label="Negative-binomial observations")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return rv, gammaln(rv + 1.0)

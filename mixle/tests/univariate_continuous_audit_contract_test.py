@@ -106,15 +106,24 @@ class ContinuousObservationContractTest(unittest.TestCase):
                     encoder.seq_encode(invalid)
 
     def test_nonnegative_amplitude_models_reject_negative_or_nonfinite_evidence(self):
+        """No negative or non-finite value is FIT; a negative one is still SCORED.
+
+        The encoders refuse non-finite values and admit a negative one, which the scorer answers -inf
+        as the scalar path does, so a mixture whose other component owns it can encode the batch
+        (P02-F03, Q01-F02). Every such value carrying weight is refused by the accumulator.
+        """
         for distribution in (NakagamiDistribution(1.0, 2.0), RicianDistribution(1.0, 2.0)):
             encoder = distribution.dist_to_encoder()
             accumulator = distribution.estimator().accumulator_factory().make()
+            with self.subTest(distribution=repr(distribution), outside=-1.0):
+                self.assertEqual(float(distribution.seq_log_density(encoder.seq_encode([-1.0]))[0]), float("-inf"))
             for invalid in (-1.0, np.nan, np.inf):
-                with (
-                    self.subTest(distribution=repr(distribution), invalid=repr(invalid)),
-                    self.assertRaises(ValueError),
-                ):
-                    encoder.seq_encode([invalid])
+                if invalid != -1.0:
+                    with (
+                        self.subTest(distribution=repr(distribution), invalid=repr(invalid)),
+                        self.assertRaises(ValueError),
+                    ):
+                        encoder.seq_encode([invalid])
                 with (
                     self.subTest(distribution=repr(distribution), invalid=repr(invalid)),
                     self.assertRaises(ValueError),
@@ -130,9 +139,15 @@ class ContinuousObservationContractTest(unittest.TestCase):
         distribution = GeneralizedParetoDistribution(2.0, -0.5, loc=1.0)
         encoder = distribution.dist_to_encoder()
         np.testing.assert_allclose(encoder.seq_encode([1.0, 3.0, 5.0]), [1.0, 3.0, 5.0])
-        for invalid in ([0.999], [5.001], [np.nan], [np.inf]):
+        for invalid in ([np.nan], [np.inf]):
             with self.subTest(invalid=repr(invalid)), self.assertRaises(ValueError):
                 encoder.seq_encode(invalid)
+        # Below the threshold and above the endpoint are outside the support, not malformed: the
+        # encoder admits them and the scorer answers -inf, as the scalar path does (P02-F03, Q01-F02).
+        for outside in (0.999, 5.001):
+            with self.subTest(outside=outside):
+                self.assertEqual(float(distribution.seq_log_density(encoder.seq_encode([outside]))[0]), float("-inf"))
+                self.assertEqual(distribution.log_density(outside), float("-inf"))
 
         estimator = distribution.estimator()
         accumulator = estimator.accumulator_factory().make()
@@ -146,8 +161,8 @@ class ContinuousObservationContractTest(unittest.TestCase):
         # expected transient of MoM refinement (T1-01), not a data problem. Re-validating that bound
         # here made every next optimize()/fit() iteration crash on data estimate() itself accepted,
         # so only the fixed threshold `loc` -- which never changes across iterations -- is enforced
-        # on this path; `encoder.seq_encode` above still enforces the full endpoint for genuinely
-        # external data scored against a fixed distribution.
+        # on this path; external data scored against a fixed distribution meets the full endpoint in
+        # the scorer, which answers -inf past it.
         accumulator.update(5.5, 1.0, distribution)  # above distribution's endpoint: no longer raises
         with self.assertRaises(ValueError):
             accumulator.update(0.5, 1.0, distribution)  # below loc: still raises

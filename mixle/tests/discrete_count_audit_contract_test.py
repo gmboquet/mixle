@@ -30,6 +30,14 @@ from mixle.stats.univariate.discrete.integer_uniform_spike import IntegerUniform
 
 class BetaBinomialEvidenceContractTest(unittest.TestCase):
     def test_encoder_and_accumulator_reject_counts_outside_fixed_support(self):
+        """Nothing outside the support is FIT; a count outside it is still SCORED.
+
+        Being an exact integer is a type contract, so a fractional or infinite value is refused at
+        encode time. Being inside ``{0, ..., n}`` is a probability question: the encoder admits such a
+        count and the scorer answers -inf, as the scalar path does, so a mixture whose other component
+        owns it can encode the batch (P02-F03, Q01-F02). Either kind carrying weight is refused by
+        the accumulator.
+        """
         distribution = BetaBinomialDistribution(2, 1.5, 2.5)
         encoder = distribution.dist_to_encoder()
         accumulator = distribution.estimator().accumulator_factory().make()
@@ -37,11 +45,17 @@ class BetaBinomialEvidenceContractTest(unittest.TestCase):
 
         for invalid in (-1, 1.5, 3, np.inf):
             with self.subTest(invalid=repr(invalid)), self.assertRaises(ValueError):
-                encoder.seq_encode([invalid])
-            with self.subTest(invalid=repr(invalid)), self.assertRaises(ValueError):
                 accumulator.update(invalid, 1.0, distribution)
             with self.subTest(invalid=repr(invalid)), self.assertRaises(ValueError):
                 accumulator.seq_update(np.asarray([invalid]), np.ones(1), distribution)
+        for not_a_count in (1.5, np.inf):
+            with self.subTest(invalid=repr(not_a_count)), self.assertRaises(ValueError):
+                encoder.seq_encode([not_a_count])
+        for outside in (-1, 3):
+            with self.subTest(outside=outside):
+                scored = distribution.seq_log_density(encoder.seq_encode([outside]))
+                self.assertEqual(float(scored[0]), float("-inf"))
+                self.assertEqual(distribution.log_density(outside), float("-inf"))
 
     def test_encoder_identity_includes_trial_count(self):
         self.assertNotEqual(

@@ -566,6 +566,177 @@ class SupportLimitedComponentsCanBeMixedTest(unittest.TestCase):
         self.assertEqual(asymmetric, [], "these refuse rows they never declare unsupported")
 
 
+class EverySupportLimitedFamilyCanBeMixedTest(unittest.TestCase):
+    """Q01-F02 / Q02-F02, the rest of the list: the first repair reached the families in its own examples.
+
+    It made Pareto admit non-positive rows and gave Poisson, Geometric and LogSeries a
+    ``supported_rows``. The finding named more: GeneralizedPareto, Nakagami, Rician and Tweedie still
+    refused an out-of-support row at encode time, and so did NegativeBinomial, BetaBinomial and
+    Bernoulli, so ``Mixture[Gaussian, Nakagami]`` or ``Mixture[IntegerCategorical, NegativeBinomial]``
+    could not be encoded on data the other component owns. Binomial encoded such rows but declared no
+    ``supported_rows``, so initialization handed it rows its bounds exclude.
+
+    Every family is held to the same contract, table-driven so that a family cannot be skipped by
+    being left out of an example: the encoder admits an out-of-support value of the family's type and
+    the scorer returns the -inf the scalar path returns; the accumulator declares the rows it can be
+    fitted on, refuses such a row that carries weight, and folds nothing from one with zero weight;
+    and a mixture with a sibling that owns those rows fits.
+
+    For a count law the TYPE is the integers. A fractional or infinite value is not an observation of
+    the family at all and stays refused at encode time -- the rule the Binomial encoder already
+    documents -- while a negative count, or one above ``n``, is a probability question answered -inf.
+    """
+
+    CONTINUOUS = (
+        ("GeneralizedPareto", "GeneralizedParetoDistribution", (1.0, 0.2), "GeneralizedParetoEstimator", (), -1.0),
+        ("Nakagami", "NakagamiDistribution", (1.5, 2.0), "NakagamiEstimator", (), -1.0),
+        ("Rician", "RicianDistribution", (1.0, 1.0), "RicianEstimator", (), -1.0),
+        ("Tweedie", "TweedieDistribution", (1.0, 1.0, 1.5), "TweedieEstimator", (), -1.0),
+        ("Pareto", "ParetoDistribution", (2.0, 1.0), "ParetoEstimator", (), -1.0),
+    )
+    COUNT = (
+        ("Poisson", "PoissonDistribution", (2.0,), "PoissonEstimator", (), -1),
+        ("Geometric", "GeometricDistribution", (0.3,), "GeometricEstimator", (), 0),
+        ("LogSeries", "LogSeriesDistribution", (0.5,), "LogSeriesEstimator", (), 0),
+        ("NegativeBinomial", "NegativeBinomialDistribution", (3.0, 0.4), "NegativeBinomialEstimator", (), -1),
+        ("BetaBinomial", "BetaBinomialDistribution", (10, 2.0, 3.0), "BetaBinomialEstimator", (10,), 11),
+        ("Bernoulli", "BernoulliDistribution", (0.3,), "BernoulliEstimator", (), 2),
+        ("Binomial", "BinomialDistribution", (0.3, 10), "BinomialEstimator", (), 11),
+    )
+
+    @staticmethod
+    def _build(dist_name, dist_args, est_name, est_args):
+        from mixle import stats
+
+        estimator = getattr(stats, est_name)(*est_args)
+        if est_name == "BinomialEstimator":
+            estimator = stats.BinomialEstimator(max_val=10)
+        return getattr(stats, dist_name)(*dist_args), estimator
+
+    def _in_support(self, dist, n=60):
+        draws = list(dist.sampler(seed=3).sample(n))
+        # A Bernoulli sampler draws booleans; the integer-categorical sibling is typed on integers.
+        return [int(v) for v in draws] if isinstance(draws[0], (bool, np.bool_)) else draws
+
+    @staticmethod
+    def _numbers(value):
+        """The numeric leaves of an accumulator value, in order (dict entries by key)."""
+        if isinstance(value, dict):
+            return [
+                leaf
+                for key in sorted(value)
+                for leaf in (float(key), *EverySupportLimitedFamilyCanBeMixedTest._numbers(value[key]))
+            ]
+        if isinstance(value, (tuple, list, np.ndarray)):
+            return [leaf for item in value for leaf in EverySupportLimitedFamilyCanBeMixedTest._numbers(item)]
+        return [] if value is None else [float(value)]
+
+    def test_the_encoder_admits_and_the_scorer_agrees_with_the_scalar_path(self):
+        for label, dist_name, dist_args, est_name, est_args, outside in self.CONTINUOUS + self.COUNT:
+            with self.subTest(family=label):
+                dist, _ = self._build(dist_name, dist_args, est_name, est_args)
+                scored = np.asarray(dist.seq_log_density(dist.dist_to_encoder().seq_encode([outside])))
+                self.assertEqual(float(scored[0]), float("-inf"))
+                self.assertEqual(float(dist.log_density(outside)), float("-inf"))
+
+    def test_the_accumulator_declares_refuses_and_exempts_the_same_rows(self):
+        for label, dist_name, dist_args, est_name, est_args, outside in self.CONTINUOUS + self.COUNT:
+            with self.subTest(family=label):
+                dist, estimator = self._build(dist_name, dist_args, est_name, est_args)
+                clean = self._in_support(dist)
+                with_outside = estimator.accumulator_factory().make()
+                encoded = with_outside.acc_to_encoder().seq_encode(clean + [outside])
+                mask = np.asarray(with_outside.supported_rows(encoded), dtype=bool)
+                self.assertTrue(mask[:-1].all() and not mask[-1], f"supported_rows: {mask[-3:]}")
+                with_outside.seq_update(encoded, np.array([1.0] * len(clean) + [0.0]), None)
+                reference = estimator.accumulator_factory().make()
+                reference.seq_update(reference.acc_to_encoder().seq_encode(clean), np.ones(len(clean)), None)
+                # Equal to the last few ulps only: one more (zero-weight) row changes np.dot's pairing.
+                np.testing.assert_allclose(
+                    self._numbers(with_outside.value()), self._numbers(reference.value()), rtol=1e-12, atol=0.0
+                )
+                refusing = estimator.accumulator_factory().make()
+                with self.assertRaises(ValueError):
+                    refusing.seq_update(encoded, np.ones(len(clean) + 1), None)
+
+    def test_a_mixture_with_a_sibling_that_owns_the_rows_fits(self):
+        from mixle.inference import optimize
+        from mixle.stats import GaussianEstimator, IntegerCategoricalEstimator, MixtureEstimator
+
+        rng = np.random.RandomState(4)
+        for label, dist_name, dist_args, est_name, est_args, _ in self.CONTINUOUS + self.COUNT:
+            with self.subTest(family=label):
+                dist, estimator = self._build(dist_name, dist_args, est_name, est_args)
+                if (label, dist_name) in {(row[0], row[1]) for row in self.CONTINUOUS}:
+                    sibling, owned = GaussianEstimator(), list(rng.normal(-3.0, 0.5, 60))
+                else:
+                    sibling, owned = IntegerCategoricalEstimator(), [int(v) for v in rng.randint(-6, -1, 60)]
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    fitted = optimize(
+                        owned + self._in_support(dist, 90),
+                        MixtureEstimator([sibling, estimator]),
+                        max_its=6,
+                        rng=np.random.RandomState(1),
+                        out=None,
+                    )
+                self.assertTrue(np.all(np.isfinite(fitted.w)) and fitted.w[1] > 0.2, f"weights {fitted.w}")
+
+    def test_a_hidden_markov_model_with_a_gaussian_state_fits_integer_sequences(self):
+        """Q02-F02's own shape: a Gaussian and a count state over integer-valued sequences."""
+        from mixle.inference import optimize
+        from mixle.stats import (
+            GaussianEstimator,
+            HiddenMarkovModelEstimator,
+            NegativeBinomialEstimator,
+            PoissonEstimator,
+        )
+
+        rng = np.random.RandomState(5)
+        sequences = [list(np.round(rng.normal(-5, 1, 5))) + list(rng.poisson(6, 5).astype(float)) for _ in range(20)]
+        for label, count_state in (("Poisson", PoissonEstimator()), ("NegativeBinomial", NegativeBinomialEstimator())):
+            with self.subTest(family=label):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    fitted = optimize(
+                        sequences,
+                        HiddenMarkovModelEstimator([GaussianEstimator(), count_state]),
+                        max_its=5,
+                        rng=np.random.RandomState(1),
+                        out=None,
+                    )
+                self.assertEqual(type(fitted).__name__, "HiddenMarkovModelDistribution")
+
+    def test_a_non_integer_is_still_not_a_count(self):
+        """The type contract survives: a fractional or infinite value is refused by the count encoders."""
+        for label, dist_name, dist_args, est_name, est_args, _ in self.COUNT:
+            for bad in (2.5, float("inf"), float("nan")):
+                with self.subTest(family=label, value=bad):
+                    dist, _ = self._build(dist_name, dist_args, est_name, est_args)
+                    with self.assertRaises(ValueError):
+                        dist.dist_to_encoder().seq_encode([1, bad])
+
+    def test_a_row_no_component_supports_is_named_rather_than_blamed_on_em(self):
+        """Admitting out-of-support rows moved their refusal from encode time into EM; the cause must follow."""
+        from mixle.inference import optimize
+        from mixle.stats import MixtureEstimator, NegativeBinomialEstimator
+
+        rows = [-2] + [int(v) for v in np.random.RandomState(0).negative_binomial(3, 0.4, 100)]
+        with self.assertRaises(ValueError) as caught:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                optimize(
+                    rows,
+                    MixtureEstimator([NegativeBinomialEstimator()] * 2),
+                    max_its=4,
+                    rng=np.random.RandomState(1),
+                    out=None,
+                )
+        message = str(caught.exception)
+        self.assertIn("1 of the 101 observation(s) score -inf", message)
+        self.assertIn("outside the support of every component", message)
+
+
 class EnsembleBurnInPaysForItsInitializationTest(unittest.TestCase):
     """Q04-F11: ``how='ensemble'`` returned a wrong posterior at its default budget, silently.
 

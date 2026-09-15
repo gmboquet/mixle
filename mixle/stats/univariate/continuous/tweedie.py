@@ -33,13 +33,24 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.stats.univariate.continuous._observation_contracts import masked_chunk_second_moment
+from mixle.stats.univariate.continuous._observation_contracts import (
+    masked_chunk_second_moment,
+    refuse_unsupported_observations,
+)
 from mixle.utils.vector import gammaln
 
 _MIN_TWEEDIE = 1.0e-12
 _DEFAULT_MAX_SERIES_TERMS = 100_000
 _DEFAULT_MAX_SERIES_WORK = 10_000_000
 _DEFAULT_SERIES_TOLERANCE = 50.0
+
+
+_TWEEDIE_SUPPORT_MESSAGE = (
+    "TweedieDistribution has support x >= 0, but at least %d observation(s) carrying weight are "
+    "negative (estimation encodes in chunks; the first offending chunk refuses). The encoder admits "
+    "them so a mixture can score one batch against every component; they cannot contribute to this "
+    "component's sufficient statistics."
+)
 
 
 class TweedieSeriesResourceError(RuntimeError):
@@ -387,8 +398,26 @@ class TweedieAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize the sufficient statistics with one weighted observation."""
         self.update(x, weight, None)
 
+    def supported_rows(self, x: Any) -> np.ndarray:
+        """Encoded rows this law can be fitted on: finite and non-negative.
+
+        The encoder admits a negative observation so a mixture can encode one batch against every
+        component (P02-F03); this is the predicate that keeps it out of the moments and the one a
+        latent model's initialization consults before handing this component any responsibility.
+        """
+        values = np.asarray(x, dtype=np.float64)
+        return np.isfinite(values) & (values >= 0.0)
+
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: TweedieDistribution | None) -> None:
-        """Accumulate weighted count, sum, and second moment from encoded observations."""
+        """Accumulate weighted count, sum, and second moment from encoded observations.
+
+        The encoder admits negative rows for scoring, so this is where they are refused -- the moment
+        sums below would otherwise take a negative value as silently as a positive one.
+        """
+        supported = self.supported_rows(x)
+        refuse_unsupported_observations(supported, weights, message=_TWEEDIE_SUPPORT_MESSAGE)
+        if not np.all(supported):
+            x = np.where(supported, x, 0.0)
         chunk_count, chunk_sum, chunk_sum2 = masked_chunk_second_moment(x, weights)
         self.count += chunk_count
         self.sum += chunk_sum
@@ -494,8 +523,15 @@ class TweedieDataEncoder(DataSequenceEncoder):
         return isinstance(other, TweedieDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
-        """Validate and encode observations as a non-negative float array."""
+        """Validate and encode observations as a float array, admitting negative finite rows.
+
+        A negative value is scored -inf by :meth:`TweedieDistribution.seq_log_density`, exactly as
+        the scalar path scores it, so a mixture whose other component owns it can encode the whole
+        batch (P02-F03). Refusing it here made ``Mixture[Gaussian, Tweedie]`` unencodable (Q01-F02);
+        the accumulator still refuses a negative row that carries weight. Non-finite values stay
+        refused.
+        """
         rv = np.asarray(x, dtype=np.float64)
-        if rv.size and (np.any(np.isnan(rv)) or np.any(np.isinf(rv)) or np.any(rv < 0.0)):
-            raise ValueError("TweedieDistribution requires finite non-negative observations.")
+        if rv.size and (np.any(np.isnan(rv)) or np.any(np.isinf(rv))):
+            raise ValueError("TweedieDistribution requires finite observations.")
         return rv

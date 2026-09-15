@@ -28,6 +28,7 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
+from mixle.stats.univariate.continuous._observation_contracts import refuse_unsupported_observations
 from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations, nonnegative_weights
 
 
@@ -242,15 +243,37 @@ class BetaBinomialAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize statistics from one count."""
         self.update(x, weight, None)
 
+    def supported_rows(self, x) -> np.ndarray:
+        """Encoded rows this law can be fitted on: counts in ``{0, ..., n}``.
+
+        The encoder admits a count outside that range so a mixture can encode one batch against every
+        component (P02-F03); this is the predicate that keeps it out of the moments and the one a
+        latent model's initialization consults before handing this component any responsibility
+        (Q01-F02).
+        """
+        values = np.asarray(x)
+        return (values >= 0) & (values <= self.n)
+
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: BetaBinomialDistribution | None) -> None:
-        """Accumulate weighted moments from encoded counts."""
-        xx = exact_integer_observations(
-            x,
-            label="Beta-binomial observations",
-            minimum=0,
-            maximum=self.n,
-        ).astype(np.float64)
-        ww = nonnegative_weights(weights, shape=xx.shape)
+        """Accumulate weighted moments from encoded counts.
+
+        A count outside ``{0, ..., n}`` carrying weight is refused; with zero weight it contributes
+        nothing.
+        """
+        values = exact_integer_observations(x, label="Beta-binomial observations")
+        ww = nonnegative_weights(weights, shape=values.shape)
+        supported = self.supported_rows(values)
+        refuse_unsupported_observations(
+            supported,
+            ww,
+            message=(
+                "BetaBinomialDistribution has support x in {0, ..., %d}, but at least %%d observation(s) "
+                "carrying weight lie outside it (estimation encodes in chunks; the first offending chunk "
+                "refuses). The encoder admits them so a mixture can score one batch against every "
+                "component; they cannot contribute to this component's sufficient statistics." % self.n
+            ),
+        )
+        xx = np.where(supported, values, 0).astype(np.float64)
         self.sum += float(np.dot(xx, ww))
         self.sum2 += float(np.dot(xx * xx, ww))
         self.count += float(np.sum(ww))
@@ -362,10 +385,10 @@ class BetaBinomialDataEncoder(DataSequenceEncoder):
         return isinstance(other, BetaBinomialDataEncoder) and self.n == other.n
 
     def seq_encode(self, x: Sequence[int]) -> np.ndarray:
-        """Encode exact counts in the fixed support ``{0, ..., n}``."""
-        return exact_integer_observations(
-            x,
-            label="Beta-binomial observations",
-            minimum=0,
-            maximum=self.n,
-        )
+        """Encode exact counts, admitting counts outside the support ``{0, ..., n}``.
+
+        Being an exact integer is a type contract and stays enforced; being inside ``{0, ..., n}``
+        is a probability question the scorer answers -inf, so a mixture whose other component owns
+        such a count can encode the whole batch (P02-F03, Q01-F02).
+        """
+        return exact_integer_observations(x, label="Beta-binomial observations")

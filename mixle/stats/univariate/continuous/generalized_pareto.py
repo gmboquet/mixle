@@ -41,6 +41,7 @@ from mixle.stats.univariate.continuous._observation_contracts import (
     finite_observation,
     finite_observations,
     needs_anchor,
+    refuse_unsupported_observations,
     scored_observation,
     warn_uncorrectable_raw_moments,
 )
@@ -320,22 +321,12 @@ def _gpd_max_unverified(suff_stat: Any) -> bool:
     return bool(getattr(suff_stat, "max_unverified", False))
 
 
-def _gpd_observations(
-    value: Any,
-    *,
-    loc: float,
-    scale: float | None = None,
-    shape: float | None = None,
-) -> np.ndarray:
-    upper = None
-    if shape is not None and scale is not None and shape < -_XI_TOL:
-        upper = loc - scale / shape
-    return finite_observations(
-        value,
-        label="generalized-Pareto observations",
-        minimum=loc,
-        maximum=upper,
-    )
+_GPD_SUPPORT_MESSAGE = (
+    "GeneralizedParetoDistribution has support x >= loc, but at least %d observation(s) carrying weight "
+    "are below the threshold (estimation encodes in chunks; the first offending chunk refuses). The "
+    "encoder admits them so a mixture can score one batch against every component; they cannot "
+    "contribute to this component's sufficient statistics."
+)
 
 
 class GeneralizedParetoDistribution(SequenceEncodableProbabilityDistribution):
@@ -674,7 +665,14 @@ class GeneralizedParetoAccumulator(AnchoredMomentTrack, SequenceEncodableStatist
         # the data's own max for a shape<0 method-of-moments fit (T1-01). Only the fixed threshold
         # `loc` is a real invariant of the data across iterations.
         loc = estimate.loc if estimate is not None else self.loc
-        xx = _gpd_observations(x, loc=loc)
+        xx = finite_observations(x, label="generalized-Pareto observations")
+        # Rows below the threshold are admitted by the encoder for scoring (P02-F03, Q01-F02). With
+        # weight they are refused; with zero weight they contribute nothing, and are moved onto the
+        # threshold first so their magnitude cannot enter the anchored moments or the tracked max.
+        supported = xx >= loc
+        refuse_unsupported_observations(supported, weights, message=_GPD_SUPPORT_MESSAGE)
+        if not np.all(supported):
+            xx = np.where(supported, xx, loc)
         positive = weights > 0.0
         if xx.size and np.any(positive):
             self._max_x = max(self._max_x, float(np.max(xx[positive])))
@@ -683,6 +681,16 @@ class GeneralizedParetoAccumulator(AnchoredMomentTrack, SequenceEncodableStatist
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
         """Initialize statistics from encoded observations."""
         self.seq_update(x, weights, None)
+
+    def supported_rows(self, x: Any) -> np.ndarray:
+        """Encoded rows this law can be fitted on: finite and at or above the threshold ``loc``.
+
+        The encoder admits rows below the threshold so a mixture can encode one batch against every
+        component; this is the predicate a latent model's initialization consults before handing this
+        component any responsibility (Q01-F02).
+        """
+        values = np.asarray(x, dtype=np.float64)
+        return np.isfinite(values) & (values >= self.loc)
 
     def combine(self, suff_stat: tuple[float, float, float]) -> "GeneralizedParetoAccumulator":
         """Merge another generalized-Pareto sufficient-statistic tuple."""
@@ -1167,10 +1175,12 @@ class GeneralizedParetoDataEncoder(DataSequenceEncoder):
         )
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
-        """Encode observations as a floating-point array."""
-        return _gpd_observations(
-            x,
-            loc=self.loc,
-            scale=self.scale,
-            shape=self.shape,
-        )
+        """Encode observations as a floating-point array, admitting finite rows outside the support.
+
+        A row below the threshold -- or, for a negative shape, above the upper endpoint -- is scored
+        -inf by :meth:`GeneralizedParetoDistribution.seq_log_density`, exactly as the scalar path
+        scores it, so a mixture whose other component owns it can encode the whole batch (P02-F03).
+        Refusing it here made ``Mixture[Gaussian, GeneralizedPareto]`` unencodable (Q01-F02).
+        Non-finite values stay refused.
+        """
+        return finite_observations(x, label="generalized-Pareto observations")

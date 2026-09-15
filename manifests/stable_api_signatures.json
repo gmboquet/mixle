@@ -10923,6 +10923,30 @@
         "return_annotation": "None"
       }
     },
+    "mixle.stats.univariate.discrete.geometric.GeometricAccumulator.supported_rows": {
+      "kind": "class-method",
+      "signature": {
+        "parameters": [
+          {
+            "annotation": null,
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "self"
+          },
+          {
+            "annotation": null,
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "x"
+          }
+        ],
+        "return_annotation": "'np.ndarray'"
+      }
+    },
     "mixle.stats.univariate.discrete.geometric.GeometricAccumulator.update": {
       "kind": "class-method",
       "signature": {
@@ -12228,6 +12252,30 @@
           }
         ],
         "return_annotation": "None"
+      }
+    },
+    "mixle.stats.univariate.discrete.poisson.PoissonAccumulator.supported_rows": {
+      "kind": "class-method",
+      "signature": {
+        "parameters": [
+          {
+            "annotation": null,
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "self"
+          },
+          {
+            "annotation": null,
+            "default": {
+              "present": false
+            },
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "name": "x"
+          }
+        ],
+        "return_annotation": "'np.ndarray'"
       }
     },
     "mixle.stats.univariate.discrete.poisson.PoissonAccumulator.update": {

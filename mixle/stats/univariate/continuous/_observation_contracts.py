@@ -705,6 +705,18 @@ class SquaredPowerSumTrack(AnchoredMomentTrack):
         """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
+    def supported_rows(self, x: Any) -> np.ndarray:
+        """Encoded rows this law can be fitted on: finite and non-negative.
+
+        The encoder admits a negative observation so a mixture can encode one batch against every
+        component (P02-F03); this is the predicate that keeps such rows out of the power sums, and
+        the one a latent model's initialization consults before handing this component any
+        responsibility. Both families refused negatives at encode time, so a Gaussian-plus-Nakagami
+        (or -Rician) mixture could not be encoded at all on data the Gaussian owns (Q01-F02).
+        """
+        values = np.asarray(x, dtype=np.float64)
+        return np.isfinite(values) & (values >= 0.0)
+
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: Any) -> None:
         """Accumulate weighted second and fourth power sums from encoded data.
 
@@ -712,9 +724,26 @@ class SquaredPowerSumTrack(AnchoredMomentTrack):
         had to anchor, with ``y = x**2`` in place of ``x``. The conditioning gate is assessed on
         ``y``'s own moments, so ordinary data never activates the track and the raw fold below stays
         bit-identical to the historical single-pass path.
+
+        A negative row reaches this point only because the encoder admits it for scoring. Carrying
+        weight it is refused; with zero weight -- a row EM gave another component -- it contributes
+        nothing, and is zeroed before squaring so its magnitude cannot enter the anchor's moments.
         """
-        x_raw = finite_observations(x, label="%s observations" % self._OBSERVATION_LABEL, minimum=0.0)
+        x_raw = finite_observations(x, label="%s observations" % self._OBSERVATION_LABEL)
         w = np.asarray(weights, dtype=np.float64)
+        supported = x_raw >= 0.0
+        refuse_unsupported_observations(
+            supported,
+            w,
+            message=(
+                "%sDistribution has support x >= 0, but at least %%d observation(s) carrying weight are "
+                "negative (estimation encodes in chunks; the first offending chunk refuses). The encoder "
+                "admits them so a mixture can score one batch against every component; they cannot "
+                "contribute to this component's sufficient statistics." % self._OBSERVATION_LABEL
+            ),
+        )
+        if not np.all(supported):
+            x_raw = np.where(supported, x_raw, 0.0)
         x2 = x_raw * x_raw
         x4 = x2 * x2
         sum_wx2 = np.dot(w, x2)

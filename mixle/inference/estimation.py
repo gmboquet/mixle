@@ -200,6 +200,17 @@ def _non_finite_objective_error(enc_data: Any, model: Any, *, route: str) -> Val
                 " the family you asked for -- an exponential or gamma fit of a column holding"
                 " negative values reaches here, and so does a beta fit outside [0, 1]." % scored
             )
+        elif scored and finite < scored:
+            # The encoders admit out-of-support rows so that a mixture can score one batch against
+            # every component (P02-F03); a row that NO component supports then scores -inf under the
+            # whole model and takes the objective with it. That used to be an encode-time refusal
+            # naming the family, so the message has to carry the cause instead (Q01-F02).
+            detail = (
+                " %d of the %d observation(s) score -inf under it, which almost always means those rows"
+                " lie outside the support of every component (a negative value for an exponential, gamma"
+                " or count law, a count above n for a binomial). Drop or correct those rows, or add a"
+                " component whose support covers them." % (scored - finite, scored)
+            )
     except Exception:  # noqa: BLE001 - the diagnosis is a courtesy; the failure below is the answer
         detail = ""
     return ValueError("%s did not produce a finite objective from its non-finite initial model.%s" % (route, detail))

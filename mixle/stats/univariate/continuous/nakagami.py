@@ -367,5 +367,11 @@ class NakagamiDataEncoder(DataSequenceEncoder):
         return isinstance(other, NakagamiDataEncoder)
 
     def seq_encode(self, x: Sequence[float]) -> np.ndarray:
-        """Encode observations as a floating-point array."""
-        return finite_observations(x, label="Nakagami observations", minimum=0.0)
+        """Encode observations as a floating-point array, admitting finite rows outside the support.
+
+        A negative value is scored -inf by :meth:`NakagamiDistribution.seq_log_density` (and by the
+        scalar path), so a mixture whose other component owns it can encode the whole batch
+        (P02-F03). Refusing it here made ``Mixture[Gaussian, Nakagami]`` unencodable (Q01-F02). The
+        accumulator still refuses a negative row that carries weight. Non-finite values stay refused.
+        """
+        return finite_observations(x, label="Nakagami observations")

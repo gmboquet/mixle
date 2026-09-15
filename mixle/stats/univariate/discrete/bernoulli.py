@@ -23,8 +23,12 @@ from mixle.stats.compute.pdist import (
     SequenceEncodableStatisticAccumulator,
     StatisticAccumulatorFactory,
 )
-from mixle.stats.univariate.continuous._observation_contracts import validated_quantile_probability
+from mixle.stats.univariate.continuous._observation_contracts import (
+    refuse_unsupported_observations,
+    validated_quantile_probability,
+)
 from mixle.stats.univariate.continuous.beta import BetaDistribution
+from mixle.stats.univariate.discrete._count_contracts import exact_integer_observations
 from mixle.utils.special import digamma
 
 
@@ -56,6 +60,14 @@ def _record_boundary_clamp(dist: "BernoulliDistribution", unclamped: float, clam
     edge = "1 - 1e-12" if clamped > 0.5 else "1e-12"
     dist._numerical_repairs = ("bernoulli-p-clamped(%.3g -> %s)" % (unclamped, edge),)
     return dist
+
+
+_BERNOULLI_SUPPORT_MESSAGE = (
+    "BernoulliDistribution has support {0, 1}, but at least %d observation(s) carrying weight lie "
+    "outside it (estimation encodes in chunks; the first offending chunk refuses). The encoder admits "
+    "them so a mixture can score one batch against every component; they cannot contribute to this "
+    "component's sufficient statistics."
+)
 
 
 class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
@@ -220,13 +232,22 @@ class BernoulliDistribution(SequenceEncodableProbabilityDistribution):
         return self.log_p if xx else self.log_1p
 
     def seq_log_density(self, x: np.ndarray) -> np.ndarray:
-        """Return vectorized log-density values for sequence-encoded observations."""
-        return np.where(x, self.log_p, self.log_1p)
+        """Return vectorized log-density values for sequence-encoded observations.
+
+        A boolean encoding holds only valid outcomes. An integer encoding is what the encoder emits
+        when the batch also holds a count outside ``{0, 1}``, which this law gives probability zero:
+        it scores -inf, as the scalar path does (P02-F03, Q01-F02).
+        """
+        xx = np.asarray(x)
+        if xx.dtype == bool:
+            return np.where(xx, self.log_p, self.log_1p)
+        return np.where((xx == 0) | (xx == 1), np.where(xx == 1, self.log_p, self.log_1p), -np.inf)
 
     @staticmethod
     def backend_log_density_from_params(x: Any, p: Any, engine: Any) -> Any:
-        """Engine-neutral Bernoulli log-mass from explicit parameters."""
-        return engine.where(x >= 0.5, engine.log(p), engine.log(engine.asarray(1.0) - p))
+        """Engine-neutral Bernoulli log-mass from explicit parameters (``-inf`` outside ``{0, 1}``)."""
+        rv = engine.where(x >= 0.5, engine.log(p), engine.log(engine.asarray(1.0) - p))
+        return engine.where((x == 0) | (x == 1), rv, engine.asarray(-np.inf))
 
     def backend_seq_log_density(self, x: Any, engine: Any) -> Any:
         """Engine-neutral vectorized log-density for encoded data."""
@@ -385,9 +406,32 @@ class BernoulliAccumulator(SequenceEncodableStatisticAccumulator):
         """Initialize statistics from one observation."""
         self.update(x, weight, None)
 
+    def supported_rows(self, x: np.ndarray) -> np.ndarray:
+        """Encoded rows this law can be fitted on: outcomes in ``{0, 1}``.
+
+        The encoder admits an integer outside ``{0, 1}`` so a mixture can encode one batch against
+        every component (P02-F03); this is the predicate a latent model's initialization consults
+        before handing this component any responsibility. The encoder used to refuse such a count,
+        so an integer-categorical-plus-Bernoulli mixture could not be encoded at all (Q01-F02).
+        """
+        xx = np.asarray(x)
+        if xx.dtype == bool:
+            return np.ones(xx.shape, dtype=bool)
+        return (xx == 0) | (xx == 1)
+
     def seq_update(self, x: np.ndarray, weights: np.ndarray, estimate: BernoulliDistribution | None) -> None:
-        """Accumulate weighted statistics from encoded observations."""
-        self.sum += np.dot(x.astype(np.float64), weights)
+        """Accumulate weighted statistics from encoded observations.
+
+        A count outside ``{0, 1}`` carrying weight is refused; with zero weight it contributes nothing.
+        Before the encoder admitted such counts this summed the raw value, which never mattered
+        because none could arrive.
+        """
+        xx = np.asarray(x)
+        if xx.dtype != bool:
+            supported = self.supported_rows(xx)
+            refuse_unsupported_observations(supported, np.asarray(weights), message=_BERNOULLI_SUPPORT_MESSAGE)
+            xx = np.where(supported, xx, 0)
+        self.sum += np.dot(xx.astype(np.float64), weights)
         self.count += np.sum(weights, dtype=np.float64)
 
     def seq_initialize(self, x: np.ndarray, weights: np.ndarray, rng: RandomState | None) -> None:
@@ -508,9 +552,18 @@ class BernoulliDataEncoder(DataSequenceEncoder):
         return isinstance(other, BernoulliDataEncoder)
 
     def seq_encode(self, x: Sequence[bool | int]) -> np.ndarray:
-        """Encode Bernoulli observations as a boolean array."""
+        """Encode Bernoulli observations as a boolean array, or as integers when a count lies off ``{0, 1}``.
+
+        An integer outside ``{0, 1}`` is an outcome this law gives probability zero -- a probability
+        question the scorer answers -inf -- so it is admitted, and a mixture whose other component
+        owns it can encode the whole batch (P02-F03, Q01-F02). Such a batch keeps its integers, since
+        a boolean cast would turn ``2`` into a success. Anything that is not an integer stays refused.
+        """
         rv = np.asarray(x)
         valid = (rv == 0) | (rv == 1)
-        if not np.all(valid):
-            raise ValueError("BernoulliDistribution requires observations in {False, True} or {0, 1}.")
-        return rv.astype(bool)
+        if np.all(valid):
+            return rv.astype(bool)
+        try:
+            return exact_integer_observations(rv, label="Bernoulli observations")
+        except ValueError:
+            raise ValueError("BernoulliDistribution requires observations in {False, True} or {0, 1}.") from None

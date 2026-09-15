@@ -802,6 +802,25 @@ class BinomialAccumulator(SequenceEncodableStatisticAccumulator):
         """
         self.update(x, weight, None)
 
+    def supported_rows(self, x: E) -> np.ndarray:
+        """Encoded rows this accumulator can be fitted on: counts inside its DECLARED bounds.
+
+        The encoder admits counts outside ``[min_val, max_val]`` so a mixture can encode one batch
+        against every component, and ``seq_update`` refuses such a count only when it carries weight.
+        Initialization draws responsibilities before any model exists, so without this predicate a
+        mixture handed this component a share of the rows its bounds exclude and the refusal blamed
+        the data -- an integer-categorical-plus-binomial fit failed with "observations with positive
+        weight must be at most 10" (Q01-F02). The bounds are the declared ones, never the observed
+        running range, for the reason ``__init__`` records.
+        """
+        values = np.asarray(x[2])
+        supported = np.ones(values.shape, dtype=bool)
+        if self._declared_min is not None:
+            supported &= values >= self._declared_min
+        if self._declared_max is not None:
+            supported &= values <= self._declared_max
+        return supported
+
     def seq_update(self, x: E, weights: np.ndarray, estimate: Optional["BinomialDistribution"]) -> None:
         """Accumulates Binomial sufficient statistics for encoded sequence.
 
