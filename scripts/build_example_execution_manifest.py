@@ -11,6 +11,20 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# ``0.8.2rc1`` -> ``0.8.2``: the release a pre-release rehearses. D-0216 cuts the publication
+# rehearsal from the release tree with only the version string changed, so the candidate record it
+# produces says ``0.8.2rc1`` where the bundle says ``0.8.2``; comparing the two literally left every
+# receipt of that rehearsal unbound. ``scripts/check_release_document_state.base_release`` is the
+# same rule for the release documents, and ``release_tooling_version_rule_test`` pins them together.
+_PRE_RELEASE_SUFFIX = re.compile(r"(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?$")
+
+
+def base_release(version: object) -> object:
+    if not isinstance(version, str):
+        return version
+    return _PRE_RELEASE_SUFFIX.sub("", version, count=1)
+
+
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BUNDLE = ROOT / "release-checklists" / "0.8.2-repro-bundle.json"
 
@@ -76,7 +90,7 @@ def build_manifest(
     commit = candidate.get("commit")
     if not isinstance(commit, str) or len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
         raise ValueError("candidate commit must be a full lowercase Git SHA")
-    if candidate.get("version") != bundle.get("release"):
+    if base_release(candidate.get("version")) != bundle.get("release"):
         raise ValueError("candidate version does not match the example bundle")
 
     # The manifest is the publication's statement that its receipts were bound to APPROVED checks.

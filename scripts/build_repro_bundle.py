@@ -225,7 +225,9 @@ def build() -> dict:
                 CHECK_EVIDENCE_ATTESTATION["bundle_record"],
                 CHECK_EVIDENCE_ATTESTATION["check_runs_record"],
                 "metadata/SHA256SUMS",
-                "metadata/mixle-0.8.2-py3-none-any.whl.json",
+                # named for the candidate's own version, which is not the release's on a
+                # rehearsal pre-release (D-0216); the resolver globs these patterns.
+                "metadata/mixle-*-py3-none-any.whl.json",
                 "metadata/reproduction-*.json",
             ],
             "required_checks": _required_check_names(),

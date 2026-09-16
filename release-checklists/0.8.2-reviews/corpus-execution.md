@@ -4,7 +4,7 @@
 - **Artifact under test:** `mixle-0.8.2-py3-none-any.whl` built with the pinned build closure from
   `release/0.8.2` at `f72a933c` (sha256 `a105b1c0…`). Its embedded source content digest is
   `84c1cd26…`, computed over `pyproject.toml`, `setup.py` and every `mixle/**/*.{json,py,pyx}`;
-  the commits that follow it change release records, and the rehearsal pre-release `v0.8.2rc1` also
+  the commits that follow it change release records, and the rehearsal pre-release also
   changes the version string (D-0216); the final candidate's wheel carries this same digest. Installed into a venv with the optional extras the corpus uses
   (numba, torch, pyspark on Java 17, and the sibling `mixle-pde`, `mixle-sim` and `mixle-physics`
   packages the physics notebooks import). Every run was launched from `/tmp` with `PYTHONPATH` unset,

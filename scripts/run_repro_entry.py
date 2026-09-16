@@ -15,6 +15,21 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+# ``0.8.2rc1`` -> ``0.8.2``: the release a pre-release rehearses. D-0216 cuts the publication
+# rehearsal from the release tree with only the version string changed, so the candidate record it
+# produces says ``0.8.2rc1`` where the bundle says ``0.8.2``; comparing the two literally left every
+# receipt of that rehearsal unbound. ``scripts/check_release_document_state.base_release`` is the
+# same rule for the release documents, and ``release_tooling_version_rule_test`` pins them together.
+_PRE_RELEASE_SUFFIX = re.compile(r"(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?$")
+
+
+def base_release(declared: object) -> object:
+    # ``declared``, not ``version``: this module imports importlib.metadata.version.
+    if not isinstance(declared, str):
+        return declared
+    return _PRE_RELEASE_SUFFIX.sub("", declared, count=1)
+
+
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BUNDLE = ROOT / "release-checklists" / "0.8.2-repro-bundle.json"
 
@@ -681,7 +696,7 @@ def _resolve_candidate_records(
             if not isinstance(candidate_commit, str) or len(candidate_commit) != 40:
                 problems.append("release-candidate.json has no full-length commit")
                 candidate_commit = None
-            elif record.get("version") != bundle.get("release"):
+            elif base_release(record.get("version")) != bundle.get("release"):
                 problems.append("release-candidate.json version does not match the bundle release")
 
     # Source identity of what EXECUTED must be the candidate's -- commit AND tree. The tree half was

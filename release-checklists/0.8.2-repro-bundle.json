@@ -55,7 +55,7 @@
       "metadata/release-check-evidence.sigstore.json",
       "metadata/check-runs.json",
       "metadata/SHA256SUMS",
-      "metadata/mixle-0.8.2-py3-none-any.whl.json",
+      "metadata/mixle-*-py3-none-any.whl.json",
       "metadata/reproduction-*.json"
     ],
     "rule": "The final bundle is incomplete unless these retained records bind its source commit, approved checks, wheel SHA-256, and local entry receipts to the signed v0.8.2 tag."
@@ -64,7 +64,7 @@
     {
       "path": "pyproject.toml",
       "role": "bundle-closure",
-      "sha256": "b74009990cea4d980f510b80412cfabff92d4bd2992d91a971556d5e8abeaad4"
+      "sha256": "7c4c1d917fcb74fa69584f928ffc73df19e9c677502a11af310c00864b10022c"
     },
     {
       "path": "release-checklists/0.8.2-repro-environment.json",
@@ -79,12 +79,12 @@
     {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "e048684aa6b122f98984b0a0fae29f056a7a5e4dfe7b2f9a9892b336c87d49de"
+      "sha256": "4435c30f786c49d3a38f788ccd8061606529d17ba98a5a86574ad98a63e32006"
     },
     {
       "path": "scripts/run_repro_entry.py",
       "role": "bundle-closure",
-      "sha256": "ceb259be0016d2447c997fa20375d83c5da3efddd82fa46700bf5aa8eacc6440"
+      "sha256": "f1194ed3c0490d396a980a444eaf237bc62f69395fe62d10e258df722f366092"
     },
     {
       "path": ".github/release-required-checks.txt",

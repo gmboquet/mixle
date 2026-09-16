@@ -266,9 +266,13 @@ jobs:
           "$RUNNER_TEMP/sbom-tool-env/bin/pip-audit" \
             --path "$SITE" "${WAIVERS[@]}" \
             --format cyclonedx-json -o metadata/raw-sbom.json
+          # Named for the artifact that was just built, not for the release: on the D-0216
+          # rehearsal the candidate is a pre-release and the record is mixle-0.8.2rc1-...json, so
+          # the hardcoded name ended this step with "No such file or directory".
+          WHEEL_NAME="$(basename "$(ls dist/*.whl)")"
           python scripts/bind_sbom.py \
             --cyclonedx metadata/raw-sbom.json \
-            --wheel-metadata metadata/mixle-0.8.2-py3-none-any.whl.json \
+            --wheel-metadata "metadata/$WHEEL_NAME.json" \
             --candidate-sha "$CANDIDATE_SHA" \
             --waivers metadata/accepted-waivers.json \
             --out metadata/sbom.json
@@ -528,7 +532,7 @@ jobs:
           python scripts/build_example_execution_manifest.py \
             --bundle release-checklists/0.8.2-repro-bundle.json \
             --candidate candidate/metadata/release-candidate.json \
-            --wheel-metadata candidate/metadata/mixle-0.8.2-py3-none-any.whl.json \
+            --wheel-metadata "candidate/metadata/$(basename "$(ls candidate/dist/*.whl)").json" \
             --receipt candidate/metadata/reproduction-gallery-univariate.json \
             --receipt candidate/metadata/reproduction-gallery-structured.json \
             --receipt candidate/metadata/reproduction-production-provenance.json \
