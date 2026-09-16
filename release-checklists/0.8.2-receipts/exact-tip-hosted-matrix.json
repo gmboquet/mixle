@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "41f477b162ed8f065ee3206b095bb86a3b4ff5f1",
- "command": "SHA=41f477b162ed8f065ee3206b095bb86a3b4ff5f1; gh api --paginate --slurp \"repos/gmboquet/mixle/commits/$SHA/check-runs?per_page=100\" > $SC/check-runs-live.json && PYTHONPATH=. <venv>/bin/python scripts/verify_required_checks.py --required .github/release-required-checks.txt --input $SC/check-runs-live.json --sha $SHA --repository gmboquet/mixle; echo EXIT=$?",
+ "candidate_commit": "fca91130ba1ffe7ffdc24cfcaed7c2d589fe8665",
+ "command": "SHA=fca91130ba1ffe7ffdc24cfcaed7c2d589fe8665; gh api --paginate --slurp \"repos/gmboquet/mixle/commits/$SHA/check-runs?per_page=100\" > $SC/check-runs-live.json && PYTHONPATH=. <venv>/bin/python scripts/verify_required_checks.py --required .github/release-required-checks.txt --input $SC/check-runs-live.json --sha $SHA --repository gmboquet/mixle; echo EXIT=$?",
  "date": "2026-09-16",
- "evidence_digest": "cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08",
+ "evidence_digest": "06ae30686d2f69665bf9c4c3e8be7f9fad6adf4a42679fe10af51a3b0b5a8ede",
  "gate": "Exact-tip hosted matrix",
- "note": "publish.yml re-runs this verifier live against each tagged commit, so the verdict does not carry to a later commit: the v0.8.2rc1 and v0.8.2 tags each get their own dispatch as the last action before tagging. The Tests and Security push runs on this commit were superseded by the dispatches and show as cancelled; they are not selected.",
- "result": "exit 0 on 41f477b1 with publication_authorized true: all 30 required job-level names completed/success, selected from 86 check runs on the commit (check_runs_sha256 baf18814d386252c07bb7c60a66a0f1df3be9441421e0700ca624660589c2c8f) -- 24 from tests.yml workflow_dispatch run 35060101092, 4 from Security workflow_dispatch run 35060074194, 1 from the Extras resolver matrix push run 35060053932 and 1 from the Docs push run 35060053915; the dispatch run's own 'release check evidence / attested record' job is success (104682941946)"
+ "note": "publish.yml re-runs this verifier live against each tagged commit, so the verdict does not carry to a later commit: each tag gets its own dispatch as the last action before tagging. The Tests and Security push runs on this commit were superseded by the dispatches and show as cancelled; they are not selected. The dispatch run needed one rerun of full / py3.12 / shard 0 (purpose-time-budget-test-tiers records why).",
+ "result": "exit 0 on fca91130 with publication_authorized true: all 30 required job-level names completed/success, selected from 86 check runs on the commit (check_runs_sha256 6e442f61b58919924a58c9d9d24589bfb36e0f631fc50052f37d21475600df39) -- 24 from tests.yml workflow_dispatch run 35071830883, 4 from Security workflow_dispatch run 35071784423, 1 from the Extras resolver matrix push run 35071760394 and 1 from the Docs push run 35071760385; the dispatch run's own 'release check evidence / attested record' job is success (104745554267)"
 }

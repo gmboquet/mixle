@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "41f477b162ed8f065ee3206b095bb86a3b4ff5f1",
+ "candidate_commit": "fca91130ba1ffe7ffdc24cfcaed7c2d589fe8665",
  "command": "PYTHONPATH=. <venv>/bin/python -m pytest mixle/tests/docs_version_aware_test.py mixle/tests/public_claim_inventory_test.py mixle/tests/readme_claims_hygiene_test.py mixle/tests/readme_claims_test.py mixle/tests/readme_quickstart_runs_test.py mixle/tests/release_claims_hygiene_test.py -p no:randomly -q -m '' -n 0",
  "date": "2026-09-16",
- "evidence_digest": "cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08",
+ "evidence_digest": "06ae30686d2f69665bf9c4c3e8be7f9fad6adf4a42679fe10af51a3b0b5a8ede",
  "gate": "README, quickstart, non-claims, versioned docs, claim ledger",
- "result": "36 passed in 3.19s (6 test file(s): docs_version_aware_test.py, public_claim_inventory_test.py, readme_claims_hygiene_test.py, readme_claims_test.py, readme_quickstart_runs_test.py, release_claims_hygiene_test.py)"
+ "result": "36 passed in 7.46s (6 test file(s): docs_version_aware_test.py, public_claim_inventory_test.py, readme_claims_hygiene_test.py, readme_claims_test.py, readme_quickstart_runs_test.py, release_claims_hygiene_test.py)"
 }

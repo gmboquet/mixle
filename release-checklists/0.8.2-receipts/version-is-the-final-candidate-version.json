@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "41f477b162ed8f065ee3206b095bb86a3b4ff5f1",
+ "candidate_commit": "fca91130ba1ffe7ffdc24cfcaed7c2d589fe8665",
  "command": "unset PYTHONPATH; grep -E '^version' ./pyproject.toml; echo '--- installed wheel reports ---'; cd /tmp && $SC/cleanwheel/bin/python -c \"import importlib.metadata as m; print(m.version('mixle'))\"; echo '--- live index reads ---'; curl -s https://test.pypi.org/pypi/mixle/json | python3 -c \"import json,sys; print('TestPyPI:', sorted(json.load(sys.stdin)['releases']))\"; curl -s https://pypi.org/pypi/mixle/json | python3 -c \"import json,sys; print('PyPI:', sorted(json.load(sys.stdin)['releases']))\"",
  "date": "2026-09-16",
- "evidence_digest": "cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08",
+ "evidence_digest": "06ae30686d2f69665bf9c4c3e8be7f9fad6adf4a42679fe10af51a3b0b5a8ede",
  "gate": "Version is the final candidate version",
- "note": "The index reads are read-only queries. This is the D-0216 rehearsal cut: the final candidate declares 0.8.2 and this receipt is measured again for it. check_release_document_state.py resolves the rc suffix, so the changelog, docs changelog and migration guide are the final release's.",
- "result": "pyproject.toml version = 0.8.2rc1, the rehearsal pre-release; the wheel built from this tree reports 0.8.2rc1 through importlib.metadata; live index reads on 2026-09-16 showed TestPyPI ['0.8.0', '0.8.1'] and PyPI ['0.6.0', '0.6.1', '0.6.2', '0.7.0', '0.8.1'] -- neither 0.8.2 nor 0.8.2rc1 is on either index"
+ "note": "The index reads are read-only queries. This is the D-0216 rehearsal cut (v0.8.2rc2; v0.8.2rc1 was superseded before anything was uploaded): the final candidate declares 0.8.2 and this receipt is measured again for it. check_release_document_state.py resolves the rc suffix, so the changelog, docs changelog and migration guide are the final release's.",
+ "result": "pyproject.toml version = 0.8.2rc2, the rehearsal pre-release; the wheel built from this tree reports 0.8.2rc2 through importlib.metadata; live index reads on 2026-09-16 showed TestPyPI ['0.8.0', '0.8.1'] and PyPI ['0.6.0', '0.6.1', '0.6.2', '0.7.0', '0.8.1'] -- neither 0.8.2 nor any 0.8.2 pre-release is on either index"
 }

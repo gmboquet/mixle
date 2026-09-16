@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "41f477b162ed8f065ee3206b095bb86a3b4ff5f1",
- "command": "$SC/buildenv/bin/twine --version | head -1; $SC/buildenv/bin/twine check $SC/dist-a/mixle-0.8.2rc1-py3-none-any.whl $SC/dist-a/mixle-0.8.2rc1.tar.gz 2>&1 | sed 's#/.*/gatework/##'; echo EXIT=$?",
+ "candidate_commit": "fca91130ba1ffe7ffdc24cfcaed7c2d589fe8665",
+ "command": "$SC/buildenv/bin/twine --version | head -1; $SC/buildenv/bin/twine check $SC/dist-a/mixle-0.8.2rc2-py3-none-any.whl $SC/dist-a/mixle-0.8.2rc2.tar.gz 2>&1 | sed 's#/.*/gatework/##'; echo EXIT=$?",
  "date": "2026-09-16",
- "evidence_digest": "cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08",
+ "evidence_digest": "06ae30686d2f69665bf9c4c3e8be7f9fad6adf4a42679fe10af51a3b0b5a8ede",
  "gate": "`twine check`",
  "note": "LOCAL, NOT HOSTED: twine check runs in CI only inside publish.yml, which runs at the tag.",
  "result": "twine 7.0.0 (readme-renderer 45.0): 2 artifacts checked, both PASSED, exit 0"
