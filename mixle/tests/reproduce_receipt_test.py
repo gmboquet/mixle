@@ -12,10 +12,21 @@ import json
 import tempfile
 import unittest
 import zipfile
+from importlib.metadata import version as _dist_version
 from pathlib import Path
 from unittest.mock import patch
 
 _GEN = Path(__file__).resolve().parents[2] / "scripts" / "reproduce.py"
+
+# ``wheel_provenance`` refuses a wheel whose METADATA version differs from the INSTALLED
+# distribution, so these fixtures cannot name a fixed version: on a pre-release cut of the same tree
+# (``0.8.2rc1``, D-0216) every case here failed with "wheel name/version does not match the
+# installed Mixle distribution", and on a development install they never ran against the real
+# version at all. The fixtures name whatever is installed.
+_VERSION = _dist_version("mixle")
+_DIST = "mixle-%s" % _VERSION
+_WHEEL = "%s-py3-none-any.whl" % _DIST
+_METADATA = ("Name: mixle\nVersion: %s\n" % _VERSION).encode()
 
 
 def _load():
@@ -78,7 +89,7 @@ class ReproduceReceiptTest(unittest.TestCase):
 
     def test_wheel_receipt_requires_clean_embedded_source_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
-            wheel = Path(directory) / "mixle-0.8.2-py3-none-any.whl"
+            wheel = Path(directory) / _WHEEL
 
             def write_wheel(source_dirty):
                 import base64
@@ -99,7 +110,7 @@ class ReproduceReceiptTest(unittest.TestCase):
                 # must be a real, internally consistent wheel for the dirty-case refusal to be
                 # the thing this test isolates.
                 members = {
-                    "mixle-0.8.2.dist-info/METADATA": b"Name: mixle\nVersion: 0.8.2\n",
+                    f"{_DIST}.dist-info/METADATA": _METADATA,
                     "mixle/_build_provenance.json": json.dumps(provenance).encode(),
                 }
                 record = "".join(
@@ -107,11 +118,11 @@ class ReproduceReceiptTest(unittest.TestCase):
                     % (name, base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip("="), len(data))
                     for name, data in members.items()
                 )
-                record += "mixle-0.8.2.dist-info/RECORD,,\n"
+                record += f"{_DIST}.dist-info/RECORD,,\n"
                 with zipfile.ZipFile(wheel, "w") as archive:
                     for name, data in members.items():
                         archive.writestr(name, data)
-                    archive.writestr("mixle-0.8.2.dist-info/RECORD", record)
+                    archive.writestr(f"{_DIST}.dist-info/RECORD", record)
 
             write_wheel(False)
             receipt = self.mod.wheel_provenance(wheel)
@@ -139,7 +150,7 @@ class SubjectBindingTest(unittest.TestCase):
 
         from mixle import reproduction
 
-        wheel = Path(directory) / "mixle-0.8.2-py3-none-any.whl"
+        wheel = Path(directory) / _WHEEL
         provenance = {
             "artifact": "mixle.build_provenance/v1",
             "source_commit": "a" * 40,
@@ -150,10 +161,10 @@ class SubjectBindingTest(unittest.TestCase):
             "source_content_universe": "pyproject.toml, setup.py, and mixle/**/*.{json,py,pyx}",
         }
         fake_hash = base64.urlsafe_b64encode(bytes.fromhex("d" * 64)).decode("ascii").rstrip("=")
-        record = "mixle/__init__.py,sha256=%s,10\nmixle-0.8.2.dist-info/RECORD,,\n" % fake_hash
+        record = "mixle/__init__.py,sha256=%s,10\n%s.dist-info/RECORD,,\n" % (fake_hash, _DIST)
         with zipfile.ZipFile(wheel, "w") as archive:
-            archive.writestr("mixle-0.8.2.dist-info/METADATA", "Name: mixle\nVersion: 0.8.2\n")
-            archive.writestr("mixle-0.8.2.dist-info/RECORD", record)
+            archive.writestr(f"{_DIST}.dist-info/METADATA", _METADATA.decode())
+            archive.writestr(f"{_DIST}.dist-info/RECORD", record)
             archive.writestr("mixle/_build_provenance.json", json.dumps(provenance))
         return wheel, reproduction
 
@@ -175,7 +186,7 @@ class SubjectBindingTest(unittest.TestCase):
         from mixle import reproduction
 
         with tempfile.TemporaryDirectory() as directory:
-            wheel = Path(directory) / "mixle-0.8.2-py3-none-any.whl"
+            wheel = Path(directory) / _WHEEL
             import hashlib
 
             member = b"x = 1"
@@ -184,18 +195,18 @@ class SubjectBindingTest(unittest.TestCase):
             with zipfile.ZipFile(wheel, "w") as archive:
                 archive.writestr("mixle/a.py", member)
                 archive.writestr(
-                    "mixle-0.8.2.dist-info/RECORD",
-                    "mixle/a.py,sha256=%s,%d\nmixle-0.8.2.dist-info/RECORD,,\n" % (encoded, len(member)),
+                    f"{_DIST}.dist-info/RECORD",
+                    "mixle/a.py,sha256=%s,%d\n%s.dist-info/RECORD,,\n" % (encoded, len(member), _DIST),
                 )
             self.assertEqual(reproduction._wheel_record_hashes(wheel), {"mixle/a.py": digest})
 
             with zipfile.ZipFile(wheel, "w") as archive:
-                archive.writestr("mixle-0.8.2.dist-info/RECORD", "mixle/a.py,md5=abc,5\n")
+                archive.writestr(f"{_DIST}.dist-info/RECORD", "mixle/a.py,md5=abc,5\n")
             with self.assertRaisesRegex(ValueError, "unsupported hash"):
                 reproduction._wheel_record_hashes(wheel)
 
             with zipfile.ZipFile(wheel, "w") as archive:
-                archive.writestr("mixle-0.8.2.dist-info/RECORD", "mixle-0.8.2.dist-info/RECORD,,\n")
+                archive.writestr(f"{_DIST}.dist-info/RECORD", f"{_DIST}.dist-info/RECORD,,\n")
             with self.assertRaisesRegex(ValueError, "no hashed entries"):
                 reproduction._wheel_record_hashes(wheel)
 
@@ -218,9 +229,9 @@ class RecordTamperTest(unittest.TestCase):
 
     @staticmethod
     def _wheel(directory, record_body):
-        wheel = Path(directory) / "mixle-0.8.2-py3-none-any.whl"
+        wheel = Path(directory) / _WHEEL
         with zipfile.ZipFile(wheel, "w") as archive:
-            archive.writestr("mixle-0.8.2.dist-info/RECORD", record_body)
+            archive.writestr(f"{_DIST}.dist-info/RECORD", record_body)
         return wheel
 
     def setUp(self):
@@ -235,19 +246,19 @@ class RecordTamperTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             wheel = self._wheel(
                 directory,
-                "mixle/a.py,sha256=%s,5\nmixle/reproduction.py,,\nmixle-0.8.2.dist-info/RECORD,,\n" % self.hash,
+                "mixle/a.py,sha256=%s,5\nmixle/reproduction.py,,\n%s.dist-info/RECORD,,\n" % (self.hash, _DIST),
             )
             with self.assertRaisesRegex(ValueError, "omits hashes"):
                 self.reproduction._wheel_record_hashes(wheel)
 
     def test_duplicate_malformed_and_missing_self_row_are_refused(self):
         with tempfile.TemporaryDirectory() as directory:
-            duplicate = "mixle/a.py,sha256={h},5\nmixle/a.py,sha256={h},5\nmixle-0.8.2.dist-info/RECORD,,\n"
-            wheel = self._wheel(directory, duplicate.format(h=self.hash))
+            duplicate = "mixle/a.py,sha256={h},5\nmixle/a.py,sha256={h},5\n{d}.dist-info/RECORD,,\n"
+            wheel = self._wheel(directory, duplicate.format(h=self.hash, d=_DIST))
             with self.assertRaisesRegex(ValueError, "more than once"):
                 self.reproduction._wheel_record_hashes(wheel)
 
-            wheel = self._wheel(directory, "mixle/a.py,sha256=!!!notbase64!!!,5\nmixle-0.8.2.dist-info/RECORD,,\n")
+            wheel = self._wheel(directory, f"mixle/a.py,sha256=!!!notbase64!!!,5\n{_DIST}.dist-info/RECORD,,\n")
             with self.assertRaises(ValueError):
                 self.reproduction._wheel_record_hashes(wheel)
 
@@ -265,12 +276,12 @@ class RecordTamperTest(unittest.TestCase):
         digest = hashlib.sha256(member).hexdigest()
         encoded = base64.urlsafe_b64encode(bytes.fromhex(digest)).decode("ascii").rstrip("=")
         with tempfile.TemporaryDirectory() as directory:
-            wheel = Path(directory) / "mixle-0.8.2-py3-none-any.whl"
+            wheel = Path(directory) / _WHEEL
             with zipfile.ZipFile(wheel, "w") as archive:
                 archive.writestr("mixle/a.py", member)
                 archive.writestr(
-                    "mixle-0.8.2.dist-info/RECORD",
-                    "mixle/a.py,sha256=%s,%d\nmixle-0.8.2.dist-info/RECORD,,\n" % (encoded, len(member)),
+                    f"{_DIST}.dist-info/RECORD",
+                    "mixle/a.py,sha256=%s,%d\n%s.dist-info/RECORD,,\n" % (encoded, len(member), _DIST),
                 )
             self.assertEqual(self.reproduction._wheel_record_hashes(wheel), {"mixle/a.py": digest})
 
@@ -288,7 +299,7 @@ class RecordTamperTest(unittest.TestCase):
             with zipfile.ZipFile(wheel, "w") as archive:
                 archive.writestr("mixle/a.py", member)
                 archive.writestr(
-                    "mixle-0.8.2.dist-info/RECORD", "mixle/a.py,sha256=%s,5\nmixle-0.8.2.dist-info/RECORD,,\n" % wrong
+                    f"{_DIST}.dist-info/RECORD", "mixle/a.py,sha256=%s,5\n%s.dist-info/RECORD,,\n" % (wrong, _DIST)
                 )
             with self.assertRaisesRegex(ValueError, "does not match its RECORD hash"):
                 self.reproduction._wheel_record_hashes(wheel)
@@ -296,7 +307,7 @@ class RecordTamperTest(unittest.TestCase):
             wheel = Path(directory) / "b.whl"
             with zipfile.ZipFile(wheel, "w") as archive:
                 archive.writestr(
-                    "mixle-0.8.2.dist-info/RECORD", "mixle/a.py,sha256=%s,5\nmixle-0.8.2.dist-info/RECORD,,\n" % good
+                    f"{_DIST}.dist-info/RECORD", "mixle/a.py,sha256=%s,5\n%s.dist-info/RECORD,,\n" % (good, _DIST)
                 )
             with self.assertRaisesRegex(ValueError, "not in the archive"):
                 self.reproduction._wheel_record_hashes(wheel)
@@ -306,7 +317,7 @@ class RecordTamperTest(unittest.TestCase):
                 archive.writestr("mixle/a.py", member)
                 archive.writestr("mixle/_smuggled.py", b"EVIL = 1")
                 archive.writestr(
-                    "mixle-0.8.2.dist-info/RECORD", "mixle/a.py,sha256=%s,5\nmixle-0.8.2.dist-info/RECORD,,\n" % good
+                    f"{_DIST}.dist-info/RECORD", "mixle/a.py,sha256=%s,5\n%s.dist-info/RECORD,,\n" % (good, _DIST)
                 )
             with self.assertRaisesRegex(ValueError, "does not claim"):
                 self.reproduction._wheel_record_hashes(wheel)
@@ -337,7 +348,7 @@ class ShadowInstallationTest(unittest.TestCase):
 
         with patch.dict("sys.modules", {"mixle": _Shadow, "mixle.reproduction": _ShadowReproduction}):
             with tempfile.TemporaryDirectory() as directory:
-                wheel = Path(directory) / "mixle-0.8.2-py3-none-any.whl"
+                wheel = Path(directory) / _WHEEL
                 wheel.write_bytes(b"not a wheel")
                 result = reproduction.subject_binding(wheel, {})
         self.assertFalse(result["verified"])
@@ -348,7 +359,7 @@ class ShadowInstallationTest(unittest.TestCase):
         from mixle import reproduction
 
         with tempfile.TemporaryDirectory() as directory:
-            wheel = Path(directory) / "mixle-0.8.2-py3-none-any.whl"
+            wheel = Path(directory) / _WHEEL
             wheel.write_bytes(b"not a wheel")
             result = reproduction.subject_binding(wheel, {})
         # the wheel is unreadable, so this fails -- but the import-path half must still be recorded
@@ -711,7 +722,7 @@ class SourceContentUniverseIsRequiredTest(unittest.TestCase):
     """
 
     def _wheel(self, directory, **overrides):
-        wheel = Path(directory) / "mixle-0.8.2-py3-none-any.whl"
+        wheel = Path(directory) / _WHEEL
         provenance = {
             "artifact": "mixle.build_provenance/v1",
             "source_commit": "a" * 40,
@@ -732,7 +743,7 @@ class SourceContentUniverseIsRequiredTest(unittest.TestCase):
         import hashlib
 
         members = {
-            "mixle-0.8.2.dist-info/METADATA": b"Name: mixle\nVersion: 0.8.2\n",
+            f"{_DIST}.dist-info/METADATA": _METADATA,
             "mixle/_build_provenance.json": json.dumps(provenance).encode(),
         }
         record = "".join(
@@ -740,11 +751,11 @@ class SourceContentUniverseIsRequiredTest(unittest.TestCase):
             % (name, base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip("="), len(data))
             for name, data in members.items()
         )
-        record += "mixle-0.8.2.dist-info/RECORD,,\n"
+        record += f"{_DIST}.dist-info/RECORD,,\n"
         with zipfile.ZipFile(wheel, "w") as archive:
             for name, data in members.items():
                 archive.writestr(name, data)
-            archive.writestr("mixle-0.8.2.dist-info/RECORD", record)
+            archive.writestr(f"{_DIST}.dist-info/RECORD", record)
         return wheel
 
     def test_complete_record_verifies(self):
@@ -794,9 +805,9 @@ class FourthPassNeighboursTest(unittest.TestCase):
                 archive.writestr("mixle/a.py", member)
                 archive.writestr("../escape.py", member)
                 archive.writestr(
-                    "mixle-0.8.2.dist-info/RECORD",
-                    "mixle/a.py,sha256=%s,5\n../escape.py,sha256=%s,5\nmixle-0.8.2.dist-info/RECORD,,\n"
-                    % (self._enc(member), self._enc(member)),
+                    f"{_DIST}.dist-info/RECORD",
+                    "mixle/a.py,sha256=%s,5\n../escape.py,sha256=%s,5\n%s.dist-info/RECORD,,\n"
+                    % (self._enc(member), self._enc(member), _DIST),
                 )
             with self.assertRaisesRegex(ValueError, "escapes the archive root"):
                 _wheel_record_hashes(wheel)
@@ -816,8 +827,8 @@ class FourthPassNeighboursTest(unittest.TestCase):
                     archive.writestr("mixle/a.py", member)
                     archive.writestr("mixle/a.py", member)
                     archive.writestr(
-                        "mixle-0.8.2.dist-info/RECORD",
-                        "mixle/a.py,sha256=%s,5\nmixle-0.8.2.dist-info/RECORD,,\n" % self._enc(member),
+                        f"{_DIST}.dist-info/RECORD",
+                        "mixle/a.py,sha256=%s,5\n%s.dist-info/RECORD,,\n" % (self._enc(member), _DIST),
                     )
             with self.assertRaisesRegex(ValueError, "more than once"):
                 _wheel_record_hashes(wheel)
