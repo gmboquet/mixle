@@ -63,7 +63,7 @@ dependencies = [
 # built-in "workqueue" threading layer without it, so it's a performance extra, not a hard requirement
 # -- and it must stay platform-gated: Intel TBB ships no arm64 (Apple Silicon) wheels, so an
 # unconditional floor here makes `pip install mixle[numba]` uninstallable on that platform.
-numba = ["numba>=0.64,<1", "tbb>=2021.6,<2022; platform_machine == 'x86_64'"]
+numba = ["numba>=0.64,<1", "tbb>=2021.6,<2024; platform_machine == 'x86_64'"]
 # The read-side DataFrame data adapter duck-types and never imports pandas; the write-side result
 # egress (ParameterPosterior/CalibrationReport/MarkovChainLatentPosterior .to_dataframe/.to_parquet)
 # constructs a real pandas.DataFrame, so it needs the library itself (mixle.utils.optional_deps).
@@ -166,7 +166,7 @@ all = [
     "setuptools>=68,<84",
     "sqlalchemy>=2.0,<3",
     "sympy>=1.12,<2",
-    "tbb>=2021.6,<2022; platform_machine == 'x86_64'",
+    "tbb>=2021.6,<2024; platform_machine == 'x86_64'",
     "torch>=2.4,<3",
     "transformers>=4.40,<6",
     "umap-learn>=0.5.6,<1",
