@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a7345ca7fbe7a0ca79900bc18058a38633c2924e",
+ "candidate_commit": "41f477b162ed8f065ee3206b095bb86a3b4ff5f1",
  "command": "grep -rl -iE 'yank' docs/ release-checklists/ CHANGELOG.md README.md | while read f; do grep -iE 'yank' \"$f\" | grep -viqE 'yanked (numpy|upstream)' && echo \"$f\"; done | sort",
- "date": "2026-09-15",
- "evidence_digest": "5891693f640d621258f13afac4cc2fff386588d3016dc162dcb042a20faa29f5",
+ "date": "2026-09-16",
+ "evidence_digest": "cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08",
  "gate": "Rollback",
  "note": "The grep also matches release-checklists/0.8.1-receipts/rollback.json and 0.8.2-receipts/rollback.json, which are evidence files rather than policy statements, so they are not counted. The repository root README contains no yank statement; the README counted is release-checklists/README.md.",
  "result": "3 policy documents state the yank-not-delete rollback policy on this tree: release-checklists/0.7.0.md, release-checklists/0.8.2.md and release-checklists/README.md"

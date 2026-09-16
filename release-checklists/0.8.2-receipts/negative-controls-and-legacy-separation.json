@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a7345ca7fbe7a0ca79900bc18058a38633c2924e",
+ "candidate_commit": "41f477b162ed8f065ee3206b095bb86a3b4ff5f1",
  "command": "PYTHONPATH=. <venv>/bin/python -m pytest mixle/tests/duplicate_body_scan_test.py mixle/tests/example_execution_manifest_test.py mixle/tests/fuzz_soak_contract_test.py mixle/tests/normalize_sdist_test.py mixle/tests/release_gate_negative_controls_test.py -p no:randomly -q -m '' -n 0",
- "date": "2026-09-15",
- "evidence_digest": "5891693f640d621258f13afac4cc2fff386588d3016dc162dcb042a20faa29f5",
+ "date": "2026-09-16",
+ "evidence_digest": "cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08",
  "gate": "Negative controls and legacy separation",
- "result": "45 passed in 5.49s (5 test file(s): duplicate_body_scan_test.py, example_execution_manifest_test.py, fuzz_soak_contract_test.py, normalize_sdist_test.py, release_gate_negative_controls_test.py)"
+ "result": "45 passed in 5.55s (5 test file(s): duplicate_body_scan_test.py, example_execution_manifest_test.py, fuzz_soak_contract_test.py, normalize_sdist_test.py, release_gate_negative_controls_test.py)"
 }

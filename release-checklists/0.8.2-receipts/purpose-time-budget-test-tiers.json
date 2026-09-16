@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a7345ca7fbe7a0ca79900bc18058a38633c2924e",
+ "candidate_commit": "41f477b162ed8f065ee3206b095bb86a3b4ff5f1",
  "command": "python3 -c \"import json;d=json.load(open('$SC/check-runs.json'));r=[x for p in d for x in p['check_runs']];import re;names=sorted({x['name'] for x in r if re.search(r'core /|full /|optional extras|smoke /|numerical /|hardware /', x['name'])});print('\\n'.join('%s: %s' % (n, sorted({y['conclusion'] for y in r if y['name']==n and y['conclusion']!='cancelled'})) for n in names))\"",
- "date": "2026-09-15",
- "evidence_digest": "5891693f640d621258f13afac4cc2fff386588d3016dc162dcb042a20faa29f5",
+ "date": "2026-09-16",
+ "evidence_digest": "cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08",
  "gate": "Purpose/time-budget test tiers",
  "note": "The tier harness fails a lane that overruns its budget, so these successes include the budgets: all four full shards pass under the cost-balanced split and re-priced budget that repaired A-09.",
- "result": "every tier lane on the release tip is success -- 19 of them across smoke, core (py3.11 and py3.12 shards 0-3, macOS arm64 py3.11/py3.12, minimum versions), full (py3.12 shards 0-3 and the coverage floor) and optional extras (shards 0-1) -- plus the two dispatch-only lanes, numerical / repeated-seed stress (check run 104401811493) and hardware / MPI and torchrun (check run 104401811303), each success in the dispatch run and skipped in the superseded push run"
+ "result": "every tier lane on the release tip is success -- 19 of them across smoke, core (py3.11 and py3.12 shards 0-3, macOS arm64 py3.11/py3.12, minimum versions), full (py3.12 shards 0-3 and the coverage floor) and optional extras (shards 0-1) -- plus the two dispatch-only lanes, numerical / repeated-seed stress (check run 104678472280) and hardware / MPI and torchrun (check run 104678472421), each success in the dispatch run and skipped in the superseded push run"
 }

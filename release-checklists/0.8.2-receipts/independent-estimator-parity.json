@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a7345ca7fbe7a0ca79900bc18058a38633c2924e",
+ "candidate_commit": "41f477b162ed8f065ee3206b095bb86a3b4ff5f1",
  "command": "python3 -c \"import json;d=json.load(open('$SC/check-runs.json'));r=[x for p in d for x in p['check_runs']];sel=[x for x in r if x['name'].startswith('optional extras') and x['conclusion']!='cancelled'];print('\\n'.join('%s: %s/%s (id=%s)' % (x['name'],x['status'],x['conclusion'],x['id']) for x in sorted(sel,key=lambda z:z['name'])))\"",
- "date": "2026-09-15",
- "evidence_digest": "5891693f640d621258f13afac4cc2fff386588d3016dc162dcb042a20faa29f5",
+ "date": "2026-09-16",
+ "evidence_digest": "cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08",
  "gate": "Independent estimator parity",
- "result": "both 'optional extras / py3.12' shards are completed/success on this commit (check runs 104401811409 and 104401811258)"
+ "result": "both 'optional extras / py3.12' shards are completed/success on this commit (check runs 104678472231 and 104678472291)"
 }

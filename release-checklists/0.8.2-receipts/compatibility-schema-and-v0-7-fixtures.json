@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a7345ca7fbe7a0ca79900bc18058a38633c2924e",
+ "candidate_commit": "41f477b162ed8f065ee3206b095bb86a3b4ff5f1",
  "command": "python3 -c \"import json;d=json.load(open('$SC/check-runs.json'));r=[x for p in d for x in p['check_runs']];sel=[x for x in r if x['name'] in ('clean-wheel install + import sweep','extras matrix / exact candidate') and x['conclusion']!='cancelled'];print('\\n'.join('%s: %s (id=%s)' % (x['name'],x['conclusion'],x['id']) for x in sel))\"; echo -n 'cross-version fixture tests: '; PYTHONPATH=. <venv>/bin/python -m pytest mixle/tests/cross_version_fixtures_test.py -p no:randomly -q -m '' -n0 2>&1 | tail -1",
- "date": "2026-09-15",
- "evidence_digest": "5891693f640d621258f13afac4cc2fff386588d3016dc162dcb042a20faa29f5",
+ "date": "2026-09-16",
+ "evidence_digest": "cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08",
  "gate": "Compatibility schema and v0.7 fixtures",
- "result": "'extras matrix / exact candidate' (check run 104404136542) and 'clean-wheel install + import sweep' (check run 104401811572) are both success on this commit; cross_version_fixtures_test passes locally (2 passed, 5 subtests)"
+ "result": "'extras matrix / exact candidate' (check run 104680110064) and 'clean-wheel install + import sweep' (check run 104678472200) are both success on this commit; cross_version_fixtures_test passes locally (2 passed, 5 subtests)"
 }

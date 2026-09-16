@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a7345ca7fbe7a0ca79900bc18058a38633c2924e",
+ "candidate_commit": "41f477b162ed8f065ee3206b095bb86a3b4ff5f1",
  "command": "unset PYTHONPATH; grep -E '^version' ./pyproject.toml; echo '--- installed wheel reports ---'; cd /tmp && $SC/cleanwheel/bin/python -c \"import importlib.metadata as m; print(m.version('mixle'))\"; echo '--- live index reads ---'; curl -s https://test.pypi.org/pypi/mixle/json | python3 -c \"import json,sys; print('TestPyPI:', sorted(json.load(sys.stdin)['releases']))\"; curl -s https://pypi.org/pypi/mixle/json | python3 -c \"import json,sys; print('PyPI:', sorted(json.load(sys.stdin)['releases']))\"",
- "date": "2026-09-15",
- "evidence_digest": "5891693f640d621258f13afac4cc2fff386588d3016dc162dcb042a20faa29f5",
+ "date": "2026-09-16",
+ "evidence_digest": "cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08",
  "gate": "Version is the final candidate version",
- "note": "The index reads are read-only queries. The v0.8.2rc1 rehearsal (D-0216) changes only the version string, and this receipt is re-measured for it.",
- "result": "pyproject.toml version = 0.8.2; the wheel built from this tree reports 0.8.2 through importlib.metadata; live index reads on 2026-09-15 showed TestPyPI ['0.8.0', '0.8.1'] and PyPI ['0.6.0', '0.6.1', '0.6.2', '0.7.0', '0.8.1'] -- 0.8.2 absent from both"
+ "note": "The index reads are read-only queries. This is the D-0216 rehearsal cut: the final candidate declares 0.8.2 and this receipt is measured again for it. check_release_document_state.py resolves the rc suffix, so the changelog, docs changelog and migration guide are the final release's.",
+ "result": "pyproject.toml version = 0.8.2rc1, the rehearsal pre-release; the wheel built from this tree reports 0.8.2rc1 through importlib.metadata; live index reads on 2026-09-16 showed TestPyPI ['0.8.0', '0.8.1'] and PyPI ['0.6.0', '0.6.1', '0.6.2', '0.7.0', '0.8.1'] -- neither 0.8.2 nor 0.8.2rc1 is on either index"
 }

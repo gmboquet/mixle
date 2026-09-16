@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a7345ca7fbe7a0ca79900bc18058a38633c2924e",
+ "candidate_commit": "41f477b162ed8f065ee3206b095bb86a3b4ff5f1",
  "command": "for e in gallery-univariate gallery-structured production-provenance scaling-backend; do printf '%s: ' $e; PYTHONPATH=. <venv>/bin/python scripts/run_repro_entry.py --entry $e >/dev/null 2>&1 && echo PASS || echo FAIL; done",
- "date": "2026-09-15",
- "evidence_digest": "5891693f640d621258f13afac4cc2fff386588d3016dc162dcb042a20faa29f5",
+ "date": "2026-09-16",
+ "evidence_digest": "cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08",
  "gate": "Reproducibility bundle and independent replay",
- "note": "The bundle was last repinned on 2026-09-08 (23b10d46), when two stdout pins moved: gallery-structured because P09-F11 raised an iteration budget (-19.791 -> -16.359 against a truth of -16.347), and production-provenance because its recorded digest could not have come from a run through its own volatile rules (release/0.8.1 and that tree both normalize to d4f80090..., and the pin said aa6e4d98...). All four entries still reproduce their pins on this tree, after the ten-pass review's repairs.",
+ "note": "The bundle closes over the digest of every input it names, `pyproject.toml` among them, so the rehearsal version string drifted it and all four entries refused until it was regenerated (`38a1fb28`); one line moved, the recorded pyproject digest. The final cut regenerates it back. Its stdout pins last moved on 2026-09-08 (23b10d46): gallery-structured because P09-F11 raised an iteration budget (-19.791 -> -16.359 against a truth of -16.347), and production-provenance because its recorded digest could not have come from a run through its own volatile rules. All four entries still reproduce those pins on this tree.",
  "result": "all 4 entries of release-checklists/0.8.2-repro-bundle.json execute and validate: gallery-univariate, gallery-structured, production-provenance, scaling-backend"
 }

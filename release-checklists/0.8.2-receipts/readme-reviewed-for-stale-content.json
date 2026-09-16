@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a7345ca7fbe7a0ca79900bc18058a38633c2924e",
+ "candidate_commit": "41f477b162ed8f065ee3206b095bb86a3b4ff5f1",
  "command": "line-by-line review recorded in release-checklists/0.8.2-reviews/readme-review.md and its 2026-09-15 addendum; machine checks on `git archive` of this commit with the candidate wheel's environment: `pytest --collect-only -q -m ''`, `base_dist_test._build_dists()`, `scripts/check_optional_extras.py`; and each of the seven fenced Python blocks executed from /tmp against the installed candidate wheel (block 6 exactly as committed, the five fragments with the context their prose declares)",
- "date": "2026-09-15",
- "evidence_digest": "5891693f640d621258f13afac4cc2fff386588d3016dc162dcb042a20faa29f5",
+ "date": "2026-09-16",
+ "evidence_digest": "cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08",
  "gate": "README reviewed for stale content",
  "note": "The record deliberately does not claim '7 of 7 snippets execute verbatim': five are fragments that name prose-defined values or carry an explicit `...`, and cannot. What was checked is that the library still does what each line says.",
  "result": "0 stale items on the 2026-09-08 line-by-line review; 3 README items then found wrong by pass 08 and repaired (Q08-F10, Q08-F11, Q08-F12). Re-measured 2026-09-15: 16,896 tests collected against the '15,000+' badge; 40 base-distribution configurations over 34 families; 'all equals the runtime-feature extra union', exit 0; all seven blocks exit 0, block 6 printing rank=6 and cumulative_probability=0.11396 against its comment's 0.114"

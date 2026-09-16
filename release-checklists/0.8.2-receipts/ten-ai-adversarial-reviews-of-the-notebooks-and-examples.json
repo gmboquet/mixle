@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a7345ca7fbe7a0ca79900bc18058a38633c2924e",
+ "candidate_commit": "41f477b162ed8f065ee3206b095bb86a3b4ff5f1",
  "command": "E=<corpus-exec>; echo -n 'examples exit 0: '; grep -c ' exit 0 in ' $E/examples.log; echo -n 'examples run: '; wc -l < $E/examples.log; echo -n 'notebooks exit 0: '; grep -cE ' exit 0 [0-9]+s$' $E/status.log; echo -n 'notebooks listed: '; wc -l < $E/notebooks.list; grep -E '^(EXEC START|EXAMPLES DONE|EXEC DONE)|^(dist version|source_commit|content_sha256)' $E/status.log; echo -n 'campaign pass reports: '; ls release-checklists/0.8.2-reviews/pass-*/report.md | wc -l; python3 -c \"import json,glob,collections; c=collections.Counter(x['severity'] for f in sorted(glob.glob('release-checklists/0.8.2-reviews/pass-*/findings.json')) for x in json.load(open(f))); print('campaign findings:', sum(c.values()), dict(c)); c=collections.Counter(x['severity'] for x in json.load(open('release-checklists/0.8.2-reviews/rerun/findings.json'))); print('re-run findings:', sum(c.values()), dict(c))\"",
- "date": "2026-09-15",
- "evidence_digest": "5891693f640d621258f13afac4cc2fff386588d3016dc162dcb042a20faa29f5",
+ "date": "2026-09-16",
+ "evidence_digest": "cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08",
  "gate": "Ten AI adversarial reviews of the notebooks and examples",
- "note": "The corpus ran on the wheel built from f72a933c, before the checklist commit this receipt names. That commit changes release records only, and the wheel built from it carries the same source content digest (artifact-fingerprints). The ten passes are the 0.8.2 candidate's own campaign (release-checklists/0.8.2-reviews/pass-01..10); the previous cut of this receipt cited the 0.8.1 passes.",
+ "note": "The corpus ran on the wheel built from f72a933c, whose source content digest is 84c1cd26.... This commit is the rehearsal pre-release, so its own wheel digests differ from that by one byte-range, `pyproject.toml`'s version string (artifact-fingerprints records both); nothing the corpus exercises differs. The ten passes are the 0.8.2 candidate's own campaign (release-checklists/0.8.2-reviews/pass-01..10).",
  "result": "10 pass reports retained for the 0.8.2 campaign with 165 findings (9 blocking, 56 real, 79 minor, 21 docs), and the independent re-run's 11 findings (1 blocking, 3 real, 6 minor, 1 docs); executed against the final candidate wheel (source_content_sha256 84c1cd26..., built from f72a933c): 57 of 57 examples exit 0 and 131 of 131 notebooks execute to completion"
 }

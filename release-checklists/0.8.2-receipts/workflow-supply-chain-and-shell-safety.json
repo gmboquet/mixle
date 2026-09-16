@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a7345ca7fbe7a0ca79900bc18058a38633c2924e",
+ "candidate_commit": "41f477b162ed8f065ee3206b095bb86a3b4ff5f1",
  "command": "PYTHONPATH=. <venv>/bin/python scripts/check_workflows.py; echo SCRIPT_EXIT=$?; echo -n 'unpinned uses: '; grep -rhoE 'uses: [^@]+@[^ ]+' .github/workflows/*.yml | grep -cE '@[0-9a-f]{40}' >/dev/null; grep -rhoE 'uses: [^@]+@[^ ]+' .github/workflows/*.yml | grep -vcE '@[0-9a-f]{40}' || true",
- "date": "2026-09-15",
- "evidence_digest": "5891693f640d621258f13afac4cc2fff386588d3016dc162dcb042a20faa29f5",
+ "date": "2026-09-16",
+ "evidence_digest": "cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08",
  "gate": "Workflow supply-chain and shell safety",
  "note": "The harness exit is grep's: `grep -vc` returns 1 when it counts zero unpinned references, which is the passing result.",
  "result": "scripts/check_workflows.py printed 'release workflows parse and satisfy immutable-action/shell-input contracts', exit 0; 0 of the `uses:` references across .github/workflows/*.yml are unpinned (every one is a 40-hex SHA)"

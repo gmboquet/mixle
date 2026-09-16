@@ -1,0 +1,10 @@
+{
+ "artifact": "mixle.release_gate_receipt/v1",
+ "candidate_commit": "41f477b162ed8f065ee3206b095bb86a3b4ff5f1",
+ "command": "cd . && PYTHONPATH=. <venv>/bin/python scripts/verify_release_checklist.py --checklist release-checklists/0.8.2.md --receipts release-checklists/0.8.2-receipts --candidate-sha <tip> --root . --require-final; echo EXIT=$?",
+ "date": "2026-09-16",
+ "evidence_digest": "cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08",
+ "gate": "Final release-owner sign-off",
+ "note": "The release owner signed in session on 2026-09-16 (\"okay, approved\") on the tree at 4ccfd0a8, after the ten-pass review, its independent re-run, the corpus execution on the final wheel and every other row closed on receipts (D-0216, D-0217). This commit is that tree with the rehearsal version string, the reproduction bundle repinned on it, and the test-fixture repair the rehearsal itself forced; no production code differs. The command was run with every receipt written and the checklist staged, before the commit that carries them, as 0.8.1's sign-off receipt was.",
+ "result": "EXIT=0: 'release checklist and candidate-bound receipts are valid' with every row final -- 73 receipts, each naming 41f477b1 as the commit its gate was measured on and this tree's evidence digest cf48fa10147ba5a0733ae22a636911cb77a41b9a90e93acfc2e0673d86757b08; the tree the owner signed, 4ccfd0a8, is green in all four push workflows (Tests, Security, Docs, Extras resolver matrix)"
+}
