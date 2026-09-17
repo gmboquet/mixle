@@ -6,7 +6,7 @@ All notable changes to mixle are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.8.2] — 2026-09-08
+## [0.8.2] — 2026-09-17
 
 A patch release of the shipped 0.8.1 artifact: the same public surface, with the defects the ten
 adversarial reviews of the 0.8.1 candidate deferred (decision D-0213) repaired, plus the release-process
