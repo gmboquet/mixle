@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "fca91130ba1ffe7ffdc24cfcaed7c2d589fe8665",
+ "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
  "command": "cd . && PYTHONPATH=. <venv>/bin/python scripts/verify_release_checklist.py --checklist release-checklists/0.8.2.md --receipts release-checklists/0.8.2-receipts --candidate-sha <tip> --root . --require-final; echo EXIT=$?",
- "date": "2026-09-16",
- "evidence_digest": "06ae30686d2f69665bf9c4c3e8be7f9fad6adf4a42679fe10af51a3b0b5a8ede",
+ "date": "2026-09-17",
+ "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
  "gate": "Final release-owner sign-off",
- "note": "The release owner signed in session on 2026-09-16 (\"okay, approved\") on the tree at 4ccfd0a8, after the ten-pass review, its independent re-run, the corpus execution on the final wheel and every other row closed on receipts (D-0216, D-0217). This commit is that tree with the rehearsal version string and the three repairs the rehearsal itself forced -- the reproduction bundle repinned, the version-pinned test fixtures, and the publish path's hardcoded wheel-record name (D-0216, amended). No production code differs from the tree that was signed. The command was run with every receipt written and the tracked changes staged, before the commit that carries them, as 0.8.1's sign-off receipt was.",
- "result": "EXIT=0: 'release checklist and candidate-bound receipts are valid' with every row final -- 73 receipts, each naming fca91130 as the commit its gate was measured on and this tree's evidence digest 06ae30686d2f69665bf9c4c3e8be7f9fad6adf4a42679fe10af51a3b0b5a8ede; the tree the owner signed, 4ccfd0a8, is green in all four push workflows (Tests, Security, Docs, Extras resolver matrix)"
+ "note": "The release owner signed in session on 2026-09-16 (\"okay, approved\") on the tree at 4ccfd0a8, after the ten-pass review, its independent re-run, the corpus execution on the final wheel and every other row closed on receipts (D-0216, D-0217). This commit is that tree with the rehearsal version string and the repairs the rehearsal itself forced: the reproduction bundle regenerated, version-pinned test fixtures, the publish path's hardcoded wheel-record name and literal version comparisons, a reproduction digest pinned on a development install, and download retry loops that stopped after six tries. No library code differs from the tree that was signed. The command was run with every receipt written and the tracked changes committed, before the commit that carries the receipts, as 0.8.1's sign-off receipt was.",
+ "result": "EXIT=0: 'release checklist and candidate-bound receipts are valid' with every row final -- 73 receipts, each naming a36d6860 as the commit its gate was measured on and this tree's evidence digest 27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311; the tree the owner signed, 4ccfd0a8, is green in all four push workflows (Tests, Security, Docs, Extras resolver matrix)"
 }

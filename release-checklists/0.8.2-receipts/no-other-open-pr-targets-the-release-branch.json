@@ -1,9 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "fca91130ba1ffe7ffdc24cfcaed7c2d589fe8665",
+ "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
  "command": "gh pr list --repo gmboquet/mixle --base release/0.8.2 --state open --json number | tr -d '\\n'; echo; echo EXIT=$?",
- "date": "2026-09-16",
- "evidence_digest": "06ae30686d2f69665bf9c4c3e8be7f9fad6adf4a42679fe10af51a3b0b5a8ede",
+ "date": "2026-09-17",
+ "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
  "gate": "No other open PR targets the release branch",
+ "note": "Re-measured after closing six dependabot pull requests (#551-#556) that the bot's weekly run opened against release/0.8.2 on 2026-09-16: a group of 11 minor/patch bumps, setuptools 83.0.0 -> 84.0.0 and readme-renderer 45.0 -> 46.0 in the pinned build closure, and wider ceilings for tbb, sentence-transformers and sphinx-polyversion. Closed at the release owner's direction as deferred past 0.8.2: none belongs in a frozen patch release, and the build-closure bumps would change every artifact digest. They were opened because dependabot's configuration on main targets the active release line (#545, #546), so the weekly schedule will collide with this gate at every release until it targets main.",
  "result": "gh pr list --base release/0.8.2 --state open returns [] (0 open pull requests), exit 0"
 }

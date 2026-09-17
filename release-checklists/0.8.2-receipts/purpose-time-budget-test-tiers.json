@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "fca91130ba1ffe7ffdc24cfcaed7c2d589fe8665",
+ "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
  "command": "python3 -c \"import json;d=json.load(open('$SC/check-runs.json'));r=[x for p in d for x in p['check_runs']];import re;names=sorted({x['name'] for x in r if re.search(r'core /|full /|optional extras|smoke /|numerical /|hardware /', x['name'])});print('\\n'.join('%s: %s' % (n, sorted({y['conclusion'] for y in r if y['name']==n and y['conclusion']!='cancelled'})) for n in names))\"",
- "date": "2026-09-16",
- "evidence_digest": "06ae30686d2f69665bf9c4c3e8be7f9fad6adf4a42679fe10af51a3b0b5a8ede",
+ "date": "2026-09-17",
+ "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
  "gate": "Purpose/time-budget test tiers",
- "note": "Recorded with its failure: on this commit's dispatch, full / py3.12 / shard 0 first reached 99% of its tests in about 27 minutes, printed nothing for 43 more, and was killed at its 4200-second budget; the rerun passed. The same stall killed the shard on 909ec532, and green runs of that shard take 12-17 minutes, so this is a hang at the tail of the shard rather than slow tests. It is not yet diagnosed; the success above is the rerun's.",
- "result": "every tier lane on the release tip is success -- 19 of them across smoke, core (py3.11 and py3.12 shards 0-3, macOS arm64 py3.11/py3.12, minimum versions), full (py3.12 shards 0-3 and the coverage floor) and optional extras (shards 0-1) -- plus the two dispatch-only lanes, numerical / repeated-seed stress (check run 104738074165) and hardware / MPI and torchrun (check run 104738073373), each success in the dispatch run and skipped in the superseded push run"
+ "note": "This commit's dispatch passed on its first attempt. Recorded all the same: on 909ec532 and fca91130, full / py3.12 / shard 0 reached 99% of its tests in about 27 minutes, printed nothing for 43 more, and was killed at its 4200-second budget; each rerun passed. Green runs of that shard take 12-17 minutes, and the same shard passes locally in 17 (3,580 tests, xdist with coverage), so the stall is intermittent and runner-side. It is not yet diagnosed.",
+ "result": "every tier lane on the release tip is success -- 19 of them across smoke, core (py3.11 and py3.12 shards 0-3, macOS arm64 py3.11/py3.12, minimum versions), full (py3.12 shards 0-3 and the coverage floor) and optional extras (shards 0-1) -- plus the two dispatch-only lanes, numerical / repeated-seed stress (check run 105038720737) and hardware / MPI and torchrun (check run 105038720606), each success in the dispatch run and skipped in the superseded push run"
 }

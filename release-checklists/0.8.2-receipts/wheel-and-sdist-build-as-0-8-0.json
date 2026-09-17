@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "fca91130ba1ffe7ffdc24cfcaed7c2d589fe8665",
- "command": "cd $SC/srcA && SOURCE_DATE_EPOCH=1700000000 $SC/buildenv/bin/python -m build --no-isolation --outdir $SC/dist-a . >/dev/null 2>&1; echo 'build A exit='$?; cd $SC/srcB && SOURCE_DATE_EPOCH=1700000000 $SC/buildenv/bin/python -m build --no-isolation --outdir $SC/dist-b . >/dev/null 2>&1; echo 'build B exit='$?; cd . && for d in a b; do PYTHONPATH=. <venv>/bin/python scripts/normalize_sdist.py $SC/dist-$d/mixle-0.8.2rc2.tar.gz 1700000000 >/dev/null; done; shasum -a 256 $SC/dist-a/mixle-0.8.2rc2-py3-none-any.whl $SC/dist-b/mixle-0.8.2rc2-py3-none-any.whl $SC/dist-a/mixle-0.8.2rc2.tar.gz $SC/dist-b/mixle-0.8.2rc2.tar.gz | sed 's#/.*/gatework/##'",
- "date": "2026-09-16",
- "evidence_digest": "06ae30686d2f69665bf9c4c3e8be7f9fad6adf4a42679fe10af51a3b0b5a8ede",
+ "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
+ "command": "cd $SC/srcA && SOURCE_DATE_EPOCH=1700000000 $SC/buildenv/bin/python -m build --no-isolation --outdir $SC/dist-a . >/dev/null 2>&1; echo 'build A exit='$?; cd $SC/srcB && SOURCE_DATE_EPOCH=1700000000 $SC/buildenv/bin/python -m build --no-isolation --outdir $SC/dist-b . >/dev/null 2>&1; echo 'build B exit='$?; cd . && for d in a b; do PYTHONPATH=. <venv>/bin/python scripts/normalize_sdist.py $SC/dist-$d/mixle-0.8.2rc3.tar.gz 1700000000 >/dev/null; done; shasum -a 256 $SC/dist-a/mixle-0.8.2rc3-py3-none-any.whl $SC/dist-b/mixle-0.8.2rc3-py3-none-any.whl $SC/dist-a/mixle-0.8.2rc3.tar.gz $SC/dist-b/mixle-0.8.2rc3.tar.gz | sed 's#/.*/gatework/##'",
+ "date": "2026-09-17",
+ "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
  "gate": "Wheel and sdist build as 0.8.0",
  "note": "Built with the pinned closure of 0.8.2-build-requirements.txt (build 1.5.0, setuptools 83.0.0, wheel 0.47.0).",
- "result": "two independent builds from `git archive fca91130` into separate source trees, SOURCE_DATE_EPOCH=1700000000, both exit 0; after scripts/normalize_sdist.py the two artifact sets are byte-identical -- wheel 5b48d610b2a125ae2a62c84976f0ae99dd25aa175b48a329d8af589a6bf7c564, sdist a0ee460706c3388ee3b574c1e7a5beb20d642f830e13ed3d9f9ff5e4fac6c5d7; both name the rehearsal version, mixle-0.8.2rc2"
+ "result": "two independent builds from `git archive a36d6860` into separate source trees, SOURCE_DATE_EPOCH=1700000000, both exit 0; after scripts/normalize_sdist.py the two artifact sets are byte-identical -- wheel d448922cf77477970dd7698a59c143447178dd656cadf5a542e5be1412211923, sdist d80b2e669d58c6da0b05659aaac723da2bb40b1c66f03453a9093739f7d437e1; both name the rehearsal version, mixle-0.8.2rc3"
 }

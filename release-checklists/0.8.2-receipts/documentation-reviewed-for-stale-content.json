@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "fca91130ba1ffe7ffdc24cfcaed7c2d589fe8665",
+ "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
  "command": "page-by-page review recorded in release-checklists/0.8.2-reviews/documentation-review.md and its 2026-09-15 addendum; `PYTHONPATH=. python -m sphinx -W --keep-going -b html docs <out>` on `git archive` of this commit",
- "date": "2026-09-16",
- "evidence_digest": "06ae30686d2f69665bf9c4c3e8be7f9fad6adf4a42679fe10af51a3b0b5a8ede",
+ "date": "2026-09-17",
+ "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
  "gate": "Documentation reviewed for stale content",
  "note": "The page-by-page review found far less to repair than 0.8.1's (31 items on 16 pages) because the version strings, docs-site prefix and release-facing framing moved to 0.8.2 when the branch was cut; the addendum records what it missed.",
  "result": "882 source pages, 883 written; `sphinx -W` exits 0 with 0 WARNING/ERROR lines. The 2026-09-08 review repaired 2 stale items (both in claim-evidence-ledger.rst); the ten-pass review then found 8 documentation findings in docs/ and a library docstring that the review had passed (Q04-F04, Q05-F09, Q05-F11, Q06-F13, Q07-F05, Q08-F13, Q09-F15, Q10-F03), all repaired in c836cbf1"

@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "fca91130ba1ffe7ffdc24cfcaed7c2d589fe8665",
+ "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
  "command": "find mixle -name '*.py' -not -path '*/tests/*' | xargs wc -l | sort -rn | sed -n '2,10p'; echo -n 'non-test modules: '; find mixle -name '*.py' -not -path '*/tests/*' | wc -l | tr -d ' '",
- "date": "2026-09-16",
- "evidence_digest": "06ae30686d2f69665bf9c4c3e8be7f9fad6adf4a42679fe10af51a3b0b5a8ede",
+ "date": "2026-09-17",
+ "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
  "gate": "Large stable modules audited without blind refactoring",
  "note": "Preparation-time narrative, as the checklist row itself says: nothing re-checks the quality of the audit. The measurement evidences module sizes only.",
  "result": "811 non-test modules; the 9 largest are 2,765-5,533 lines (hidden_markov 5533, ppl/inference 5221, temporal_graph_grammar 4424, ppl/core 3479, automatic/profiling 3352, structured_hmm 3320, tree_hidden_markov_model 3004, inference/estimation 2948, markov_chain 2765)"

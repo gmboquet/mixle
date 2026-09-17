@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "fca91130ba1ffe7ffdc24cfcaed7c2d589fe8665",
+ "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
  "command": "git fetch -q origin main; git merge-base --is-ancestor $(git rev-parse origin/main) HEAD; echo ANCESTOR_EXIT=$?; echo -n 'origin/main '; git rev-parse origin/main; echo -n 'HEAD '; git rev-parse HEAD",
- "date": "2026-09-16",
- "evidence_digest": "06ae30686d2f69665bf9c4c3e8be7f9fad6adf4a42679fe10af51a3b0b5a8ede",
+ "date": "2026-09-17",
+ "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
  "gate": "Release branch ancestry includes current `main`",
  "note": "main's #546-#549 reached the release line through the merge #550.",
- "result": "git merge-base --is-ancestor exits 0: origin/main 6ef6a74eb7845641ce8b9e44c7cd348fd743ecc3 is an ancestor of release/0.8.2 at fca91130ba1ffe7ffdc24cfcaed7c2d589fe8665"
+ "result": "git merge-base --is-ancestor exits 0: origin/main 6ef6a74eb7845641ce8b9e44c7cd348fd743ecc3 is an ancestor of release/0.8.2 at a36d686080451ca27d496ec71f2742cf7fc26c78"
 }
