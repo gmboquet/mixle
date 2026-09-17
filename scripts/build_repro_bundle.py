@@ -134,12 +134,16 @@ _ENTRIES = (
         "configuration": {"seed": "declared in script", "dataset": "synthetic"},
         "expected": {
             "format": "text",
-            # The provenance line names the commit being reproduced from, so it cannot be part of a
-            # fixed digest: the recorded one was valid at 6fbb182a and wrong at every commit after.
+            # The provenance line names the commit being reproduced from AND the installed mixle
+            # version, so neither can be part of a fixed digest: the commit made the recorded one
+            # valid at 6fbb182a and wrong at every commit after, and the version makes a digest
+            # measured on one install wrong on every other -- a development install reports
+            # 0.8.0.dev0, the rehearsal wheel 0.8.2rc2, the release wheel 0.8.2. Which candidate is
+            # executing is bound separately, by the candidate and wheel records the resolver requires.
             "volatile": [
                 {
-                    "pattern": r"git / mixle  : (?:[0-9a-f]{7,40}|unknown) / ",
-                    "placeholder": "git / mixle  : <commit> / ",
+                    "pattern": r"git / mixle  : (?:[0-9a-f]{7,40}|unknown) / \S+",
+                    "placeholder": "git / mixle  : <commit> / <version>",
                 },
                 # The model fingerprint hashes the fitted parameters' raw float64 bytes
                 # (mixle.data.hashing._canonical), and a fit differs by ULPs per CPU/BLAS, so the hex
@@ -159,13 +163,15 @@ _ENTRIES = (
             # the checkpoint demo now fits overlapping components that are still climbing at
             # iteration 9. Digest measured identical on macOS arm64 and emulated x86_64 Linux with
             # the pinned numpy/scipy; the model hash remains the one declared-volatile span.
-            # 0.8.2: repinned because the recorded digest was never right for this entry's own
-            # volatile rules. The example's output normalizes to the same bytes on the 0.8.1 tree
-            # (release/0.8.1) and on this one -- d4f80090... both times, verified by applying the
-            # two rules below by hand -- and neither is aa6e4d98..., so the old value could not have
-            # been produced by a run through this normalization. Nothing in 0.8.2 changed this
-            # example's behaviour; the pin was stale before 0.8.2 opened.
-            "stdout_sha256": "d4f800900718c2d3729788103a63ec71b891b6cf40e32c33dd6f0df56e73565c",
+            # 0.8.2, corrected by the rehearsal (D-0216): the 2026-09-08 repin to d4f80090... was
+            # wrong. It was measured on a development install, whose provenance line reads 0.8.0.dev0,
+            # and the version was not yet a volatile span, so the pin could only ever match that
+            # install. The 0.8.1 pin it replaced, aa6e4d98..., was right for 0.8.1: it is this same
+            # output with 0.8.1 installed. The rehearsal's prepare phase, which runs the entry against
+            # the installed candidate wheel, produced 29fb061b... (0.8.2rc2); the release wheel would
+            # have produced 777c247c.... With the version declared volatile the digest is the same for
+            # every install, which is measured on a development install and on the rc2 wheel alike.
+            "stdout_sha256": "7b3b4707d1556ef8a451fd378de0037f2bc6e35d32f6e2024847d31eee5914ed",
             "contains": [
                 "# lineage verified: True",
                 "drift on shifted batch: True",

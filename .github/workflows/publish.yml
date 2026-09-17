@@ -390,7 +390,11 @@ jobs:
           PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
         run: |
           set -euo pipefail
-          for attempt in 1 2 3 4 5 6; do
+          # Forty tries fifteen seconds apart. The list used to read "1 2 3 4 5 6" beside a guard of
+          # 40, so the ten-minute wait below was never reached: after 90 seconds the loop fell
+          # through and the digest check failed on an empty directory with a misleading message.
+          fetched=false
+          for attempt in $(seq 1 40); do
             rm -rf testpypi-artifacts
             mkdir testpypi-artifacts
             # The wheel comes through pip. The sdist must NOT: `pip download --no-binary` prepares
@@ -412,14 +416,18 @@ jobs:
           urllib.request.urlretrieve(sdists[0]["url"], "testpypi-artifacts/" + sdists[0]["filename"])
           EOF
             then
+              fetched=true
               break
             fi
             # TestPyPI's simple index lists a fresh upload only after propagation; the 0.8.1
             # rehearsal (run 34093207858) uploaded successfully and then failed here after six
             # tries over one minute, and the re-dispatch passed once the index had caught up.
-            test "$attempt" -lt 40
             sleep 15
           done
+          if [ "$fetched" != true ]; then
+            echo "mixle==$VERSION was not downloadable from TestPyPI after 40 attempts over ten minutes" >&2
+            exit 1
+          fi
           python scripts/verify_published_artifacts.py \
             --directory testpypi-artifacts \
             --sums candidate/metadata/SHA256SUMS
@@ -557,20 +565,26 @@ jobs:
           VERSION: ${{ needs.verify-candidate.outputs.candidate-version }}
         run: |
           set -euo pipefail
-          for attempt in 1 2 3 4 5 6; do
+          # Forty tries fifteen seconds apart (the list used to stop at six beside a guard of 40).
+          fetched=false
+          for attempt in $(seq 1 40); do
             rm -rf public-artifacts
             mkdir public-artifacts
             if python -m pip download --no-deps --only-binary=:all: \
                  --dest public-artifacts "mixle==$VERSION" &&
                python -m pip download --no-deps --no-binary=:all: \
                  --dest public-artifacts "mixle==$VERSION"; then
+              fetched=true
               break
             fi
             # PyPI's simple index lists a fresh upload only after propagation (the same race the
             # TestPyPI rehearsal hit); wait up to ten minutes before calling the bytes missing.
-            test "$attempt" -lt 40
             sleep 15
           done
+          if [ "$fetched" != true ]; then
+            echo "mixle==$VERSION was not downloadable from PyPI after 40 attempts over ten minutes" >&2
+            exit 1
+          fi
           python scripts/verify_published_artifacts.py \
             --directory public-artifacts \
             --sums candidate/metadata/SHA256SUMS

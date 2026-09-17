@@ -64,7 +64,7 @@
     {
       "path": "pyproject.toml",
       "role": "bundle-closure",
-      "sha256": "7c4c1d917fcb74fa69584f928ffc73df19e9c677502a11af310c00864b10022c"
+      "sha256": "1354f5a403f4b92a9904c641d3ecb496658ecc41755b3683b7680824607b3015"
     },
     {
       "path": "release-checklists/0.8.2-repro-environment.json",
@@ -79,7 +79,7 @@
     {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "4435c30f786c49d3a38f788ccd8061606529d17ba98a5a86574ad98a63e32006"
+      "sha256": "6e89fc9824255e8943136fbe25a321751358f825e629093513b0b1d35742a447"
     },
     {
       "path": "scripts/run_repro_entry.py",
@@ -185,11 +185,11 @@
           "chain intact: True"
         ],
         "format": "text",
-        "stdout_sha256": "d4f800900718c2d3729788103a63ec71b891b6cf40e32c33dd6f0df56e73565c",
+        "stdout_sha256": "7b3b4707d1556ef8a451fd378de0037f2bc6e35d32f6e2024847d31eee5914ed",
         "volatile": [
           {
-            "pattern": "git / mixle  : (?:[0-9a-f]{7,40}|unknown) / ",
-            "placeholder": "git / mixle  : <commit> / "
+            "pattern": "git / mixle  : (?:[0-9a-f]{7,40}|unknown) / \\S+",
+            "placeholder": "git / mixle  : <commit> / <version>"
           },
           {
             "pattern": "model hash  : [0-9a-f]{16} \\.\\.\\.",

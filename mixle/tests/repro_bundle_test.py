@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -101,13 +102,23 @@ def test_declared_volatile_spans_do_not_weaken_the_stdout_digest():
         runner._validate_output(stale, stdout)
 
     # the production entry is the one real user of the exemption, and exempts exactly two spans:
-    # the commit it reproduces from, and the model fingerprint (a hash of raw fitted float64
-    # bytes, which differ by ULPs per CPU/BLAS); every other byte of its stdout stays pinned
+    # the environment identity it reproduces from (commit and installed mixle version, which
+    # differ between a development install, a rehearsal wheel and the release wheel), and the
+    # model fingerprint (a hash of raw fitted float64 bytes, which differ by ULPs per CPU/BLAS);
+    # every other byte of its stdout stays pinned
     provenance = next(e for e in _bundle()["entries"] if e["id"] == "production-provenance")
     assert [rule["placeholder"] for rule in provenance["expected"]["volatile"]] == [
-        "git / mixle  : <commit> / ",
+        "git / mixle  : <commit> / <version>",
         "model hash  : <fit-dependent> ...",
     ]
+    # the version span is what a release wheel prints; a pin measured on any one install must
+    # hold on every other (the 0.8.2 rehearsal found a pin that held only on 0.8.0.dev0)
+    line_rule = provenance["expected"]["volatile"][0]
+    for installed in ("0.8.0.dev0", "0.8.2rc2", "0.8.2"):
+        normalized = re.sub(
+            line_rule["pattern"], line_rule["placeholder"], "  git / mixle  : eb83ac59 / %s\n" % installed
+        )
+        assert normalized == "  git / mixle  : <commit> / <version>\n"
 
 
 def test_bundle_rejects_unresolved_license_and_integrity_placeholders():
