@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
- "command": "PYTHONPATH=. <venv>/bin/python scripts/check_optional_extras.py; echo EXIT=$?; grep -E '^requires-python' pyproject.toml; gh api 'repos/gmboquet/mixle/actions/runs/35169676107/jobs?per_page=100' --jq '\"run head_sha: \\(.jobs[0].head_sha)\", ([.jobs[]|select(.name|startswith(\"install .\"))|.conclusion]|group_by(.)|map(\"install lanes \\(.[0]): \\(length)\")|.[]), (.jobs[]|select(.name==\"extras matrix / exact candidate\")|\"\\(.name): \\(.conclusion)\")'",
+ "candidate_commit": "da7ed609a1da806df09e6754b58006eeb824c0f5",
+ "command": "PYTHONPATH=. <venv>/bin/python scripts/check_optional_extras.py; echo EXIT=$?; grep -E '^requires-python' pyproject.toml; gh api 'repos/gmboquet/mixle/actions/runs/35177890025/jobs?per_page=100' --jq '\"run head_sha: \\(.jobs[0].head_sha)\", ([.jobs[]|select(.name|startswith(\"install .\"))|.conclusion]|group_by(.)|map(\"install lanes \\(.[0]): \\(length)\")|.[]), (.jobs[]|select(.name==\"extras matrix / exact candidate\")|\"\\(.name): \\(.conclusion)\")'",
  "date": "2026-09-17",
- "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
+ "evidence_digest": "a4e4657ba74483bda0083a2ce5135890430685144e62ec12ca7b80b1e751594a",
  "gate": "Extras resolver and supported Python/OS matrix",
- "note": "Re-measured against this commit's own Extras resolver matrix run. The rc1 and rc2 cuts of this receipt carried forward the run of the first pre-sign-off cut (34975360431 on a7345ca7) without re-reading it.",
- "result": "scripts/check_optional_extras.py printed 'all equals the runtime-feature extra union', exit 0; pyproject.toml declares requires-python = \">=3.11,<3.13\"; on this commit all 24 `install .[<extra>]` lanes and 'extras matrix / exact candidate' are success (Extras resolver matrix run 35169676107, head_sha a36d6860)"
+ "note": "Measured against this commit's own Extras resolver matrix run.",
+ "result": "scripts/check_optional_extras.py printed 'all equals the runtime-feature extra union', exit 0; pyproject.toml declares requires-python = \">=3.11,<3.13\"; on this commit all 24 `install .[<extra>]` lanes and 'extras matrix / exact candidate' are success (Extras resolver matrix run 35177890025, head_sha da7ed609)"
 }

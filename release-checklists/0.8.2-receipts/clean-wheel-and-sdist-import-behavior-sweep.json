@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
+ "candidate_commit": "da7ed609a1da806df09e6754b58006eeb824c0f5",
  "command": "unset PYTHONPATH; echo -n 'wheel env: '; $SC/cleanwheel/bin/python -m pip list --format=freeze | tr '\\n' ' '; echo; cd $SC && $SC/cleanwheel/bin/python $SC/import_sweep.py; echo 'wheel sweep exit='$?; echo -n 'sdist env: '; $SC/cleansdist/bin/python -m pip list --format=freeze | tr '\\n' ' '; echo; $SC/cleansdist/bin/python $SC/import_sweep.py; echo 'sdist sweep exit='$?; for v in $SC/cleanwheel $SC/cleansdist; do $v/bin/python -c \"import numpy as np; from mixle.inference import optimize; from mixle.stats import GaussianEstimator; m=optimize(list(np.random.RandomState(0).normal(0,1,200)), GaussianEstimator(), max_its=5, out=None); print(' fit:', round(float(m.mu),9), round(float(m.sigma2),9))\"; done; python3 -c \"import json;d=json.load(open('$SC/check-runs.json'));r=[x for p in d for x in p['check_runs']];sel=[x for x in r if x['name']=='clean-wheel install + import sweep' and x['conclusion']!='cancelled'];print('\\n'.join('%s: %s/%s (id=%s)' % (x['name'],x['status'],x['conclusion'],x['id']) for x in sel))\"",
  "date": "2026-09-17",
- "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
+ "evidence_digest": "a4e4657ba74483bda0083a2ce5135890430685144e62ec12ca7b80b1e751594a",
  "gate": "Clean wheel and sdist import/behavior sweep",
- "note": "The hosted lane ran in tests.yml's workflow_dispatch run 35169752047 on this commit, which superseded the push run; that run's copy of the lane shows as cancelled.",
- "result": "both the wheel and the sdist install into fresh venvs (numpy 2.5.3, scipy 1.18.1) and sweep all 810 public modules cleanly; a Gaussian fit on the same 200 rows returns identical parameters from both installs (mu 0.070910493, sigma2 1.043304472); the hosted 'clean-wheel install + import sweep' lane is completed/success on this commit (check run 105038720716)"
+ "note": "The hosted lane ran in tests.yml's workflow_dispatch run 35177930958 on this commit, which superseded the push run; that run's copy of the lane shows as cancelled.",
+ "result": "both the wheel and the sdist install into fresh venvs (numpy 2.5.3, scipy 1.18.1) and sweep all 810 public modules cleanly; a Gaussian fit on the same 200 rows returns identical parameters from both installs (mu 0.070910493, sigma2 1.043304472); the hosted 'clean-wheel install + import sweep' lane is completed/success on this commit (check run 105070883346)"
 }

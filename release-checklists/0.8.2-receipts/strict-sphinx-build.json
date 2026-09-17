@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
+ "candidate_commit": "da7ed609a1da806df09e6754b58006eeb824c0f5",
  "command": "grep -cE '^(WARNING|ERROR)|: (WARNING|ERROR):' $SC/sphinx_final.log; grep -E 'sphinx_exit=' $SC/sphinx_final.log; grep -E 'build succeeded' $SC/sphinx_final.log | tail -1; echo -n 'source pages read: '; grep -c 'reading sources' $SC/sphinx_final.log; echo -n 'pages written: '; grep -c 'writing output' $SC/sphinx_final.log",
  "date": "2026-09-17",
- "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
+ "evidence_digest": "a4e4657ba74483bda0083a2ce5135890430685144e62ec12ca7b80b1e751594a",
  "gate": "Strict Sphinx build",
  "note": "Measured locally. The hosted Docs run on this commit passed its 'Revision check (single-revision, warnings as errors)' job; its assemble and deploy jobs run only on publication and were skipped.",
  "result": "`sphinx -W --keep-going -b html docs` on `git archive` of this commit exits 0 with 0 WARNING/ERROR lines, reading 882 source pages and writing 883 ('build succeeded.')"

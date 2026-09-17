@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
+ "candidate_commit": "da7ed609a1da806df09e6754b58006eeb824c0f5",
  "command": "for e in gallery-univariate gallery-structured production-provenance scaling-backend; do printf '%s: ' $e; PYTHONPATH=. <venv>/bin/python scripts/run_repro_entry.py --entry $e >/dev/null 2>&1 && echo PASS || echo FAIL; done",
  "date": "2026-09-17",
- "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
+ "evidence_digest": "a4e4657ba74483bda0083a2ce5135890430685144e62ec12ca7b80b1e751594a",
  "gate": "Reproducibility bundle and independent replay",
- "note": "The production-provenance entry's pin was corrected on this cut. Its provenance line prints the installed mixle version, which was not yet a declared volatile span, and the 2026-09-08 pin (d4f80090...) had been measured on a development install reporting 0.8.0.dev0, so it could only match that install: the rc2 rehearsal's prepare phase, which runs the entry against the installed candidate wheel, failed on it, and the release wheel would have too. The version is now declared volatile beside the commit (pin 7b3b4707...), and the four entries pass both on the development install and against an installed rehearsal wheel in the bundle's pinned environment. The bundle also closes over pyproject.toml's digest, so it is regenerated on every cut that changes the version.",
+ "note": "The production-provenance entry's pin was corrected on this cut. Its provenance line prints the installed mixle version, which was not yet a declared volatile span, and the 2026-09-08 pin (d4f80090...) had been measured on a development install reporting 0.8.0.dev0, so it could only match that install: the rc2 rehearsal's prepare phase, which runs the entry against the installed candidate wheel, failed on it, and the release wheel would have too. The version is now declared volatile beside the commit (pin 7b3b4707...), and the four entries pass both on the development install and against an installed rehearsal wheel in the bundle's pinned environment. The bundle also closes over pyproject.toml's digest, so it was regenerated for each rehearsal version and again for 0.8.2.",
  "result": "all 4 entries of release-checklists/0.8.2-repro-bundle.json execute and validate: gallery-univariate, gallery-structured, production-provenance, scaling-backend"
 }

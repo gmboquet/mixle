@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
- "command": "git fetch -q --tags origin; echo -n 'refs matching v0.8.2 exactly: '; git ls-remote --tags origin 'refs/tags/v0.8.2' | wc -l | tr -d ' '; echo -n 'refs matching v0.8.2rc3 exactly: '; git ls-remote --tags origin 'refs/tags/v0.8.2rc3' | wc -l | tr -d ' '; echo -n 'existing v0.8.* tags: '; git ls-remote --tags origin 'v0.8.*' | grep -v '\\^{}' | awk '{print $2}' | tr '\n' ' '",
+ "candidate_commit": "da7ed609a1da806df09e6754b58006eeb824c0f5",
+ "command": "git fetch -q --tags origin; echo -n 'refs matching v0.8.2 exactly: '; git ls-remote --tags origin 'refs/tags/v0.8.2' | wc -l | tr -d ' '; echo -n 'existing v0.8.* tags: '; git ls-remote --tags origin 'v0.8.*' | grep -v '\\^{}' | awk '{print $2}' | tr '\n' ' '",
  "date": "2026-09-17",
- "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
+ "evidence_digest": "a4e4657ba74483bda0083a2ce5135890430685144e62ec12ca7b80b1e751594a",
  "gate": "No pre-existing `v0.8.0` tag",
- "note": "The gate is named for 0.8.0 because it was written for that checklist; what it checks here is that neither this release's tag nor the rehearsal tag about to be cut already exists. v0.8.2rc1 and v0.8.2rc2 do exist: they are rehearsal cuts the rehearsal itself stopped in the prepare phase (D-0216, amended), and nothing was uploaded to any index under either. Matched exactly, not by prefix, so a rehearsal tag cannot stand in for the release tag.",
- "result": "no ref on origin matches refs/tags/v0.8.2 or refs/tags/v0.8.2rc3, this cut's rehearsal tag; origin carries refs/tags/v0.8.0, refs/tags/v0.8.1, refs/tags/v0.8.2rc1 and refs/tags/v0.8.2rc2"
+ "note": "The gate is named for 0.8.0 because it was written for that checklist; what it checks here is that this release's own tag does not already exist. The v0.8.2rc tags are the D-0216 rehearsal cuts: rc1 and rc2 were stopped in prepare before anything was uploaded, and rc3 ran green end to end and is published as a pre-release. Matched exactly, not by prefix, so a rehearsal tag cannot stand in for the release tag.",
+ "result": "no ref on origin matches refs/tags/v0.8.2; origin carries refs/tags/v0.8.0, refs/tags/v0.8.1 and the three rehearsal tags refs/tags/v0.8.2rc1, refs/tags/v0.8.2rc2 and refs/tags/v0.8.2rc3"
 }

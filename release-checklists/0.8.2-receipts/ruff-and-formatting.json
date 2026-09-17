@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
+ "candidate_commit": "da7ed609a1da806df09e6754b58006eeb824c0f5",
  "command": "cd . && <venv>/bin/ruff --version && <venv>/bin/ruff check mixle && <venv>/bin/ruff format --check mixle | tail -1; echo EXIT=$?",
  "date": "2026-09-17",
- "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
+ "evidence_digest": "a4e4657ba74483bda0083a2ce5135890430685144e62ec12ca7b80b1e751594a",
  "gate": "Ruff and formatting",
  "result": "ruff 0.15.20: `ruff check mixle` prints 'All checks passed!' and `ruff format --check mixle` reports 2103 files already formatted; exit 0"
 }

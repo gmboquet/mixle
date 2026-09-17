@@ -1,9 +1,9 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
+ "candidate_commit": "da7ed609a1da806df09e6754b58006eeb824c0f5",
  "command": "PYTHONPATH=. <venv>/bin/python scripts/run_repro_entry.py --entry gallery-univariate >/dev/null 2>&1 && echo 'gallery-univariate: PASS (source-tree run, claim_status=unbound)'; echo -n 'intake record lines: '; wc -l < release-checklists/0.8.0-use-case-radon-multilevel.md",
  "date": "2026-09-17",
- "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
+ "evidence_digest": "a4e4657ba74483bda0083a2ce5135890430685144e62ec12ca7b80b1e751594a",
  "gate": "External use case",
  "note": "The intake record is retained from the 0.8.0/0.8.1 campaign; no new external user was recruited for this patch release.",
  "result": "the retained intake record release-checklists/0.8.0-use-case-radon-multilevel.md is present (257 lines) alongside the template; the gallery-univariate bundle entry executes and validates on this tree (source-tree run, claim_status=unbound)"

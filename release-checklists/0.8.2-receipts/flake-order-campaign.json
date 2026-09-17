@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
- "command": "gh api repos/gmboquet/mixle/commits/a36d686080451ca27d496ec71f2742cf7fc26c78/check-runs --paginate --jq '.check_runs[]|select(.name==\"numerical / repeated-seed stress\")|\"\\(.status)/\\(.conclusion)  id=\\(.id)  \\(.details_url)\"'",
+ "candidate_commit": "da7ed609a1da806df09e6754b58006eeb824c0f5",
+ "command": "gh api repos/gmboquet/mixle/commits/da7ed609a1da806df09e6754b58006eeb824c0f5/check-runs --paginate --jq '.check_runs[]|select(.name==\"numerical / repeated-seed stress\")|\"\\(.status)/\\(.conclusion)  id=\\(.id)  \\(.details_url)\"'",
  "date": "2026-09-17",
- "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
+ "evidence_digest": "a4e4657ba74483bda0083a2ce5135890430685144e62ec12ca7b80b1e751594a",
  "gate": "Flake/order campaign",
  "note": "That lane runs only on `workflow_dispatch`/`schedule`, so the push run on this commit skipped it; the success comes from the dispatch of tests.yml on this exact commit.",
- "result": "on the release tip a36d6860, numerical / repeated-seed stress = completed/success (check run 105038720737, workflow_dispatch run 35169752047)"
+ "result": "on the release tip da7ed609, numerical / repeated-seed stress = completed/success (check run 105070887394, workflow_dispatch run 35177930958)"
 }

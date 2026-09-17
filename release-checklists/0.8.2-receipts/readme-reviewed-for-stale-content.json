@@ -1,10 +1,10 @@
 {
  "artifact": "mixle.release_gate_receipt/v1",
- "candidate_commit": "a36d686080451ca27d496ec71f2742cf7fc26c78",
+ "candidate_commit": "da7ed609a1da806df09e6754b58006eeb824c0f5",
  "command": "line-by-line review recorded in release-checklists/0.8.2-reviews/readme-review.md and its 2026-09-15 addendum; machine checks on `git archive` of this commit with the candidate wheel's environment: `pytest --collect-only -q -m ''`, `base_dist_test._build_dists()`, `scripts/check_optional_extras.py`; and each of the seven fenced Python blocks executed from /tmp against the installed candidate wheel (block 6 exactly as committed, the five fragments with the context their prose declares)",
  "date": "2026-09-17",
- "evidence_digest": "27bab6600d526bf1eb0d34b8909ca1cd9e8c239a517a4c37ed84f687416f0311",
+ "evidence_digest": "a4e4657ba74483bda0083a2ce5135890430685144e62ec12ca7b80b1e751594a",
  "gate": "README reviewed for stale content",
- "note": "The record deliberately does not claim '7 of 7 snippets execute verbatim': five are fragments that name prose-defined values or carry an explicit `...`, and cannot. What was checked is that the library still does what each line says. The collected count is re-measured on this commit (16,899); the checklist row's 16,896 was measured on a7345ca7, before the rehearsal added three tests of the release tooling's version rule.",
+ "note": "The record deliberately does not claim '7 of 7 snippets execute verbatim': five are fragments that name prose-defined values or carry an explicit `...`, and cannot. What was checked is that the library still does what each line says. The collected count (16,899) is re-measured on this commit's export.",
  "result": "0 stale items on the 2026-09-08 line-by-line review; 3 README items then found wrong by pass 08 and repaired (Q08-F10, Q08-F11, Q08-F12). Re-measured 2026-09-15: 16,899 tests collected against the '15,000+' badge; 40 base-distribution configurations over 34 families; 'all equals the runtime-feature extra union', exit 0; all seven blocks exit 0, block 6 printing rank=6 and cumulative_probability=0.11396 against its comment's 0.114"
 }
