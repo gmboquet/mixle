@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools==83.0.0", "wheel==0.47.0"]
+requires = ["setuptools==84.0.0", "wheel==0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -127,7 +127,7 @@ test = ["pytest>=8", "pytest-xdist>=3.0", "pytest-cov>=5.0", "mongomock>=4.3"]
 # and, even where accepted, ties the binary to the exact build machine's CPU. This extra pulls the build
 # toolchain; the .pyx sources themselves ship in every sdist/wheel (MANIFEST.in +
 # [tool.setuptools.package-data]).
-kernels = ["Cython>=3.0,<4", "setuptools>=68,<84"]
+kernels = ["Cython>=3.0,<4", "setuptools>=68,<85"]
 # External comparison packages used by shipped examples. They are isolated from the core/test extras
 # because the examples explicitly compare against third-party implementations.
 examples = ["torch>=2.4,<3", "safetensors>=0.4.1,<1", "transformers>=4.40,<6", "peft>=0.11,<1", "scikit-learn>=1.4.2,<2", "pomegranate>=1.0,<2", "hmmlearn>=0.3,<1"]
@@ -163,7 +163,7 @@ all = [
     "safetensors>=0.4.1,<1",
     "scikit-learn>=1.4.2,<2",
     "sentence-transformers>=3.0,<6",
-    "setuptools>=68,<84",
+    "setuptools>=68,<85",
     "sqlalchemy>=2.0,<3",
     "sympy>=1.12,<2",
     "tbb>=2021.6,<2022; platform_machine == 'x86_64'",
