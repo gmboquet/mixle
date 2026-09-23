@@ -101,7 +101,7 @@ lightning = ["lightning>=2.4,<3"]
 torch = ["torch>=2.4,<3", "safetensors>=0.4.1,<1"]
 # the assembled laptop scientist (mixle.scientist): real open-weight encoders + a local LLM as typed
 # leaves. Weights load from the local HF cache; nothing is downloaded at import.
-scientist = ["torch>=2.4,<3", "safetensors>=0.4.1,<1", "transformers>=4.40,<6", "sentence-transformers>=3.0,<6"]
+scientist = ["torch>=2.4,<3", "safetensors>=0.4.1,<1", "transformers>=4.40,<6", "sentence-transformers>=3.0,<7"]
 # Documentation build (Sphinx site): the Furo theme + MyST markdown; autodoc mocks the heavy back-ends.
 # sphinx-polyversion remains only for the legacy development preview in docs/poly.py. Release docs are
 # built once during publication and assembled from authenticated archives rather than rebuilt by it.
@@ -162,7 +162,7 @@ all = [
     "ray>=2.31,<3",
     "safetensors>=0.4.1,<1",
     "scikit-learn>=1.4.2,<2",
-    "sentence-transformers>=3.0,<6",
+    "sentence-transformers>=3.0,<7",
     "setuptools>=68,<84",
     "sqlalchemy>=2.0,<3",
     "sympy>=1.12,<2",
