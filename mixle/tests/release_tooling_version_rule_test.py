@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BUNDLE = ROOT / "release-checklists" / "0.8.2-repro-bundle.json"
+BUNDLE = ROOT / "release-checklists" / "0.8.3-repro-bundle.json"
 
 
 def _script(name):
@@ -63,6 +63,6 @@ def test_the_bundle_requires_the_wheel_record_by_pattern_not_by_release_name():
     wheel_patterns = [pattern for pattern in required if pattern.endswith(".whl.json")]
     assert len(wheel_patterns) == 1, "exactly one wheel record is required"
     pattern = wheel_patterns[0]
-    for version in ("0.8.2", "0.8.2rc1"):
+    for version in ("0.8.3", "0.8.3rc1"):
         name = "metadata/mixle-%s-py3-none-any.whl.json" % version
         assert fnmatch.fnmatch(name, pattern), f"{pattern!r} does not match {name!r}"

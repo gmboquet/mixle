@@ -1,12 +1,12 @@
 Release Notes
 =============
 
-Mixle 0.8.2 is a patch release of 0.8.1 with the same public surface: it repairs the defects the ten adversarial reviews of the 0.8.1 candidate deferred (decision D-0213; see :doc:`migrations/0.8.2` for the repairs that now raise where 0.8.1 fit quietly), the release-process defects the 0.8.1 publication exposed, and the blocking and documentation findings of a second ten-pass review run on the 0.8.2 candidate itself (decision D-0217; the rest are recorded for 0.8.3). Mixle 0.8.1 is the credibility, correctness, and evidence release, published as the first release of the 0.8 line (0.8.0 was prepared under the same evidence but never published; decision D-0212). It retains
+Mixle 0.8.3 is a patch release of 0.8.2 with the same public surface, in preparation: it repairs the findings the ten-pass adversarial review of the 0.8.2 candidate deferred (decision D-0217; see :doc:`migrations/0.8.3` for the repairs that raise where 0.8.2 fit quietly) and the release-process items the 0.8.2 publication recorded. Mixle 0.8.2 repaired the defects the ten adversarial reviews of the 0.8.1 candidate deferred (decision D-0213; :doc:`migrations/0.8.2`) and the blocking findings of the ten-pass review of its own candidate. Mixle 0.8.1 is the credibility, correctness, and evidence release, published as the first release of the 0.8 line (0.8.0 was prepared under the same evidence but never published; decision D-0212). It retains
 the library's broad probabilistic-modeling surface while making maturity,
 compatibility, numerical behavior, release claims, and operational limits
 explicit and machine-checkable.
 
-This page describes the 0.8.2 release branch. It is not a publication
+This page describes the 0.8.3 release branch. It is not a publication
 claim. Final artifact hashes, exact-tip CI results, independent review, and
 post-publication verification remain release gates.
 
@@ -91,11 +91,11 @@ documentation, and applicable security checks. The active release branch also
 runs tests, strict documentation validation, and security auditing on its exact
 tip after integration.
 
-Before publication, the 0.8.2 checklist still requires an immutable candidate
+Before publication, the 0.8.3 checklist still requires an immutable candidate
 artifact, clean-wheel and resolver evidence tied to that candidate, realistic
 backend and performance receipts for retained claims, ten AI adversarial reviews
 of the notebook corpus and the examples (replacing the external-tester gate,
 D-0212), README and documentation stale-content reviews, the final version row,
 release-owner sign-off, and post-publication verification. See :doc:`release-readiness`,
-:doc:`claim-evidence-ledger`, and the tracked 0.8.2 checklist for the current
+:doc:`claim-evidence-ledger`, and the tracked 0.8.3 checklist for the current
 state.

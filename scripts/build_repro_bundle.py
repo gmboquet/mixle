@@ -1,4 +1,4 @@
-"""Build the content-addressed 0.8.2 reproduction-bundle specification."""
+"""Build the content-addressed 0.8.3 reproduction-bundle specification."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-BUNDLE = ROOT / "release-checklists" / "0.8.2-repro-bundle.json"
+BUNDLE = ROOT / "release-checklists" / "0.8.3-repro-bundle.json"
 
 # The check-evidence record that binds a candidate to APPROVED checks is produced by exactly one
 # generator (scripts/verify_required_checks.py, run by publish.yml) over exactly one policy (the
@@ -45,8 +45,8 @@ CHECK_EVIDENCE_ATTESTATION = {
 
 _CLOSURE_PATHS = (
     "pyproject.toml",
-    "release-checklists/0.8.2-repro-environment.json",
-    "release-checklists/0.8.2-repro-requirements.txt",
+    "release-checklists/0.8.3-repro-environment.json",
+    "release-checklists/0.8.3-repro-requirements.txt",
     "scripts/build_repro_bundle.py",
     "scripts/run_repro_entry.py",
     REQUIRED_CHECKS_POLICY,
@@ -221,7 +221,7 @@ def build() -> dict:
         entries.append(entry)
     return {
         "artifact": "mixle.reproduction_bundle/v2",
-        "release": "0.8.2",
+        "release": "0.8.3",
         "candidate_binding": {
             "policy": "exact-publish-workflow-candidate",
             "repository": REPOSITORY,
@@ -243,10 +243,10 @@ def build() -> dict:
             "candidate_record_producer": CANDIDATE_RECORD_PRODUCER,
             "rule": (
                 "The final bundle is incomplete unless these retained records bind its source commit, "
-                "approved checks, wheel SHA-256, and local entry receipts to the signed v0.8.2 tag."
+                "approved checks, wheel SHA-256, and local entry receipts to the signed v0.8.3 tag."
             ),
         },
-        "environment": "release-checklists/0.8.2-repro-environment.json",
+        "environment": "release-checklists/0.8.3-repro-environment.json",
         "closure": [_input(path, "bundle-closure") for path in _CLOSURE_PATHS],
         "code_license": {"spdx": "MIT", "files": ["LICENSE", "NOTICE"]},
         "acceptance": (

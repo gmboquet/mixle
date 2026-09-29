@@ -11,7 +11,7 @@ pip install -e ".[test,lint,docs]"  # add other extras (torch, numba, spark, ...
 git config core.hooksPath .githooks # auto-format + lint-fix staged files before every commit
 ```
 
-Python 3.11 or 3.12 is required; those are the complete 0.8.2 release matrix.
+Python 3.11 or 3.12 is required; those are the complete 0.8.3 release matrix.
 
 <!-- BEGIN GENERATED DEVELOPMENT POLICY -->
 ## Authoritative development policy
@@ -19,7 +19,7 @@ Python 3.11 or 3.12 is required; those are the complete 0.8.2 release matrix.
 This summary is generated from `manifests/development_policy.json`; edit the manifest and rerun
 `python scripts/render_contributing_policy.py` rather than changing this block by hand.
 
-Current work targets `release/0.8.2` and milestone `0.8.2`. Automated
+Current work targets `release/0.8.3` and milestone `0.8.3`. Automated
 dependency updates target the same branch. Retarget both the manifest and Dependabot deliberately
 when the release line changes.
 

@@ -19,8 +19,8 @@ in their owning projects.
 Before governed work, read and follow AGENTS.md in the Mixle status
 repository. Resolve the active release and task profile from status instead of
 inferring them from a branch name. As of this document version, development
-targets release 0.8.2 on release/0.8.2 (the 0.8.2 patch of the shipped 0.8.1 artifact: the
-follow-ups the ten adversarial reviews deferred, D-0213).
+targets release 0.8.3 on release/0.8.3 (the 0.8.3 patch of the shipped 0.8.2 artifact: the
+follow-ups the ten-pass review of the 0.8.2 candidate deferred, D-0217).
 
 ## Local boundaries
 

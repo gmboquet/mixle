@@ -10,6 +10,14 @@ summarizes user-visible documentation, public API coverage, validation
 expectations, and migration guidance. Use :doc:`release-notes` for the detailed
 current-release narrative and the git history for exact implementation commits.
 
+0.8.3
+-----
+
+A patch release of 0.8.2 with the same public surface, in preparation. It repairs the findings the
+ten-pass adversarial review of the 0.8.2 candidate deferred (``release-checklists/0.8.3-followups.md``,
+decision D-0217) and the release-process items the 0.8.2 publication recorded there. Nothing is repaired
+yet; every repair that raises where 0.8.2 fit quietly will be listed in :doc:`migrations/0.8.3`.
+
 0.8.2
 -----
 

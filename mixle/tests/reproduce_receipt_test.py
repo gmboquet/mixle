@@ -699,7 +699,7 @@ class ProvenanceAndPartialInstallMediumsTest(unittest.TestCase):
             hash = type("H", (), {"mode": "sha256", "value": "x"})()
 
         class _Dist:
-            version = "0.8.2"
+            version = "0.8.3"
             files = [_Item("mixle/__init__.py"), _Item("mixle/blending.py")]
 
             @staticmethod

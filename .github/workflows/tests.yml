@@ -4,7 +4,7 @@ on:
   # Main and the active release branch run exact-tip CI. Pull-request branches are covered by the
   # pull_request event, so ordinary work branches do not trigger duplicate runs.
   push:
-    branches: [main, release/0.8.2]
+    branches: [main, release/0.8.3]
   pull_request:
   workflow_dispatch:
   schedule:
@@ -21,7 +21,7 @@ permissions:
 jobs:
   decision-reviews:
     name: release decisions / accepted review
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/release/0.8.2')
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/release/0.8.3')
     runs-on: ubuntu-latest
     # Full history and tags: the attribution check below reads a commit RANGE, and a shallow
     # checkout has neither the base tag nor the messages to read.
@@ -37,7 +37,7 @@ jobs:
       - name: Block release sign-off on pending decision reviews
         run: |
           python scripts/verify_decision_reviews.py release-checklists/0.8.0-decisions.md
-          python scripts/verify_decision_reviews.py release-checklists/0.8.2-decisions.md
+          python scripts/verify_decision_reviews.py release-checklists/0.8.3-decisions.md
       # The ledger's identity gate reads only %an/%cn, so a Co-Authored-By trailer naming a tool sits
       # in the message BODY and passes it. The 0.7.0 line shipped forty of those and needed a history
       # rewrite to remove them, which changed every commit SHA from mid-2026: cheap to prevent, very
@@ -364,7 +364,7 @@ jobs:
       - name: Build the wheel and source distribution
         run: |
           python -m pip install --upgrade "pip==26.1.2"
-          python -m pip install -r release-checklists/0.8.2-build-requirements.txt
+          python -m pip install -r release-checklists/0.8.3-build-requirements.txt
           python -m build --no-isolation --outdir dist
       - name: Install each artifact into its own clean base environment
         run: |

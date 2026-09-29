@@ -58,38 +58,38 @@
       "metadata/mixle-*-py3-none-any.whl.json",
       "metadata/reproduction-*.json"
     ],
-    "rule": "The final bundle is incomplete unless these retained records bind its source commit, approved checks, wheel SHA-256, and local entry receipts to the signed v0.8.2 tag."
+    "rule": "The final bundle is incomplete unless these retained records bind its source commit, approved checks, wheel SHA-256, and local entry receipts to the signed v0.8.3 tag."
   },
   "closure": [
     {
       "path": "pyproject.toml",
       "role": "bundle-closure",
-      "sha256": "2934e87b386ed2c1a0ecdfbae9881a69a377404f66e9902e036dcef74f5fa541"
+      "sha256": "1aa84670646c686f29fc37e546f0f9ae6bfbb435573b7dcb1405583b18608860"
     },
     {
-      "path": "release-checklists/0.8.2-repro-environment.json",
+      "path": "release-checklists/0.8.3-repro-environment.json",
       "role": "bundle-closure",
-      "sha256": "3fcd4107497f98ab6a50cb6c7ce7a4f43d873e2685fafeab4cb00e1c7f1d0845"
+      "sha256": "893a1fc92dbd60a8fcb654b0fc4b9c702938ef6588936f8ecd0a1da1de33c9b0"
     },
     {
-      "path": "release-checklists/0.8.2-repro-requirements.txt",
+      "path": "release-checklists/0.8.3-repro-requirements.txt",
       "role": "bundle-closure",
       "sha256": "16b16e4d2783b52975a46b5cee28e8d89ef4fa585901b76f189fce235bc77254"
     },
     {
       "path": "scripts/build_repro_bundle.py",
       "role": "bundle-closure",
-      "sha256": "6e89fc9824255e8943136fbe25a321751358f825e629093513b0b1d35742a447"
+      "sha256": "12f7b95189ba4d759824b534f62e07cbc26f75d14ff3866358030fca5c02219c"
     },
     {
       "path": "scripts/run_repro_entry.py",
       "role": "bundle-closure",
-      "sha256": "f1194ed3c0490d396a980a444eaf237bc62f69395fe62d10e258df722f366092"
+      "sha256": "568fab8cbcb7612e0363ba39a1e89fa0793af30bb7cf9032de2c1fa6c0619478"
     },
     {
       "path": ".github/release-required-checks.txt",
       "role": "bundle-closure",
-      "sha256": "829b9936cdfbe0dad17831a792fc2fdf1fd28dea783b73b850e8f375f9db378e"
+      "sha256": "037bb2bea02a79750e416b855a1ca8c855d4071f84fedad1b1e3048c014fd9f1"
     },
     {
       "path": "scripts/verify_required_checks.py",
@@ -99,7 +99,7 @@
     {
       "path": "scripts/release_candidate_record.py",
       "role": "bundle-closure",
-      "sha256": "73542530ed81ba5a2607eb4261e0b540c2a0d2ac147753cff194515b35ce1083"
+      "sha256": "4fa33d0db598c772b9d2fcb1483874bc099fc31e7e7a174115a174a7230a294c"
     }
   ],
   "code_license": {
@@ -240,6 +240,6 @@
       "timeout_seconds": 30
     }
   ],
-  "environment": "release-checklists/0.8.2-repro-environment.json",
-  "release": "0.8.2"
+  "environment": "release-checklists/0.8.3-repro-environment.json",
+  "release": "0.8.3"
 }
