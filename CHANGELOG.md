@@ -13,7 +13,9 @@ the findings the ten-pass adversarial review of the 0.8.2 candidate deferred
 (`release-checklists/0.8.3-followups.md`, decision D-0217) and the release-process items the 0.8.2
 publication recorded there (P-01, P-02) to be repaired. Nothing is repaired yet: this section is the release
 document the gates read, and it grows as repairs land. Every repair that turns a silent wrong answer into an
-error will be listed in the [0.8.3 migration guide](docs/migrations/0.8.3.md).
+error will be listed in the [0.8.3 migration guide](docs/migrations/0.8.3.md). Until the final cut the branch
+carries the pre-release version `0.8.3rc1`, so anything built from it is a PEP 440 pre-release that a default
+`pip install` never selects.
 
 ## [0.8.2] — 2026-09-17
 
