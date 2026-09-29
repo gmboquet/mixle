@@ -1,0 +1,104 @@
+{
+  "artifact": "mixle.family_release/v1",
+  "release": "0.8.3",
+  "version": "0.8.3rc1",
+  "branch": "release/0.8.3",
+  "policy": {
+    "version_policy": "lockstep",
+    "rule": "Every member's release branch declares core's version in the member's own version format while the line is in preparation (the pre-release, 0.8.3rc1) and at the final cut (0.8.3); the pre-release identity is set on core first and the members follow in the same cut; a member is tagged v<release> only after core's tag, never before.",
+    "gate": "scripts/check_family_sync.py exits 0 against every member's release-branch tip; the core checklist row 'Family release lines in sync' closes only on a receipt of that run, measured after core's final version is set and before any member is tagged.",
+    "documentation": "docs/family-release.rst"
+  },
+  "core": {
+    "name": "mixle",
+    "repository": "gmboquet/mixle",
+    "version_file": "pyproject.toml",
+    "version_format": "pep440"
+  },
+  "members": [
+    {
+      "name": "mixle-pde",
+      "repository": "gmboquet/mixle-pde",
+      "role": "python package, installed from its release branch (mixle.ppl plugin; depends on core)",
+      "version_file": "pyproject.toml",
+      "version_format": "pep440",
+      "changelog_file": "CHANGELOG.md",
+      "changelog_heading": "## 0.8.3rc1",
+      "core_pins": [
+        {"file": ".github/workflows/tests.yml", "must_contain": "mixle @ git+https://github.com/gmboquet/mixle.git@release/0.8.3"}
+      ],
+      "ci_workflow": ".github/workflows/tests.yml",
+      "release_checklist": "release-checklists/0.8.3.md"
+    },
+    {
+      "name": "mixle-discrete",
+      "repository": "gmboquet/mixle-discrete",
+      "role": "python package (distribution name mixle-numerics), installed from its release branch; numpy only, no core dependency",
+      "version_file": "pyproject.toml",
+      "version_format": "pep440",
+      "changelog_file": "CHANGELOG.md",
+      "changelog_heading": "## 0.8.3rc1",
+      "core_pins": [],
+      "ci_workflow": ".github/workflows/tests.yml",
+      "release_checklist": "release-checklists/0.8.3.md"
+    },
+    {
+      "name": "mixle-physics",
+      "repository": "gmboquet/mixle-physics",
+      "role": "python package, installed from its release branch; numpy only, no core dependency",
+      "version_file": "pyproject.toml",
+      "version_format": "pep440",
+      "changelog_file": "CHANGELOG.md",
+      "changelog_heading": "## 0.8.3rc1",
+      "core_pins": [],
+      "ci_workflow": ".github/workflows/tests.yml",
+      "release_checklist": "release-checklists/0.8.3.md"
+    },
+    {
+      "name": "mixle-sim",
+      "repository": "gmboquet/mixle-sim",
+      "role": "python package, installed from its release branch; numpy only, its integration extra names mixle-physics and mixle-numerics at the family version",
+      "version_file": "pyproject.toml",
+      "version_format": "pep440",
+      "changelog_file": "CHANGELOG.md",
+      "changelog_heading": "## 0.8.3rc1",
+      "core_pins": [
+        {"file": "pyproject.toml", "must_contain": "mixle-physics>=0.8.3rc1"},
+        {"file": "pyproject.toml", "must_contain": "mixle-numerics>=0.8.3rc1"}
+      ],
+      "ci_workflow": ".github/workflows/tests.yml",
+      "release_checklist": "release-checklists/0.8.3.md"
+    },
+    {
+      "name": "mixle-notebooks",
+      "repository": "gmboquet/mixle-notebooks",
+      "role": "notebook bundle; carries no version of its own and installs core and the members from their release branches",
+      "version_file": null,
+      "version_format": "none",
+      "changelog_file": "CHANGELOG.md",
+      "changelog_heading": "## 0.8.3",
+      "core_pins": [
+        {"file": "requirements.txt", "must_contain": "mixle @ git+https://github.com/gmboquet/mixle.git@release/0.8.3"},
+        {"file": "requirements.txt", "must_contain": "mixle-pde @ git+https://github.com/gmboquet/mixle-pde.git@release/0.8.3"},
+        {"file": "requirements.txt", "must_contain": "mixle-sim @ git+https://github.com/gmboquet/mixle-sim.git@release/0.8.3"},
+        {"file": "requirements.txt", "must_contain": "mixle-physics @ git+https://github.com/gmboquet/mixle-physics.git@release/0.8.3"}
+      ],
+      "ci_workflow": null,
+      "release_checklist": "release-checklists/0.8.3.md"
+    },
+    {
+      "name": "mixle-agent",
+      "repository": "gmboquet/mixle-agent",
+      "role": "private Node workspace (monorepo root and the cli, core and server packages carry the version in semver form)",
+      "version_file": "package.json",
+      "version_format": "semver",
+      "additional_version_files": ["packages/cli/package.json", "packages/core/package.json", "packages/server/package.json"],
+      "changelog_file": "CHANGELOG.md",
+      "changelog_heading": "## 0.8.3-rc.1",
+      "core_pins": [],
+      "ci_workflow": ".github/workflows/ci.yml",
+      "release_checklist": "release-checklists/0.8.3.md"
+    }
+  ],
+  "excluded": ["mixle-knowledge", "mixle-mlops", "mixle-demos", "mixle-ios"]
+}

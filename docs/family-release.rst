@@ -13,16 +13,29 @@ area and must be completed before any final publication claim.
 0.8.3 Scope Decision
 --------------------
 
-Mixle Core 0.8.3 is deliberately a **standalone core release**, not a
-coordinated family release. ``mixle-knowledge``, ``mixle-mlops``,
-``mixle-pde``, ``mixle-discrete``, ``mixle-agent``, ``mixle-demos``,
-``mixle-notebooks``, and ``mixle-ios`` are all excluded from the 0.8.3
-artifact, support, co-installation, and compatibility claims. They retain
-independent versions and release evidence.
+Mixle Core 0.8.3 is a **coordinated family line**. The versioned family
+manifest ``manifests/family_release.json`` names the members that track core
+-- ``mixle-pde``, ``mixle-discrete``, ``mixle-physics``, ``mixle-sim``,
+``mixle-notebooks`` and ``mixle-agent`` -- the branch they share with core
+(``release/0.8.3``) and the version they carry in lockstep with core through
+the same pre-release cycle: ``0.8.3rc1`` while the line is in preparation and
+``0.8.3`` at the final cut, spelled ``0.8.3-rc.1`` in the Node workspace. The
+pre-release identity is set on core first and the members follow in the same
+cut; a member is tagged only after core, never before. Each member keeps a
+release checklist of its own (``release-checklists/0.8.3.md``) patterned on
+core's, and the same commit-authorship rule as core.
 
-The process below applies only to a future release that explicitly adopts a
-versioned family manifest. Until then, it is a design for coordination rather
-than a gate on Core publication.
+``scripts/check_family_sync.py`` reads every member's release-branch tip and
+exits 0 only when each version, changelog heading and core pin matches the
+manifest; the core checklist row "Family release lines in sync" closes only on
+a receipt of that run. ``mixle-knowledge``, ``mixle-mlops``, ``mixle-demos``
+and ``mixle-ios`` are not members and stay excluded from the 0.8.3 artifact,
+support, co-installation, and compatibility claims.
+
+This lockstep is a version, branch and evidence coordination. The members are
+installed from their release branches, none is on a package index, and the
+0.8.3 core artifact is still published on its own: the co-install gate below
+remains a design for a future publication of the members, not a 0.8.3 gate.
 
 Package Roles
 -------------
@@ -60,6 +73,8 @@ Every repository in the family needs one explicit release role:
 Version Policy
 --------------
 
+The 0.8.3 line records the first of these in the family manifest: lockstep
+versions, with every member carrying core's version and pre-release identity.
 Before final publication, the release owner should choose and record one
 version policy:
 
@@ -109,8 +124,9 @@ The co-install evidence should prove:
 * ``mixle-knowledge`` validates contracts consumed by sibling packages; and
 * no package depends on an unpublished sibling version.
 
-No item in this section is claimed or required by the standalone Core 0.8.3
-release.
+No item in this section is claimed or required by the 0.8.3 line: the members
+are installed from source, not from a package index, so co-install evidence is
+not one of its gates.
 
 Publication Order
 -----------------

@@ -11,7 +11,8 @@ The rules deliberately separate ATTRIBUTION from SUBJECT MATTER. This library le
 and "ten AI adversarial reviews"; a check that flagged those would be turned off within a week. What
 is refused is a claim of authorship: an unrecognised ``*-by:`` trailer, a tool's e-mail address, a
 generated-by advertisement, or a bare vendor name, which has no reason to appear in this project's
-commit messages at all.
+commit messages at all. Since 2026-09-29 the bare word "AI" is refused too, by the owner's rule for
+every repository in the family: the same file, with the same rules, runs in each member's CI.
 """
 
 from __future__ import annotations
@@ -40,6 +41,13 @@ MARKERS = (
     (re.compile(r"anthropic", re.IGNORECASE), "names Anthropic"),
     (re.compile(r"\bchat\s?gpt\b", re.IGNORECASE), "names ChatGPT"),
     (re.compile(r"\bco-?pilot\b", re.IGNORECASE), "names Copilot"),
+    (re.compile(r"\bcodex\b", re.IGNORECASE), "names Codex"),
+    (re.compile(r"\bgemini\b", re.IGNORECASE), "names Gemini"),
+    (re.compile(r"\bgpt-[0-9]", re.IGNORECASE), "names a GPT model"),  # gpt-4o, GPT-5; not the gpt2 checkpoint name
+    # The owner's rule for every repository in the family (2026-09-29): the bare word "AI" does not
+    # appear in a commit message at all, the gate name "Ten AI adversarial reviews" included. Matched
+    # as a whole upper-case word so identifiers such as OpenAICompatLLM stay ordinary subject matter.
+    (re.compile(r"\bAI\b"), "names AI"),
     (re.compile(r"\U0001F916"), "carries the generated-by robot marker"),
     (re.compile(r"claude\.(com|ai)/|copilot\.github\.com|chat\.openai\.com", re.IGNORECASE), "links to a tool"),
     (re.compile(r"noreply@(anthropic|openai)\.com", re.IGNORECASE), "carries a tool mailbox"),

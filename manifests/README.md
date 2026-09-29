@@ -14,7 +14,11 @@ These committed JSON files are generated compatibility and governance baselines,
 - `public_claims.json` records material public claims, their evidence grades, and the exact public
   prose occurrences that are permitted by the claim-hygiene gate; and
 - `dependency_drift_policy.json` records the reviewed exclusive upper bound for every base and
-  runtime-extra dependency.
+  runtime-extra dependency; and
+- `family_release.json` names the sibling repositories that track this release line in lockstep
+  (branch, version in each member's format, changelog heading, core pins); `scripts/check_family_sync.py`
+  verifies it against every member's release-branch tip and is the receipt behind the checklist row
+  "Family release lines in sync" (`docs/family-release.rst`).
 
 Run the corresponding generator in `scripts/` after changing a governed surface. Drift tests compare
 the generated result with the reviewed file in this directory. Keeping the manifests together avoids

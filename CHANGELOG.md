@@ -17,6 +17,14 @@ error will be listed in the [0.8.3 migration guide](docs/migrations/0.8.3.md). U
 carries the pre-release version `0.8.3rc1`, so anything built from it is a PEP 440 pre-release that a default
 `pip install` never selects.
 
+### Release process
+
+- The sibling repositories track this line in lockstep. `manifests/family_release.json` names the members
+  (`mixle-pde`, `mixle-discrete`, `mixle-physics`, `mixle-sim`, `mixle-notebooks`, `mixle-agent`), the
+  shared branch and the version each carries in its own format; `scripts/check_family_sync.py` verifies every
+  member's release-branch tip against it and is the receipt behind the new checklist row "Family release lines
+  in sync" (`docs/family-release.rst`).
+
 ## [0.8.2] — 2026-09-17
 
 A patch release of the shipped 0.8.1 artifact: the same public surface, with the defects the ten

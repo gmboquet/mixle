@@ -55,22 +55,28 @@ class RuleTest(unittest.TestCase):
             "Generated with [Claude Code](https://claude.ai/code)",
             "Assisted-By: ChatGPT <someone@openai.com>",
             "written with GitHub Copilot",
+            "drafted by Codex and reviewed by hand",
+            "a Gemini pass over the docstrings",
+            "answers checked against gpt-4o",
+            "Ten AI adversarial reviews of the notebooks and examples",
+            "Requirements: REQ-AI-OPERABILITY, REQ-REPRODUCIBILITY, REQ-TRACEABILITY",
         ):
             self.assertTrue(self._markers(text), text)
 
     def test_subject_matter_is_not_attribution(self):
-        # Every one of these is a real line from this repository's history. A check that flags them
-        # is a check that gets ignored, so they are pinned as explicitly allowed.
+        # Real lines from this repository's history, plus identifiers that contain the letters "AI"
+        # without being the word. A check that flags them is a check that gets ignored, so they are
+        # pinned as explicitly allowed. (The bare word "AI" itself is refused since 2026-09-29, by the
+        # owner's rule for the whole family, so the two history lines that carried it moved above.)
         for text in (
             "regenerated with zero drift -- no new top-level names, only methods on classes",
             'failed with "api_manifest.json is stale". Regenerated with',
             "surface (generated with optional backends installed); the test tolerates a base environment",
             "peft-wrapped hf-internal-testing/tiny-random-gpt2 checkpoint dropped into GradLeaf",
             "none. openai/clip-vit-base-patch32 ships only pytorch_model.bin at the pinned revision",
-            "Requirements: REQ-AI-OPERABILITY, REQ-REPRODUCIBILITY, REQ-TRACEABILITY",
-            "mistake what this was: six AI review agents verified each of D-0001 through D-0132",
-            "Ten AI adversarial reviews of the notebooks and examples",
+            "OpenAICompatLLM keeps the provider-neutral surface; ai_operability stays a module name",
             "fix(reason/llm): tie-correct rank-sum AUC for factuality discrimination",
+            "raise the gain floor; the retained receipts say why",
         ):
             self.assertEqual(self._markers(text), [], text)
 
