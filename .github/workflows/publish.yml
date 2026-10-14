@@ -172,7 +172,7 @@ jobs:
             --predicate-type https://github.com/gmboquet/mixle/release-check-evidence/v1 \
             --deny-self-hosted-runners \
             --format json > /dev/null
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: candidate-approval-${{ steps.candidate.outputs.sha }}-${{ inputs.phase }}
           path: ${{ runner.temp }}/approval/
@@ -312,7 +312,7 @@ jobs:
               --entry "$entry" --records-root . > "$RUNNER_TEMP/reproduction-$entry.json"
             mv "$RUNNER_TEMP/reproduction-$entry.json" "metadata/reproduction-$entry.json"
           done
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-candidate-${{ needs.verify-candidate.outputs.candidate-sha }}
           path: |
@@ -435,7 +435,7 @@ jobs:
           "$RUNNER_TEMP/testpypi-env/bin/python" -m pip install testpypi-artifacts/*.whl
           "$RUNNER_TEMP/testpypi-env/bin/python" scripts/import_sweep.py
           python -c 'import hashlib,json,os,pathlib; sums=pathlib.Path("candidate/metadata/SHA256SUMS"); pathlib.Path("testpypi-rehearsal.json").write_text(json.dumps({"artifact":"mixle.testpypi_rehearsal/v1","candidate_commit":os.environ["CANDIDATE_SHA"],"prepare_run":int(os.environ["PREPARE_RUN_ID"]),"sums_sha256":hashlib.sha256(sums.read_bytes()).hexdigest(),"passed":True},sort_keys=True)+"\n")'
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: testpypi-rehearsal-${{ needs.verify-candidate.outputs.candidate-sha }}
           path: testpypi-rehearsal.json

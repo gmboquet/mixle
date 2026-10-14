@@ -89,7 +89,7 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           python -c 'import hashlib,json,os,pathlib; files=sorted(pathlib.Path("public-artifacts").iterdir()); pathlib.Path("public-index-receipt.json").write_text(json.dumps({"artifact":"mixle.public_index_identity/v1","version":os.environ["VERSION"],"files":{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in files},"passed":True},sort_keys=True)+"\n")'
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: public-index-identity-${{ matrix.os }}-py${{ matrix.python-version }}
           path: public-index-receipt.json
