@@ -97,7 +97,7 @@ jobs:
             --profile base \
             --waivers accepted-waivers.json \
             --out sbom.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: sbom-${{ github.sha }}
           path: |
@@ -159,7 +159,7 @@ jobs:
             --profile all \
             --waivers accepted-waivers-all.json \
             --out sbom-all.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: sbom-all-${{ github.sha }}
           path: |
@@ -185,7 +185,7 @@ jobs:
           "$RUNNER_TEMP/bandit-tool/bin/python" -m pip install --upgrade pip "bandit[toml]==1.8.6"
           "$RUNNER_TEMP/bandit-tool/bin/bandit" -r mixle scripts \
             -x mixle/tests -ll -ii -f json -o bandit.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: bandit-${{ github.sha }}

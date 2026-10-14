@@ -97,7 +97,7 @@ jobs:
             --profile "$PROFILE" \
             --candidate-sha "$CANDIDATE_SHA" \
             --out "extra-receipt-$PROFILE.json"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: extra-receipt-${{ matrix.extra }}
           path: extra-receipt-${{ matrix.extra }}.json
@@ -131,7 +131,7 @@ jobs:
             --profile "$PROFILE" \
             --candidate-sha "$CANDIDATE_SHA" \
             --out "extra-floor-receipt-$PROFILE.json"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: extra-floor-receipt-${{ matrix.extra }}
           path: extra-floor-receipt-${{ matrix.extra }}.json
@@ -173,7 +173,7 @@ jobs:
             --policy release-checklists/0.8.2-extra-profiles.json \
             --candidate-sha "$CANDIDATE_SHA" \
             --out extra-floor-profile-set-receipt.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: extra-profile-set-${{ github.sha }}
           path: |
